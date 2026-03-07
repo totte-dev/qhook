@@ -1,0 +1,30 @@
+# Stripe Checkout example
+# Usage: docker compose up
+services:
+  qhook:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./qhook.yaml:/data/qhook.yaml:ro
+      - qhook-data:/data
+    environment:
+      RUST_LOG: qhook=info
+      STRIPE_WEBHOOK_SECRET: whsec_test_secret
+    depends_on:
+      - app
+
+  app:
+    image: python:3.12-slim
+    working_dir: /app
+    volumes:
+      - ./app.py:/app/app.py:ro
+    command: >
+      sh -c "pip install --quiet flask && python app.py"
+    expose:
+      - "5000"
+
+volumes:
+  qhook-data:

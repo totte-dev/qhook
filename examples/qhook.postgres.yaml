@@ -1,0 +1,27 @@
+# qhook config (Postgres)
+
+database:
+  driver: postgres
+  url: ${DATABASE_URL}
+
+server:
+  port: 8888
+
+delivery:
+  timeout: 30s
+  default_retry:
+    max: 5
+    backoff: exponential
+    interval: 30s
+
+# Event sources
+sources:
+  app:
+    type: event
+
+# Handlers - deliver received events to the specified URL
+handlers:
+  order-webhook:
+    source: app
+    events: [order.created]
+    url: http://localhost:3000/webhooks/orders

@@ -1,0 +1,40 @@
+# qhook config for Stripe Checkout example
+
+database:
+  driver: sqlite
+
+server:
+  port: 8888
+
+delivery:
+  timeout: 30s
+  default_retry:
+    max: 5
+    backoff: exponential
+    interval: 30s
+
+# Stripe webhook source (with signature verification)
+sources:
+  stripe:
+    type: webhook
+    verify: stripe
+    secret: ${STRIPE_WEBHOOK_SECRET}
+
+# Fan-out: one event delivered to multiple handlers
+handlers:
+  # Payment handler -- aggressive retry, longer timeout
+  payment-success:
+    source: stripe
+    events: [checkout.session.completed]
+    url: http://app:5000/jobs/payment
+    idempotency_key: "$.id"
+    retry: { max: 8, backoff: exponential, interval: 10s }
+    timeout: 60s
+
+  # Fulfillment handler -- standard retry
+  fulfillment:
+    source: stripe
+    events: [checkout.session.completed]
+    url: http://app:5000/jobs/fulfillment
+    idempotency_key: "$.id"
+    retry: { max: 3, backoff: exponential, interval: 30s }

@@ -1,0 +1,14 @@
+# qhook - SQLite (local dev / quick start)
+services:
+  qhook:
+    build: .
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./examples/qhook.yaml:/data/qhook.yaml:ro
+      - qhook-data:/data
+    environment:
+      RUST_LOG: qhook=info
+
+volumes:
+  qhook-data:
