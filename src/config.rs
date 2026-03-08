@@ -137,6 +137,8 @@ pub struct HandlerConfig {
     pub retry: Option<RetryConfig>,
     pub timeout: Option<String>,
     pub idempotency_key: Option<String>,
+    /// Max deliveries per second for this handler (optional).
+    pub rate_limit: Option<u32>,
 }
 
 impl Config {
@@ -202,7 +204,12 @@ fn expand_env_vars(input: &str) -> String {
             } else {
                 std::env::var(expr).unwrap_or_default()
             };
-            result = format!("{}{}{}", &result[..start], value, &result[start + end + 1..]);
+            result = format!(
+                "{}{}{}",
+                &result[..start],
+                value,
+                &result[start + end + 1..]
+            );
         } else {
             break;
         }
