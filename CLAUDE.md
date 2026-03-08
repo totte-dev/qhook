@@ -73,13 +73,14 @@ docs/           — Deployment guides, why-qhook comparison
 
 ## Conventions
 
-- **Language**: Code and comments in English. User communication in Japanese.
+- **Language**: Code, comments, and all documentation in English. Exception: `docs/private/` may be in Japanese. User communication in Japanese.
 - **Source type strings**: `webhook`, `event`, `sns` (in config YAML and source_type field).
 - **Event type extraction order**: CloudEvents `ce-type` header → structured mode `type` field → provider-specific logic.
 - **Database**: SQLite for dev/testing, Postgres for production. Both via sqlx AnyPool.
 - **IDs**: ULID for event_id and job_id.
 - **Timestamps**: UTC, format `%Y-%m-%dT%H:%M:%S%.3f` stored as TEXT.
 - **Config env vars**: `${VAR}` or `${VAR:-default}` syntax.
+- **Rust version**: 1.85+ (edition 2024). Use latest stable features (e.g., let chains).
 - **Version**: Currently v0.2.0. Update in Cargo.toml for releases.
 - **Docker image**: `ghcr.io/totte-dev/qhook`. Multi-stage build, ~119MB.
 - **Commit**: Include `Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>`.

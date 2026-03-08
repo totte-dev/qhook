@@ -2,6 +2,7 @@
 name = "qhook"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Lightweight event gateway with queue and retry. SQS for webhooks and events."
 license = "Apache-2.0"
 

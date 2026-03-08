@@ -5,6 +5,7 @@
 <!-- badges -->
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
+[![CI](https://github.com/totte-dev/qhook/actions/workflows/ci.yml/badge.svg)](https://github.com/totte-dev/qhook/actions/workflows/ci.yml)
 
 ---
 
