@@ -31,7 +31,7 @@ exclude = [
 # Web
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 tower-http = { version = "0.6", features = ["trace", "limit"] }
 
 # DB
@@ -51,15 +51,15 @@ subtle = "2"
 rsa = "0.9"
 sha1 = { version = "0.10", features = ["oid"] }
 pkcs1 = "0.7"
-x509-parser = "0.16"
+x509-parser = "0.18"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
 
 # gRPC
-tonic = { version = "0.12", default-features = false, features = ["transport", "prost", "channel"] }
+tonic = { version = "0.14", default-features = false, features = ["transport", "prost", "channel"] }
 http = "1"
-prost = "0.13"
+prost = "0.14"
 
 # Utilities
 ulid = "1"
