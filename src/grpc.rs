@@ -52,7 +52,9 @@ pub async fn deliver(channel: &Channel, request: DeliverRequest) -> Result<Deliv
     let codec: tonic::codec::ProstCodec<DeliverRequest, DeliverResponse> =
         tonic::codec::ProstCodec::default();
 
-    let response = client.unary(tonic::Request::new(request), path, codec).await?;
+    let response = client
+        .unary(tonic::Request::new(request), path, codec)
+        .await?;
     Ok(response.into_inner())
 }
 

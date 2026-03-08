@@ -112,9 +112,8 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
     {
         let path = config_path.clone();
         tokio::spawn(async move {
-            let mut sig =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-                    .expect("failed to listen for SIGHUP");
+            let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+                .expect("failed to listen for SIGHUP");
             loop {
                 sig.recv().await;
                 match crate::config::Config::load(&path) {
@@ -224,7 +223,10 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
     // Per-IP rate limiting middleware (if configured)
     if ip_rate_limit > 0 {
         let limiter = Arc::new(IpRateLimiter::new(ip_rate_limit));
-        tracing::info!(limit = ip_rate_limit, "Per-IP rate limiting enabled (req/s)");
+        tracing::info!(
+            limit = ip_rate_limit,
+            "Per-IP rate limiting enabled (req/s)"
+        );
 
         // Background cleanup task
         let cleanup_limiter = limiter.clone();
@@ -628,11 +630,7 @@ async fn process_event(
         // Apply JSONPath filter — skip job creation if filter doesn't match
         if let Some(ref filter) = handler.filter {
             if !evaluate_filter(payload, filter) {
-                tracing::debug!(
-                    handler = *handler_name,
-                    filter,
-                    "Event filtered out"
-                );
+                tracing::debug!(handler = *handler_name, filter, "Event filtered out");
                 continue;
             }
         }
@@ -772,8 +770,7 @@ fn event_matches(pattern: &str, event_type: &str) -> bool {
 }
 
 fn extract_json_path(payload: &str, path: &str) -> Option<String> {
-    extract_json_path_value(payload, path)
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
+    extract_json_path_value(payload, path).and_then(|v| v.as_str().map(|s| s.to_string()))
 }
 
 fn extract_json_path_value(payload: &str, path: &str) -> Option<Value> {
@@ -832,7 +829,10 @@ fn evaluate_filter(payload: &str, filter: &str) -> bool {
         let path = path.trim();
         let set_str = set_str.trim();
         if let Some(inner) = set_str.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            let values: Vec<&str> = inner.split(',').map(|v| v.trim().trim_matches('"')).collect();
+            let values: Vec<&str> = inner
+                .split(',')
+                .map(|v| v.trim().trim_matches('"'))
+                .collect();
             return match extract_json_path_value(payload, path) {
                 Some(Value::String(s)) => values.contains(&s.as_str()),
                 Some(Value::Number(n)) => values.contains(&n.to_string().as_str()),
@@ -899,9 +899,7 @@ fn serialize_headers(headers: &HeaderMap) -> String {
         .filter_map(|(k, v)| {
             let name = k.as_str();
             if name.starts_with("ce-") || name == "content-type" {
-                v.to_str()
-                    .ok()
-                    .map(|v| (name.to_string(), v.to_string()))
+                v.to_str().ok().map(|v| (name.to_string(), v.to_string()))
             } else {
                 None
             }
@@ -1149,10 +1147,7 @@ mod tests {
             payload,
             r#"$.type in [order.created, order.updated]"#
         ));
-        assert!(!evaluate_filter(
-            payload,
-            r#"$.type in [payment.success]"#
-        ));
+        assert!(!evaluate_filter(payload, r#"$.type in [payment.success]"#));
     }
 
     #[test]
@@ -1171,7 +1166,10 @@ mod tests {
     fn test_filter_nested_path() {
         let payload = r#"{"data": {"object": {"status": "active"}}}"#;
         assert!(evaluate_filter(payload, "$.data.object.status == active"));
-        assert!(!evaluate_filter(payload, "$.data.object.status == inactive"));
+        assert!(!evaluate_filter(
+            payload,
+            "$.data.object.status == inactive"
+        ));
     }
 
     // --- Payload transformation ---
@@ -1179,7 +1177,8 @@ mod tests {
     #[test]
     fn test_transform_simple() {
         let payload = r#"{"id": "evt_1", "data": {"name": "Alice", "amount": 42}}"#;
-        let template = r#"{"event_id": "{{$.id}}", "user": "{{$.data.name}}", "total": {{$.data.amount}}}"#;
+        let template =
+            r#"{"event_id": "{{$.id}}", "user": "{{$.data.name}}", "total": {{$.data.amount}}}"#;
         let result = apply_transform(payload, template);
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["event_id"], "evt_1");

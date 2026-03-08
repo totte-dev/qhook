@@ -246,7 +246,12 @@ impl Database {
         };
         let elapsed = start.elapsed().as_millis();
         if elapsed > SLOW_QUERY_MS {
-            tracing::warn!(query = "fetch_available_jobs", duration_ms = elapsed, rows = rows.len(), "Slow query");
+            tracing::warn!(
+                query = "fetch_available_jobs",
+                duration_ms = elapsed,
+                rows = rows.len(),
+                "Slow query"
+            );
         }
 
         Ok(rows)
@@ -453,7 +458,11 @@ impl Database {
         .await?;
         let elapsed = start.elapsed().as_millis();
         if elapsed > SLOW_QUERY_MS {
-            tracing::warn!(query = "recover_stale_jobs", duration_ms = elapsed, "Slow query");
+            tracing::warn!(
+                query = "recover_stale_jobs",
+                duration_ms = elapsed,
+                "Slow query"
+            );
         }
 
         Ok(result.rows_affected())
@@ -482,7 +491,11 @@ impl Database {
         .await?;
         let elapsed = start.elapsed().as_millis();
         if elapsed > SLOW_QUERY_MS {
-            tracing::warn!(query = "cleanup_old_records", duration_ms = elapsed, "Slow query");
+            tracing::warn!(
+                query = "cleanup_old_records",
+                duration_ms = elapsed,
+                "Slow query"
+            );
         }
 
         Ok((jobs.rows_affected(), attempts.rows_affected()))
