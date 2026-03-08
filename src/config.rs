@@ -275,13 +275,13 @@ impl Config {
                 other => anyhow::bail!("source '{}' has invalid type '{}'", name, other),
             }
             // Require secret when signature verification is enabled
-            if source.verify.is_some() {
-                if source.secret.as_ref().is_none_or(|s| s.is_empty()) {
-                    anyhow::bail!(
-                        "source '{}' has verify enabled but no secret configured",
-                        name
-                    );
-                }
+            if source.verify.is_some()
+                && source.secret.as_ref().is_none_or(|s| s.is_empty())
+            {
+                anyhow::bail!(
+                    "source '{}' has verify enabled but no secret configured",
+                    name
+                );
             }
         }
 
