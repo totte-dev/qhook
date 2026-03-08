@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-qhook is a lightweight webhook receiver with built-in queue and retry. Rust (axum + sqlx + reqwest).
+qhook is a lightweight event gateway with built-in queue and retry. Rust (axum + sqlx + reqwest).
 
 ## Development Workflow
 
