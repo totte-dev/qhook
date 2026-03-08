@@ -20,11 +20,7 @@ pub fn verify_signature(
     }
 }
 
-fn verify_stripe(
-    secret: &str,
-    payload: &[u8],
-    headers: &axum::http::HeaderMap,
-) -> Result<bool> {
+fn verify_stripe(secret: &str, payload: &[u8], headers: &axum::http::HeaderMap) -> Result<bool> {
     let sig_header = headers
         .get("Stripe-Signature")
         .and_then(|v| v.to_str().ok())
@@ -53,11 +49,7 @@ fn verify_stripe(
     Ok(constant_time_eq(&expected, signature))
 }
 
-fn verify_github(
-    secret: &str,
-    payload: &[u8],
-    headers: &axum::http::HeaderMap,
-) -> Result<bool> {
+fn verify_github(secret: &str, payload: &[u8], headers: &axum::http::HeaderMap) -> Result<bool> {
     let sig_header = headers
         .get("X-Hub-Signature-256")
         .and_then(|v| v.to_str().ok())
@@ -72,11 +64,7 @@ fn verify_github(
     Ok(constant_time_eq(&expected, signature))
 }
 
-fn verify_shopify(
-    secret: &str,
-    payload: &[u8],
-    headers: &axum::http::HeaderMap,
-) -> Result<bool> {
+fn verify_shopify(secret: &str, payload: &[u8], headers: &axum::http::HeaderMap) -> Result<bool> {
     let sig_header = headers
         .get("X-Shopify-Hmac-SHA256")
         .and_then(|v| v.to_str().ok())
@@ -161,10 +149,7 @@ pub struct SnsMessage {
     pub unsubscribe_url: Option<String>,
 }
 
-pub async fn verify_sns_message(
-    msg: &SnsMessage,
-    http: &reqwest::Client,
-) -> Result<bool> {
+pub async fn verify_sns_message(msg: &SnsMessage, http: &reqwest::Client) -> Result<bool> {
     let cert_url = &msg.signing_cert_url;
 
     // Validate the signing cert URL is from SNS
@@ -174,12 +159,7 @@ pub async fn verify_sns_message(
     }
 
     // Fetch the signing certificate
-    let pem_data = http
-        .get(cert_url)
-        .send()
-        .await?
-        .bytes()
-        .await?;
+    let pem_data = http.get(cert_url).send().await?.bytes().await?;
 
     // Parse X.509 certificate
     let (_, pem) = x509_parser::pem::parse_x509_pem(&pem_data)
@@ -217,7 +197,10 @@ pub async fn verify_sns_message(
             vk.verify(string_to_sign.as_bytes(), &sig).is_ok()
         }
         _ => {
-            tracing::warn!(version = msg.signature_version, "Unknown SNS SignatureVersion");
+            tracing::warn!(
+                version = msg.signature_version,
+                "Unknown SNS SignatureVersion"
+            );
             false
         }
     };
@@ -409,9 +392,13 @@ mod tests {
 
     #[test]
     fn test_sns_cert_url_invalid() {
-        assert!(!is_valid_sns_cert_url("http://sns.us-east-1.amazonaws.com/cert.pem")); // http
+        assert!(!is_valid_sns_cert_url(
+            "http://sns.us-east-1.amazonaws.com/cert.pem"
+        )); // http
         assert!(!is_valid_sns_cert_url("https://evil.com/cert.pem")); // wrong domain
-        assert!(!is_valid_sns_cert_url("https://sns.us-east-1.evil.com/cert.pem")); // spoofed
+        assert!(!is_valid_sns_cert_url(
+            "https://sns.us-east-1.evil.com/cert.pem"
+        )); // spoofed
         assert!(!is_valid_sns_cert_url("https://amazonaws.com/cert.pem")); // missing sns prefix
     }
 
@@ -474,13 +461,17 @@ mod tests {
             signing_cert_url: String::new(),
             signature_version: "1".into(),
             subject: None,
-            subscribe_url: Some("https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription".into()),
+            subscribe_url: Some(
+                "https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription".into(),
+            ),
             token: Some("token-abc".into()),
             unsubscribe_url: None,
         };
 
         let result = build_sns_string_to_sign(&msg);
-        assert!(result.contains("SubscribeURL\nhttps://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription\n"));
+        assert!(result.contains(
+            "SubscribeURL\nhttps://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription\n"
+        ));
         assert!(result.contains("Token\ntoken-abc\n"));
         assert!(result.contains("Type\nSubscriptionConfirmation\n"));
     }

@@ -23,3 +23,6 @@ Thumbs.db
 
 # Docker
 docker-compose.override.yaml
+
+# Private docs
+docs/private/

@@ -13,13 +13,10 @@ pub struct Database {
 impl Database {
     pub async fn connect(config: &DatabaseConfig) -> Result<Self> {
         let url = match config.driver.as_str() {
-            "sqlite" => {
-                let url = config
-                    .url
-                    .clone()
-                    .unwrap_or_else(|| "sqlite:qhook.db?mode=rwc".into());
-                url
-            }
+            "sqlite" => config
+                .url
+                .clone()
+                .unwrap_or_else(|| "sqlite:qhook.db?mode=rwc".into()),
             "postgres" => config
                 .url
                 .clone()
@@ -133,7 +130,10 @@ impl Database {
         headers: Option<&str>,
         unique_key: Option<&str>,
     ) -> Result<bool> {
-        let now = Utc::now().naive_utc().format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
 
         // Try insert; if unique_key conflicts, return false (duplicate)
         if unique_key.is_some() {
@@ -180,7 +180,10 @@ impl Database {
         url: &str,
         max_attempts: u32,
     ) -> Result<()> {
-        let now = Utc::now().naive_utc().format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
 
         sqlx::query(
             "INSERT INTO jobs (id, event_id, handler, url, status, max_attempts, scheduled_at, created_at) \
@@ -198,26 +201,58 @@ impl Database {
         Ok(())
     }
 
+    /// Fetch jobs ready for processing.
+    /// For Postgres: uses FOR UPDATE SKIP LOCKED + immediate status update in one query.
+    /// For SQLite: plain SELECT (use mark_job_running separately).
     pub async fn fetch_available_jobs(&self, limit: i32) -> Result<Vec<JobRow>> {
-        let now = Utc::now().naive_utc().format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
 
-        let rows = sqlx::query_as::<_, JobRow>(
-            "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
-             FROM jobs \
-             WHERE status IN ('available', 'retryable') AND scheduled_at <= $1 \
-             ORDER BY scheduled_at ASC \
-             LIMIT $2",
-        )
-        .bind(&now)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+        if self.driver == "postgres" {
+            // Atomic fetch-and-lock: no race between multiple workers.
+            // Return attempt - 1 so the caller sees the pre-update value (same as SQLite path).
+            let rows = sqlx::query_as::<_, JobRow>(
+                "UPDATE jobs SET status = 'running', started_at = $1, attempt = attempt + 1 \
+                 WHERE id IN ( \
+                     SELECT id FROM jobs \
+                     WHERE status IN ('available', 'retryable') AND scheduled_at <= $1 \
+                     ORDER BY scheduled_at ASC \
+                     LIMIT $2 \
+                     FOR UPDATE SKIP LOCKED \
+                 ) \
+                 RETURNING id, event_id, handler, url, status, attempt - 1 AS attempt, max_attempts, scheduled_at, last_error",
+            )
+            .bind(&now)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
 
-        Ok(rows)
+            Ok(rows)
+        } else {
+            let rows = sqlx::query_as::<_, JobRow>(
+                "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
+                 FROM jobs \
+                 WHERE status IN ('available', 'retryable') AND scheduled_at <= $1 \
+                 ORDER BY scheduled_at ASC \
+                 LIMIT $2",
+            )
+            .bind(&now)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+
+            Ok(rows)
+        }
     }
 
+    /// Mark a job as running (SQLite only — Postgres does this in fetch_available_jobs).
     pub async fn mark_job_running(&self, job_id: &str) -> Result<bool> {
-        let now = Utc::now().naive_utc().format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
 
         let result = sqlx::query(
             "UPDATE jobs SET status = 'running', started_at = $1, attempt = attempt + 1 \
@@ -232,7 +267,10 @@ impl Database {
     }
 
     pub async fn mark_job_completed(&self, job_id: &str) -> Result<()> {
-        let now = Utc::now().naive_utc().format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
 
         sqlx::query("UPDATE jobs SET status = 'completed', completed_at = $1 WHERE id = $2")
             .bind(&now)
@@ -264,7 +302,10 @@ impl Database {
     }
 
     pub async fn mark_job_dead(&self, job_id: &str, error: &str) -> Result<()> {
-        let now = Utc::now().naive_utc().format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
 
         sqlx::query(
             "UPDATE jobs SET status = 'dead', completed_at = $1, last_error = $2 WHERE id = $3",
@@ -278,6 +319,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert_attempt(
         &self,
         id: &str,
@@ -288,7 +330,10 @@ impl Database {
         error: Option<&str>,
         duration_ms: i64,
     ) -> Result<()> {
-        let now = Utc::now().naive_utc().format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
 
         sqlx::query(
             "INSERT INTO job_attempts (id, job_id, attempt, status_code, response_body, error, duration_ms, created_at) \
@@ -360,7 +405,10 @@ impl Database {
     }
 
     pub async fn retry_dead_jobs(&self) -> Result<u64> {
-        let now = Utc::now().naive_utc().format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
         let result = sqlx::query(
             "UPDATE jobs SET status = 'available', scheduled_at = $1, last_error = NULL WHERE status = 'dead'",
         )
@@ -370,8 +418,70 @@ impl Database {
         Ok(result.rows_affected())
     }
 
+    /// Reset jobs stuck in 'running' for longer than `stale_secs` back to 'retryable'.
+    pub async fn recover_stale_jobs(&self, stale_secs: i64) -> Result<u64> {
+        let now = Utc::now().naive_utc();
+        let cutoff = (now - chrono::Duration::seconds(stale_secs))
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
+        let now_str = now.format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
+
+        let result = sqlx::query(
+            "UPDATE jobs SET status = 'retryable', scheduled_at = $1 \
+             WHERE status = 'running' AND started_at <= $2",
+        )
+        .bind(&now_str)
+        .bind(&cutoff)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Delete completed/dead jobs (and their attempts) older than `retention_hours`.
+    pub async fn cleanup_old_records(&self, retention_hours: i64) -> Result<(u64, u64)> {
+        let cutoff = (Utc::now().naive_utc() - chrono::Duration::hours(retention_hours))
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
+
+        let attempts = sqlx::query(
+            "DELETE FROM job_attempts WHERE job_id IN \
+             (SELECT id FROM jobs WHERE status IN ('completed', 'dead') AND completed_at < $1)",
+        )
+        .bind(&cutoff)
+        .execute(&self.pool)
+        .await?;
+
+        let jobs = sqlx::query(
+            "DELETE FROM jobs WHERE status IN ('completed', 'dead') AND completed_at < $1",
+        )
+        .bind(&cutoff)
+        .execute(&self.pool)
+        .await?;
+
+        Ok((jobs.rows_affected(), attempts.rows_affected()))
+    }
+
+    pub async fn queue_depth(&self) -> Result<i64> {
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM jobs WHERE status IN ('available', 'retryable')")
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(row.0)
+    }
+
+    pub async fn dead_job_count(&self) -> Result<i64> {
+        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM jobs WHERE status = 'dead'")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.0)
+    }
+
     pub async fn retry_job(&self, job_id: &str) -> Result<bool> {
-        let now = Utc::now().naive_utc().format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
         let result = sqlx::query(
             "UPDATE jobs SET status = 'available', scheduled_at = $1, last_error = NULL \
              WHERE id = $2 AND status IN ('dead', 'retryable')",

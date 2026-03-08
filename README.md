@@ -12,7 +12,8 @@
 
 - **No infrastructure tax.** Single binary, no Redis, no RabbitMQ, no SQS. SQLite for local dev, Postgres for production.
 - **Webhook verification built in.** GitHub, Stripe, Shopify, and generic HMAC -- signature checks happen before your app ever sees the payload.
-- **Reliable delivery.** Exponential backoff retry with configurable limits. Dead Letter Queue for jobs that exhaust all attempts.
+- **Reliable delivery.** Exponential backoff retry with configurable limits. Dead Letter Queue for jobs that exhaust all attempts. Graceful shutdown drains in-flight deliveries.
+- **Production ready.** Prometheus metrics, health checks with queue depth, auto-cleanup of old records, stale job recovery.
 - **Idempotency.** Configurable dedup key (JSONPath) prevents double-processing of the same event.
 - **CloudEvents native.** Automatically detects CloudEvents (binary and structured mode) and forwards `ce-*` headers to your handlers.
 - **AWS SNS ready.** Receive events from SNS topics with automatic subscription confirmation and X.509 signature verification.
@@ -133,6 +134,7 @@ handlers:
     retry: { max: 8 }              # override default_retry per handler
     timeout: 60s                   # override delivery timeout per handler
     idempotency_key: "$.id"        # JSONPath to dedup key in payload
+    rate_limit: 10                 # max 10 deliveries/sec to this handler (optional)
 
   deploy-on-push:
     source: github
@@ -352,7 +354,51 @@ Webhook / SNS / Event     qhook                          Your App
 | `POST /webhooks/{source}` | Receive external webhooks (signature verified) |
 | `POST /sns/{source}` | Receive AWS SNS messages (X.509 verified, auto-confirms subscriptions) |
 | `POST /events/{event_type}` | Receive internal events (bearer token auth, CloudEvents-aware) |
-| `GET /health` | Health check |
+| `GET /health` | Health check (JSON: status + queue depth, 503 if DB unreachable) |
+| `GET /metrics` | Prometheus metrics |
+
+## Monitoring
+
+### Health check
+
+```bash
+curl http://localhost:8888/health
+# {"status":"ok","queue_depth":3}
+```
+
+Returns `200` with `queue_depth` when healthy, `503` if the database is unreachable. Use as a readiness probe in Kubernetes / ECS.
+
+### Prometheus metrics
+
+```bash
+curl http://localhost:8888/metrics
+```
+
+Exposed metrics:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `qhook_events_received_total` | counter | Total events received |
+| `qhook_events_duplicated_total` | counter | Duplicate events ignored |
+| `qhook_jobs_created_total` | counter | Total jobs created |
+| `qhook_deliveries_total{result}` | counter | Delivery attempts (success/failure) |
+| `qhook_delivery_duration_seconds_sum` | counter | Total delivery duration |
+| `qhook_delivery_duration_seconds_count` | counter | Total delivery attempts |
+| `qhook_queue_depth` | gauge | Jobs waiting to be delivered |
+| `qhook_dead_jobs` | gauge | Jobs in dead letter queue |
+
+No external dependencies -- metrics are formatted using atomic counters.
+
+## Reliability
+
+qhook is designed to not lose events, even during crashes or restarts.
+
+- **Graceful shutdown**: On SIGTERM/SIGINT, qhook stops accepting new requests and waits for in-flight deliveries to complete before exiting.
+- **Stale job recovery**: Jobs stuck in `running` for over 5 minutes are automatically recovered and retried (on startup and hourly).
+- **Auto cleanup**: Completed and dead jobs older than 72 hours are automatically purged to prevent database growth.
+- **Concurrent delivery**: Up to 10 jobs are delivered in parallel with adaptive polling (50ms when busy, 1s when idle).
+- **Rate limiting**: Set `rate_limit` on a handler to cap deliveries per second and protect downstream services.
+- **Multi-instance safe (Postgres)**: Uses `SELECT ... FOR UPDATE SKIP LOCKED` to prevent duplicate delivery across multiple qhook instances.
 
 ## Deployment
 

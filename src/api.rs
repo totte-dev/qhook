@@ -13,12 +13,14 @@ use serde_json::Value;
 
 use crate::config::Config;
 use crate::db::Database;
+use crate::metrics::Metrics;
 use crate::queue::Worker;
 
 pub struct AppState {
     pub config: Config,
     pub db: Arc<Database>,
     pub http: reqwest::Client,
+    pub metrics: Arc<Metrics>,
 }
 
 impl AppState {
@@ -31,6 +33,7 @@ impl AppState {
             config,
             db: Arc::new(db),
             http,
+            metrics: Arc::new(Metrics::new()),
         }
     }
 }
@@ -54,9 +57,23 @@ pub async fn serve(state: AppState) -> Result<()> {
         }
     }
 
-    // Start queue worker
-    let worker = Worker::new(shared.db.clone());
-    tokio::spawn(async move {
+    // Shutdown signal for the worker
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let rate_limits: std::collections::HashMap<String, u32> = shared
+        .config
+        .handlers
+        .iter()
+        .filter_map(|(name, h)| h.rate_limit.map(|r| (name.clone(), r)))
+        .collect();
+
+    let worker = Worker::new(
+        shared.db.clone(),
+        shared.metrics.clone(),
+        shutdown_rx,
+        rate_limits,
+    );
+    let worker_handle = tokio::spawn(async move {
         worker.run().await;
     });
 
@@ -64,16 +81,51 @@ pub async fn serve(state: AppState) -> Result<()> {
         .route("/webhooks/{source}", post(handle_webhook))
         .route("/events/{event_type}", post(handle_event))
         .route("/sns/{source}", post(handle_sns))
-        .route("/health", axum::routing::get(|| async { "ok" }))
+        .route("/health", axum::routing::get(handle_health))
+        .route("/metrics", axum::routing::get(handle_metrics))
         .with_state(shared);
 
     let addr = format!("0.0.0.0:{port}");
     tracing::info!("qhook running on :{port}");
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
+    // HTTP server stopped, now stop the worker
+    tracing::info!("HTTP server stopped, shutting down worker...");
+    let _ = shutdown_tx.send(true);
+    worker_handle.await?;
+
+    tracing::info!("qhook stopped");
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to listen for ctrl+c");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to listen for SIGTERM")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    tracing::info!("Shutdown signal received");
 }
 
 async fn handle_webhook(
@@ -284,11 +336,18 @@ async fn handle_sns(
             }
         }
         "UnsubscribeConfirmation" => {
-            tracing::info!(source = source_name, "SNS unsubscribe confirmation received");
+            tracing::info!(
+                source = source_name,
+                "SNS unsubscribe confirmation received"
+            );
             (StatusCode::OK, "Unsubscribe acknowledged".to_string())
         }
         other => {
-            tracing::warn!(source = source_name, message_type = other, "Unknown SNS message type");
+            tracing::warn!(
+                source = source_name,
+                message_type = other,
+                "Unknown SNS message type"
+            );
             (StatusCode::BAD_REQUEST, "Unknown message type".to_string())
         }
     }
@@ -341,7 +400,10 @@ async fn process_event(
         )
         .await?;
 
+    state.metrics.inc_events_received();
+
     if !created {
+        state.metrics.inc_events_duplicated();
         tracing::info!(source, event_type, "Duplicate event");
         return Ok(false);
     }
@@ -360,6 +422,7 @@ async fn process_event(
             .insert_job(&job_id, &event_id, handler_name, &handler.url, max_attempts)
             .await?;
 
+        state.metrics.inc_jobs_created();
         tracing::info!(
             event_id,
             job_id,
@@ -370,6 +433,34 @@ async fn process_event(
     }
 
     Ok(true)
+}
+
+async fn handle_health(State(state): State<SharedState>) -> impl IntoResponse {
+    match state.db.queue_depth().await {
+        Ok(depth) => {
+            let body = serde_json::json!({
+                "status": "ok",
+                "queue_depth": depth,
+            });
+            (StatusCode::OK, axum::Json(body)).into_response()
+        }
+        Err(_) => {
+            let body = serde_json::json!({ "status": "error", "detail": "database unreachable" });
+            (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body)).into_response()
+        }
+    }
+}
+
+async fn handle_metrics(State(state): State<SharedState>) -> impl IntoResponse {
+    let queue_depth = state.db.queue_depth().await.unwrap_or(0);
+    let dead_jobs = state.db.dead_job_count().await.unwrap_or(0);
+    let body = state.metrics.to_prometheus(queue_depth, dead_jobs);
+
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
 }
 
 fn extract_event_type(source: &str, payload: &str, headers: &HeaderMap) -> String {
@@ -499,7 +590,10 @@ mod tests {
     #[test]
     fn test_cloudevents_structured_mode() {
         let mut headers = HeaderMap::new();
-        headers.insert("content-type", "application/cloudevents+json".parse().unwrap());
+        headers.insert(
+            "content-type",
+            "application/cloudevents+json".parse().unwrap(),
+        );
 
         let payload = r#"{
             "specversion": "1.0",
@@ -517,7 +611,10 @@ mod tests {
     fn test_cloudevents_binary_takes_precedence() {
         let mut headers = HeaderMap::new();
         headers.insert("ce-type", "from.header".parse().unwrap());
-        headers.insert("content-type", "application/cloudevents+json".parse().unwrap());
+        headers.insert(
+            "content-type",
+            "application/cloudevents+json".parse().unwrap(),
+        );
 
         let payload = r#"{"type": "from.body"}"#;
         let result = extract_event_type("source", payload, &headers);
@@ -530,7 +627,10 @@ mod tests {
     fn test_stripe_event_type() {
         let headers = HeaderMap::new();
         let payload = r#"{"type": "invoice.paid", "id": "evt_123"}"#;
-        assert_eq!(extract_event_type("stripe", payload, &headers), "invoice.paid");
+        assert_eq!(
+            extract_event_type("stripe", payload, &headers),
+            "invoice.paid"
+        );
     }
 
     #[test]
@@ -544,7 +644,10 @@ mod tests {
     fn test_shopify_event_type() {
         let headers = HeaderMap::new();
         let payload = r#"{"topic": "orders/create"}"#;
-        assert_eq!(extract_event_type("shopify", payload, &headers), "orders/create");
+        assert_eq!(
+            extract_event_type("shopify", payload, &headers),
+            "orders/create"
+        );
     }
 
     #[test]
@@ -650,8 +753,7 @@ mod tests {
         headers.insert("content-type", "application/json".parse().unwrap());
 
         let json = serialize_headers(&headers);
-        let map: std::collections::HashMap<String, String> =
-            serde_json::from_str(&json).unwrap();
+        let map: std::collections::HashMap<String, String> = serde_json::from_str(&json).unwrap();
 
         assert_eq!(map.get("ce-type").unwrap(), "test.event");
         assert_eq!(map.get("ce-source").unwrap(), "/myapp");
