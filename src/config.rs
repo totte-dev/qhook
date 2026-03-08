@@ -72,10 +72,7 @@ fn default_alert_type() -> String {
 }
 
 fn default_alert_on() -> Vec<String> {
-    vec![
-        "dlq".into(),
-        "verification_failure".into(),
-    ]
+    vec!["dlq".into(), "verification_failure".into()]
 }
 
 #[derive(Debug, Deserialize)]
@@ -401,7 +398,11 @@ fn validate_handler_url(handler_name: &str, url: &str) -> Result<()> {
     // Block private IP ranges (10.x, 172.16-31.x, 192.168.x, 169.254.x)
     if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
         if ip.is_loopback() || ip.is_unspecified() {
-            tracing::warn!(handler = handler_name, url, "Handler URL points to loopback");
+            tracing::warn!(
+                handler = handler_name,
+                url,
+                "Handler URL points to loopback"
+            );
         } else if is_private_ipv4(ip) {
             tracing::warn!(
                 handler = handler_name,
@@ -456,7 +457,10 @@ fn expand_env_vars(input: &str) -> String {
 mod tests {
     use super::*;
 
-    fn make_config(handlers: HashMap<String, HandlerConfig>, sources: HashMap<String, SourceConfig>) -> Config {
+    fn make_config(
+        handlers: HashMap<String, HandlerConfig>,
+        sources: HashMap<String, SourceConfig>,
+    ) -> Config {
         Config {
             database: DatabaseConfig::default(),
             server: ServerConfig::default(),
@@ -472,25 +476,31 @@ mod tests {
     #[test]
     fn test_validate_valid_config() {
         let mut sources = HashMap::new();
-        sources.insert("stripe".into(), SourceConfig {
-            source_type: "webhook".into(),
-            verify: None,
-            secret: None,
-            skip_verify: false,
-        });
+        sources.insert(
+            "stripe".into(),
+            SourceConfig {
+                source_type: "webhook".into(),
+                verify: None,
+                secret: None,
+                skip_verify: false,
+            },
+        );
         let mut handlers = HashMap::new();
-        handlers.insert("payment".into(), HandlerConfig {
-            source: "stripe".into(),
-            events: vec![],
-            url: "https://example.com/webhook".into(),
-            retry: None,
-            timeout: None,
-            idempotency_key: None,
-            rate_limit: None,
-            filter: None,
-            transform: None,
-            handler_type: "http".into(),
-        });
+        handlers.insert(
+            "payment".into(),
+            HandlerConfig {
+                source: "stripe".into(),
+                events: vec![],
+                url: "https://example.com/webhook".into(),
+                retry: None,
+                timeout: None,
+                idempotency_key: None,
+                rate_limit: None,
+                filter: None,
+                transform: None,
+                handler_type: "http".into(),
+            },
+        );
         let config = make_config(handlers, sources);
         assert!(config.validate().is_ok());
     }
@@ -498,25 +508,31 @@ mod tests {
     #[test]
     fn test_validate_invalid_url_scheme() {
         let mut sources = HashMap::new();
-        sources.insert("app".into(), SourceConfig {
-            source_type: "event".into(),
-            verify: None,
-            secret: None,
-            skip_verify: false,
-        });
+        sources.insert(
+            "app".into(),
+            SourceConfig {
+                source_type: "event".into(),
+                verify: None,
+                secret: None,
+                skip_verify: false,
+            },
+        );
         let mut handlers = HashMap::new();
-        handlers.insert("bad".into(), HandlerConfig {
-            source: "app".into(),
-            events: vec![],
-            url: "ftp://evil.com/data".into(),
-            retry: None,
-            timeout: None,
-            idempotency_key: None,
-            rate_limit: None,
-            filter: None,
-            transform: None,
-            handler_type: "http".into(),
-        });
+        handlers.insert(
+            "bad".into(),
+            HandlerConfig {
+                source: "app".into(),
+                events: vec![],
+                url: "ftp://evil.com/data".into(),
+                retry: None,
+                timeout: None,
+                idempotency_key: None,
+                rate_limit: None,
+                filter: None,
+                transform: None,
+                handler_type: "http".into(),
+            },
+        );
         let config = make_config(handlers, sources);
         assert!(config.validate().is_err());
     }
@@ -525,18 +541,21 @@ mod tests {
     fn test_validate_unknown_source_ref() {
         let sources = HashMap::new();
         let mut handlers = HashMap::new();
-        handlers.insert("orphan".into(), HandlerConfig {
-            source: "nonexistent".into(),
-            events: vec![],
-            url: "https://example.com".into(),
-            retry: None,
-            timeout: None,
-            idempotency_key: None,
-            rate_limit: None,
-            filter: None,
-            transform: None,
-            handler_type: "http".into(),
-        });
+        handlers.insert(
+            "orphan".into(),
+            HandlerConfig {
+                source: "nonexistent".into(),
+                events: vec![],
+                url: "https://example.com".into(),
+                retry: None,
+                timeout: None,
+                idempotency_key: None,
+                rate_limit: None,
+                filter: None,
+                transform: None,
+                handler_type: "http".into(),
+            },
+        );
         let config = make_config(handlers, sources);
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("unknown source"));
@@ -545,12 +564,15 @@ mod tests {
     #[test]
     fn test_validate_invalid_source_type() {
         let mut sources = HashMap::new();
-        sources.insert("bad".into(), SourceConfig {
-            source_type: "grpc".into(),
-            verify: None,
-            secret: None,
-            skip_verify: false,
-        });
+        sources.insert(
+            "bad".into(),
+            SourceConfig {
+                source_type: "grpc".into(),
+                verify: None,
+                secret: None,
+                skip_verify: false,
+            },
+        );
         let config = make_config(HashMap::new(), sources);
         assert!(config.validate().is_err());
     }
@@ -558,25 +580,31 @@ mod tests {
     #[test]
     fn test_validate_private_ip_warns_but_passes() {
         let mut sources = HashMap::new();
-        sources.insert("app".into(), SourceConfig {
-            source_type: "event".into(),
-            verify: None,
-            secret: None,
-            skip_verify: false,
-        });
+        sources.insert(
+            "app".into(),
+            SourceConfig {
+                source_type: "event".into(),
+                verify: None,
+                secret: None,
+                skip_verify: false,
+            },
+        );
         let mut handlers = HashMap::new();
-        handlers.insert("internal".into(), HandlerConfig {
-            source: "app".into(),
-            events: vec![],
-            url: "http://10.0.0.5:3000/hook".into(),
-            retry: None,
-            timeout: None,
-            idempotency_key: None,
-            rate_limit: None,
-            filter: None,
-            transform: None,
-            handler_type: "http".into(),
-        });
+        handlers.insert(
+            "internal".into(),
+            HandlerConfig {
+                source: "app".into(),
+                events: vec![],
+                url: "http://10.0.0.5:3000/hook".into(),
+                retry: None,
+                timeout: None,
+                idempotency_key: None,
+                rate_limit: None,
+                filter: None,
+                transform: None,
+                handler_type: "http".into(),
+            },
+        );
         // Private IPs are warned, not blocked (for dev/internal use)
         let config = make_config(handlers, sources);
         assert!(config.validate().is_ok());
@@ -596,12 +624,15 @@ mod tests {
     #[test]
     fn test_validate_verify_without_secret() {
         let mut sources = HashMap::new();
-        sources.insert("github".into(), SourceConfig {
-            source_type: "webhook".into(),
-            verify: Some("github".into()),
-            secret: None, // missing!
-            skip_verify: false,
-        });
+        sources.insert(
+            "github".into(),
+            SourceConfig {
+                source_type: "webhook".into(),
+                verify: Some("github".into()),
+                secret: None, // missing!
+                skip_verify: false,
+            },
+        );
         let config = make_config(HashMap::new(), sources);
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("no secret configured"));
@@ -610,12 +641,15 @@ mod tests {
     #[test]
     fn test_validate_verify_with_empty_secret() {
         let mut sources = HashMap::new();
-        sources.insert("stripe".into(), SourceConfig {
-            source_type: "webhook".into(),
-            verify: Some("stripe".into()),
-            secret: Some("".into()), // empty!
-            skip_verify: false,
-        });
+        sources.insert(
+            "stripe".into(),
+            SourceConfig {
+                source_type: "webhook".into(),
+                verify: Some("stripe".into()),
+                secret: Some("".into()), // empty!
+                skip_verify: false,
+            },
+        );
         let config = make_config(HashMap::new(), sources);
         assert!(config.validate().is_err());
     }
@@ -623,25 +657,31 @@ mod tests {
     #[test]
     fn test_validate_invalid_handler_type() {
         let mut sources = HashMap::new();
-        sources.insert("app".into(), SourceConfig {
-            source_type: "event".into(),
-            verify: None,
-            secret: None,
-            skip_verify: false,
-        });
+        sources.insert(
+            "app".into(),
+            SourceConfig {
+                source_type: "event".into(),
+                verify: None,
+                secret: None,
+                skip_verify: false,
+            },
+        );
         let mut handlers = HashMap::new();
-        handlers.insert("bad".into(), HandlerConfig {
-            source: "app".into(),
-            events: vec![],
-            url: "http://example.com".into(),
-            handler_type: "websocket".into(),
-            retry: None,
-            timeout: None,
-            idempotency_key: None,
-            rate_limit: None,
-            filter: None,
-            transform: None,
-        });
+        handlers.insert(
+            "bad".into(),
+            HandlerConfig {
+                source: "app".into(),
+                events: vec![],
+                url: "http://example.com".into(),
+                handler_type: "websocket".into(),
+                retry: None,
+                timeout: None,
+                idempotency_key: None,
+                rate_limit: None,
+                filter: None,
+                transform: None,
+            },
+        );
         let config = make_config(handlers, sources);
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("invalid type"));

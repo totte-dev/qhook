@@ -486,9 +486,7 @@ mod tests {
             "http://sns.us-east-1.amazonaws.com/cert.pem"
         )); // http
         assert!(!is_valid_sns_url("https://evil.com/cert.pem")); // wrong domain
-        assert!(!is_valid_sns_url(
-            "https://sns.us-east-1.evil.com/cert.pem"
-        )); // spoofed
+        assert!(!is_valid_sns_url("https://sns.us-east-1.evil.com/cert.pem")); // spoofed
         assert!(!is_valid_sns_url("https://amazonaws.com/cert.pem")); // missing sns prefix
         assert!(!is_valid_sns_url(
             "https://sns.us-east-1.amazonaws.com.attacker.com/cert.pem"
@@ -604,11 +602,15 @@ mod tests {
     #[test]
     fn test_sns_subscribe_url_ssrf_blocked() {
         // Internal metadata endpoint
-        assert!(!is_valid_sns_url("http://169.254.169.254/latest/meta-data/"));
+        assert!(!is_valid_sns_url(
+            "http://169.254.169.254/latest/meta-data/"
+        ));
         // Arbitrary external URL
         assert!(!is_valid_sns_url("https://evil.com/steal-data"));
         // Non-https
-        assert!(!is_valid_sns_url("http://sns.us-east-1.amazonaws.com/?Action=Confirm"));
+        assert!(!is_valid_sns_url(
+            "http://sns.us-east-1.amazonaws.com/?Action=Confirm"
+        ));
     }
 
     // --- SNS cert cache ---

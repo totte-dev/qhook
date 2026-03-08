@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Thread-safe labeled counter. Each unique label key gets its own AtomicU64.
 struct LabeledCounter {
@@ -211,9 +211,7 @@ impl Metrics {
         // Events by source
         let by_source = self.events_by_source.snapshot();
         if !by_source.is_empty() {
-            out.push_str(
-                "# HELP qhook_events_by_source_total Events received per source\n",
-            );
+            out.push_str("# HELP qhook_events_by_source_total Events received per source\n");
             out.push_str("# TYPE qhook_events_by_source_total counter\n");
             for (source, count) in &by_source {
                 push_fmt(
@@ -225,7 +223,10 @@ impl Metrics {
 
         out.push_str("# HELP qhook_events_duplicated_total Duplicate events ignored\n");
         out.push_str("# TYPE qhook_events_duplicated_total counter\n");
-        push_fmt(&mut out, &format!("qhook_events_duplicated_total {dupes}\n"));
+        push_fmt(
+            &mut out,
+            &format!("qhook_events_duplicated_total {dupes}\n"),
+        );
 
         out.push_str("# HELP qhook_jobs_created_total Total jobs created\n");
         out.push_str("# TYPE qhook_jobs_created_total counter\n");
@@ -254,13 +255,17 @@ impl Metrics {
             for (handler, count) in &handler_ok {
                 push_fmt(
                     &mut out,
-                    &format!("qhook_deliveries_by_handler_total{{handler=\"{handler}\",result=\"success\"}} {count}\n"),
+                    &format!(
+                        "qhook_deliveries_by_handler_total{{handler=\"{handler}\",result=\"success\"}} {count}\n"
+                    ),
                 );
             }
             for (handler, count) in &handler_fail {
                 push_fmt(
                     &mut out,
-                    &format!("qhook_deliveries_by_handler_total{{handler=\"{handler}\",result=\"failure\"}} {count}\n"),
+                    &format!(
+                        "qhook_deliveries_by_handler_total{{handler=\"{handler}\",result=\"failure\"}} {count}\n"
+                    ),
                 );
             }
         }
@@ -272,9 +277,7 @@ impl Metrics {
             &mut out,
             &format!("qhook_delivery_duration_seconds_sum {dur_sum_secs}\n"),
         );
-        out.push_str(
-            "# HELP qhook_delivery_duration_seconds_count Total delivery attempts\n",
-        );
+        out.push_str("# HELP qhook_delivery_duration_seconds_count Total delivery attempts\n");
         out.push_str("# TYPE qhook_delivery_duration_seconds_count counter\n");
         push_fmt(
             &mut out,
@@ -284,9 +287,7 @@ impl Metrics {
         // Duration max
         let dur_max = self.delivery_duration_ms_max.load(Ordering::Relaxed);
         let dur_max_secs = dur_max as f64 / 1000.0;
-        out.push_str(
-            "# HELP qhook_delivery_duration_seconds_max Max single delivery duration\n",
-        );
+        out.push_str("# HELP qhook_delivery_duration_seconds_max Max single delivery duration\n");
         out.push_str("# TYPE qhook_delivery_duration_seconds_max gauge\n");
         push_fmt(
             &mut out,
@@ -296,9 +297,7 @@ impl Metrics {
         // Delivery errors by type
         let error_types = self.delivery_errors_by_type.snapshot();
         if !error_types.is_empty() {
-            out.push_str(
-                "# HELP qhook_delivery_errors_by_type_total Delivery errors by type\n",
-            );
+            out.push_str("# HELP qhook_delivery_errors_by_type_total Delivery errors by type\n");
             out.push_str("# TYPE qhook_delivery_errors_by_type_total counter\n");
             for (error_type, count) in &error_types {
                 push_fmt(
@@ -326,9 +325,7 @@ impl Metrics {
         // DLQ by handler
         let dlq = self.dlq_by_handler.snapshot();
         if !dlq.is_empty() {
-            out.push_str(
-                "# HELP qhook_dlq_total Jobs moved to dead letter queue per handler\n",
-            );
+            out.push_str("# HELP qhook_dlq_total Jobs moved to dead letter queue per handler\n");
             out.push_str("# TYPE qhook_dlq_total counter\n");
             for (handler, count) in &dlq {
                 push_fmt(
@@ -350,9 +347,7 @@ impl Metrics {
             out.push_str("# HELP qhook_alerts_sent_total Alert webhooks sent successfully\n");
             out.push_str("# TYPE qhook_alerts_sent_total counter\n");
             push_fmt(&mut out, &format!("qhook_alerts_sent_total {alerts_ok}\n"));
-            out.push_str(
-                "# HELP qhook_alerts_failed_total Alert webhooks that failed to send\n",
-            );
+            out.push_str("# HELP qhook_alerts_failed_total Alert webhooks that failed to send\n");
             out.push_str("# TYPE qhook_alerts_failed_total counter\n");
             push_fmt(
                 &mut out,

@@ -231,9 +231,7 @@ mod tests {
         };
         assert_eq!(dlq.kind(), "dlq");
 
-        let verify = AlertEvent::VerificationFailure {
-            source: "s".into(),
-        };
+        let verify = AlertEvent::VerificationFailure { source: "s".into() };
         assert_eq!(verify.kind(), "verification_failure");
     }
 }

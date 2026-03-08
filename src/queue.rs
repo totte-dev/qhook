@@ -78,7 +78,13 @@ impl Worker {
         tracing::info!("Queue worker started");
 
         // Recover stale jobs on startup
-        run_maintenance(&self.db, &self.metrics, self.worker_config.stale_threshold_secs, self.worker_config.retention_hours).await;
+        run_maintenance(
+            &self.db,
+            &self.metrics,
+            self.worker_config.stale_threshold_secs,
+            self.worker_config.retention_hours,
+        )
+        .await;
 
         let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENCY));
         let mut in_flight = JoinSet::new();
@@ -193,7 +199,11 @@ impl Worker {
         let remaining = in_flight.len();
         if remaining > 0 {
             let timeout = Duration::from_secs(self.worker_config.drain_timeout_secs);
-            tracing::info!(count = remaining, timeout_secs = timeout.as_secs(), "Draining in-flight deliveries");
+            tracing::info!(
+                count = remaining,
+                timeout_secs = timeout.as_secs(),
+                "Draining in-flight deliveries"
+            );
             let drain = async {
                 while let Some(result) = in_flight.join_next().await {
                     if let Err(e) = result {
@@ -203,7 +213,10 @@ impl Worker {
             };
             if tokio::time::timeout(timeout, drain).await.is_err() {
                 let abandoned = in_flight.len();
-                tracing::warn!(count = abandoned, "Drain timeout reached, abandoning remaining deliveries");
+                tracing::warn!(
+                    count = abandoned,
+                    "Drain timeout reached, abandoning remaining deliveries"
+                );
             }
         }
         tracing::info!("Worker stopped");
@@ -242,7 +255,15 @@ async fn deliver_job(
     let start = std::time::Instant::now();
     let transform = transforms.get(&job.handler);
     let is_grpc = handler_types.get(&job.handler).is_some_and(|t| t == "grpc");
-    let result = deliver(db, http, grpc_channels, job, transform.map(|s| s.as_str()), is_grpc).await;
+    let result = deliver(
+        db,
+        http,
+        grpc_channels,
+        job,
+        transform.map(|s| s.as_str()),
+        is_grpc,
+    )
+    .await;
     let duration_ms = start.elapsed().as_millis() as i64;
 
     match result {
@@ -299,7 +320,9 @@ async fn deliver_job(
                         }
                     }
                     Ok(false) => {}
-                    Err(e) => tracing::error!(job_id = job.id, error = %e, "Failed to handle failure"),
+                    Err(e) => {
+                        tracing::error!(job_id = job.id, error = %e, "Failed to handle failure")
+                    }
                 }
             }
         }
@@ -307,7 +330,10 @@ async fn deliver_job(
             let error = e.to_string();
             let attempt_id = ulid::Ulid::new().to_string();
             metrics.inc_delivery_failure_for(&job.handler, duration_ms as u64);
-            let error_type = if e.downcast_ref::<reqwest::Error>().is_some_and(|re| re.is_timeout()) {
+            let error_type = if e
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(|re| re.is_timeout())
+            {
                 "timeout"
             } else {
                 "network"

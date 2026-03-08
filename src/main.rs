@@ -12,9 +12,7 @@ async fn main() -> Result<()> {
             .with_env_filter(filter)
             .init();
     } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .init();
+        tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
     let args = qhook::cli::Args::parse();
