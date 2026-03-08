@@ -26,6 +26,31 @@
       "matchManagers": ["github-actions"],
       "groupName": "github actions",
       "automerge": true
+    },
+    {
+      "description": "Rust Docker image updates (patch/minor auto-merge)",
+      "matchManagers": ["dockerfile"],
+      "matchPackageNames": ["rust"],
+      "matchUpdateTypes": ["patch", "minor"],
+      "automerge": true
+    },
+    {
+      "description": "Rust Docker image major updates need review",
+      "matchManagers": ["dockerfile"],
+      "matchPackageNames": ["rust"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false
+    },
+    {
+      "description": "Debian runtime image updates",
+      "matchManagers": ["dockerfile"],
+      "matchPackageNames": ["debian"],
+      "automerge": true
+    },
+    {
+      "description": "Docker Compose service images (postgres, localstack)",
+      "matchManagers": ["docker-compose"],
+      "automerge": false
     }
   ]
 }
