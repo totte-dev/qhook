@@ -165,17 +165,49 @@ pub struct SnsMessage {
     pub unsubscribe_url: Option<String>,
 }
 
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// Cache for SNS signing certificates. TTL = 1 hour.
+static SNS_CERT_CACHE: std::sync::LazyLock<Mutex<HashMap<String, (Vec<u8>, Instant)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+use std::collections::HashMap;
+
+const SNS_CERT_CACHE_TTL: Duration = Duration::from_secs(3600);
+
+fn get_cached_cert(url: &str) -> Option<Vec<u8>> {
+    let cache = SNS_CERT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((data, ts)) = cache.get(url) {
+        if ts.elapsed() < SNS_CERT_CACHE_TTL {
+            return Some(data.clone());
+        }
+    }
+    None
+}
+
+fn set_cached_cert(url: &str, data: Vec<u8>) {
+    let mut cache = SNS_CERT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.insert(url.to_string(), (data, Instant::now()));
+}
+
 pub async fn verify_sns_message(msg: &SnsMessage, http: &reqwest::Client) -> Result<bool> {
     let cert_url = &msg.signing_cert_url;
 
     // Validate the signing cert URL is from SNS
-    if !is_valid_sns_cert_url(cert_url) {
+    if !is_valid_sns_url(cert_url) {
         tracing::warn!(url = cert_url, "Invalid SNS SigningCertURL");
         return Ok(false);
     }
 
-    // Fetch the signing certificate
-    let pem_data = http.get(cert_url).send().await?.bytes().await?;
+    // Fetch the signing certificate (cached)
+    let pem_data = if let Some(cached) = get_cached_cert(cert_url) {
+        cached.into()
+    } else {
+        let data = http.get(cert_url).send().await?.bytes().await?;
+        set_cached_cert(cert_url, data.to_vec());
+        data
+    };
 
     // Parse X.509 certificate
     let (_, pem) = x509_parser::pem::parse_x509_pem(&pem_data)
@@ -224,17 +256,23 @@ pub async fn verify_sns_message(msg: &SnsMessage, http: &reqwest::Client) -> Res
     Ok(valid)
 }
 
-pub fn is_valid_sns_cert_url(url: &str) -> bool {
+/// Validate that a URL is from a legitimate SNS endpoint (amazonaws.com).
+/// Used for both SigningCertURL and SubscribeURL validation.
+pub fn is_valid_sns_url(url: &str) -> bool {
     // Must be HTTPS from an SNS endpoint
     if !url.starts_with("https://sns.") {
         return false;
     }
-    // Must be from amazonaws.com
+    // Must be from amazonaws.com (exact domain match, not substring)
     if let Some(host_start) = url.strip_prefix("https://")
         && let Some(path_start) = host_start.find('/')
     {
         let host = &host_start[..path_start];
-        return host.ends_with(".amazonaws.com");
+        // Split by '.' and check the last two segments are exactly "amazonaws" and "com"
+        let parts: Vec<&str> = host.split('.').collect();
+        return parts.len() >= 3
+            && parts[parts.len() - 1] == "com"
+            && parts[parts.len() - 2] == "amazonaws";
     }
     false
 }
@@ -434,24 +472,27 @@ mod tests {
 
     #[test]
     fn test_sns_cert_url_valid() {
-        assert!(is_valid_sns_cert_url(
+        assert!(is_valid_sns_url(
             "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-abc123.pem"
         ));
-        assert!(is_valid_sns_cert_url(
+        assert!(is_valid_sns_url(
             "https://sns.ap-northeast-1.amazonaws.com/cert.pem"
         ));
     }
 
     #[test]
     fn test_sns_cert_url_invalid() {
-        assert!(!is_valid_sns_cert_url(
+        assert!(!is_valid_sns_url(
             "http://sns.us-east-1.amazonaws.com/cert.pem"
         )); // http
-        assert!(!is_valid_sns_cert_url("https://evil.com/cert.pem")); // wrong domain
-        assert!(!is_valid_sns_cert_url(
+        assert!(!is_valid_sns_url("https://evil.com/cert.pem")); // wrong domain
+        assert!(!is_valid_sns_url(
             "https://sns.us-east-1.evil.com/cert.pem"
         )); // spoofed
-        assert!(!is_valid_sns_cert_url("https://amazonaws.com/cert.pem")); // missing sns prefix
+        assert!(!is_valid_sns_url("https://amazonaws.com/cert.pem")); // missing sns prefix
+        assert!(!is_valid_sns_url(
+            "https://sns.us-east-1.amazonaws.com.attacker.com/cert.pem"
+        )); // subdomain spoofing
     }
 
     // --- SNS string to sign ---
@@ -549,5 +590,36 @@ mod tests {
         assert_eq!(msg.message_id, "id-123");
         assert_eq!(msg.subject, Some("test".into()));
         assert_eq!(msg.message, "{\"key\":\"value\"}");
+    }
+
+    // --- SNS URL validation (SubscribeURL SSRF prevention) ---
+
+    #[test]
+    fn test_sns_subscribe_url_valid() {
+        assert!(is_valid_sns_url(
+            "https://sns.us-east-1.amazonaws.com/?Action=ConfirmSubscription&TopicArn=arn:aws:sns:us-east-1:123456:test&Token=abc"
+        ));
+    }
+
+    #[test]
+    fn test_sns_subscribe_url_ssrf_blocked() {
+        // Internal metadata endpoint
+        assert!(!is_valid_sns_url("http://169.254.169.254/latest/meta-data/"));
+        // Arbitrary external URL
+        assert!(!is_valid_sns_url("https://evil.com/steal-data"));
+        // Non-https
+        assert!(!is_valid_sns_url("http://sns.us-east-1.amazonaws.com/?Action=Confirm"));
+    }
+
+    // --- SNS cert cache ---
+
+    #[test]
+    fn test_cert_cache() {
+        let url = "https://sns.us-east-1.amazonaws.com/test-cache.pem";
+        assert!(get_cached_cert(url).is_none());
+        set_cached_cert(url, b"PEM DATA".to_vec());
+        let cached = get_cached_cert(url);
+        assert!(cached.is_some());
+        assert_eq!(cached.unwrap(), b"PEM DATA");
     }
 }

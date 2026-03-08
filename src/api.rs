@@ -1,10 +1,13 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::Result;
 use axum::{
     Router,
     body::Bytes,
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode},
     middleware,
     response::IntoResponse,
@@ -12,6 +15,7 @@ use axum::{
 };
 use serde_json::Value;
 
+use crate::alert::{AlertEvent, Alerter, SharedAlerter};
 use crate::config::Config;
 use crate::db::Database;
 use crate::metrics::Metrics;
@@ -22,6 +26,7 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub http: reqwest::Client,
     pub metrics: Arc<Metrics>,
+    pub alerter: SharedAlerter,
 }
 
 impl AppState {
@@ -30,20 +35,95 @@ impl AppState {
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .expect("Failed to build HTTP client");
+        let metrics = Arc::new(Metrics::new());
+        let alerter = config
+            .alerts
+            .clone()
+            .map(|c| Arc::new(Alerter::new(c, metrics.clone())));
         Self {
             config,
             db: Arc::new(db),
             http,
-            metrics: Arc::new(Metrics::new()),
+            metrics,
+            alerter,
         }
     }
 }
 
 type SharedState = Arc<AppState>;
 
-pub async fn serve(state: AppState) -> Result<()> {
+/// Per-IP rate limiter using a sliding window counter.
+/// Tracks request counts per IP within 1-second windows.
+/// Bounded to MAX_ENTRIES to prevent memory exhaustion under DDoS.
+struct IpRateLimiter {
+    limit: u32,
+    entries: Mutex<HashMap<IpAddr, (u64, Instant)>>,
+}
+
+/// Maximum tracked IPs. Beyond this, new IPs are rate-limited by default.
+const MAX_IP_ENTRIES: usize = 100_000;
+
+impl IpRateLimiter {
+    fn new(limit: u32) -> Self {
+        Self {
+            limit,
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Returns true if the request is allowed, false if rate-limited.
+    fn check(&self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+
+        // If at capacity and this is a new IP, reject to prevent unbounded growth
+        if map.len() >= MAX_IP_ENTRIES && !map.contains_key(&ip) {
+            return false;
+        }
+
+        let entry = map.entry(ip).or_insert((0, now));
+        if now.duration_since(entry.1).as_secs() >= 1 {
+            // New window
+            entry.0 = 1;
+            entry.1 = now;
+            true
+        } else if entry.0 < self.limit as u64 {
+            entry.0 += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove entries older than 60 seconds to prevent unbounded growth.
+    fn cleanup(&self) {
+        let now = Instant::now();
+        let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, (_, ts)| now.duration_since(*ts).as_secs() < 60);
+    }
+}
+
+pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<()> {
     let port = state.config.server.port;
     let shared = Arc::new(state);
+
+    // SIGHUP: validate config without restart (dry-run reload)
+    #[cfg(unix)]
+    {
+        let path = config_path.clone();
+        tokio::spawn(async move {
+            let mut sig =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+                    .expect("failed to listen for SIGHUP");
+            loop {
+                sig.recv().await;
+                match crate::config::Config::load(&path) {
+                    Ok(_) => tracing::info!("SIGHUP: config is valid (restart to apply)"),
+                    Err(e) => tracing::error!(error = %e, "SIGHUP: config validation failed"),
+                }
+            }
+        });
+    }
 
     // Print registered endpoints
     for (name, source) in &shared.config.sources {
@@ -58,6 +138,14 @@ pub async fn serve(state: AppState) -> Result<()> {
         }
     }
 
+    // Warn if auth_token is not configured
+    if shared.config.api.auth_token.is_none() {
+        tracing::warn!(
+            "No auth_token configured — /events endpoint is unauthenticated. \
+             Set api.auth_token in config for production use."
+        );
+    }
+
     // Shutdown signal for the worker
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -68,11 +156,30 @@ pub async fn serve(state: AppState) -> Result<()> {
         .filter_map(|(name, h)| h.rate_limit.map(|r| (name.clone(), r)))
         .collect();
 
+    let handler_transforms: std::collections::HashMap<String, String> = shared
+        .config
+        .handlers
+        .iter()
+        .filter_map(|(name, h)| h.transform.as_ref().map(|t| (name.clone(), t.clone())))
+        .collect();
+
+    let handler_types: std::collections::HashMap<String, String> = shared
+        .config
+        .handlers
+        .iter()
+        .filter(|(_, h)| h.handler_type != "http")
+        .map(|(name, h)| (name.clone(), h.handler_type.clone()))
+        .collect();
+
     let worker = Worker::new(
         shared.db.clone(),
         shared.metrics.clone(),
+        shared.alerter.clone(),
+        shared.config.worker.clone(),
         shutdown_rx,
         rate_limits,
+        handler_transforms,
+        handler_types,
     );
     let worker_handle = tokio::spawn(async move {
         worker.run().await;
@@ -80,6 +187,7 @@ pub async fn serve(state: AppState) -> Result<()> {
 
     let body_limit = shared.config.server.max_body_size;
     let max_inbound = shared.config.server.max_inbound;
+    let ip_rate_limit = shared.config.server.ip_rate_limit;
     let inbound_semaphore = Arc::new(tokio::sync::Semaphore::new(max_inbound as usize));
 
     let sem = inbound_semaphore.clone();
@@ -102,7 +210,7 @@ pub async fn serve(state: AppState) -> Result<()> {
         resp
     });
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/webhooks/{source}", post(handle_webhook))
         .route("/events/{event_type}", post(handle_event))
         .route("/sns/{source}", post(handle_sns))
@@ -113,13 +221,53 @@ pub async fn serve(state: AppState) -> Result<()> {
         .layer(tower_http::limit::RequestBodyLimitLayer::new(body_limit))
         .with_state(shared);
 
+    // Per-IP rate limiting middleware (if configured)
+    if ip_rate_limit > 0 {
+        let limiter = Arc::new(IpRateLimiter::new(ip_rate_limit));
+        tracing::info!(limit = ip_rate_limit, "Per-IP rate limiting enabled (req/s)");
+
+        // Background cleanup task
+        let cleanup_limiter = limiter.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                cleanup_limiter.cleanup();
+            }
+        });
+
+        app = app.layer(middleware::from_fn(
+            move |req: axum::extract::Request, next: middleware::Next| {
+                let limiter = limiter.clone();
+                async move {
+                    // Extract IP from ConnectInfo or peer addr
+                    let ip = req
+                        .extensions()
+                        .get::<ConnectInfo<std::net::SocketAddr>>()
+                        .map(|ci| ci.0.ip());
+
+                    if let Some(ip) = ip {
+                        if !limiter.check(ip) {
+                            tracing::debug!(ip = %ip, "IP rate limited");
+                            return StatusCode::TOO_MANY_REQUESTS.into_response();
+                        }
+                    }
+                    next.run(req).await
+                }
+            },
+        ));
+    }
+
     let addr = format!("0.0.0.0:{port}");
     tracing::info!("qhook running on :{port}");
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     // HTTP server stopped, now stop the worker
     tracing::info!("HTTP server stopped, shutting down worker...");
@@ -175,6 +323,12 @@ async fn handle_webhook(
             Ok(true) => {}
             Ok(false) => {
                 tracing::warn!(source = source_name, "Signature verification failed");
+                state.metrics.inc_verification_failure(&source_name);
+                if let Some(ref alerter) = state.alerter {
+                    alerter.send(AlertEvent::VerificationFailure {
+                        source: source_name.clone(),
+                    });
+                }
                 return (StatusCode::UNAUTHORIZED, "Invalid signature".to_string());
             }
             Err(e) => {
@@ -188,8 +342,8 @@ async fn handle_webhook(
     }
 
     // Parse payload
-    let payload_str = match String::from_utf8(body.to_vec()) {
-        Ok(s) => s,
+    let payload_str = match std::str::from_utf8(&body) {
+        Ok(s) => s.to_string(),
         Err(_) => return (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()),
     };
 
@@ -206,6 +360,7 @@ async fn handle_webhook(
             }
         }
         Err(e) => {
+            state.metrics.inc_db_errors();
             tracing::error!(error = %e, "Failed to process event");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -249,8 +404,8 @@ async fn handle_event(
         }
     }
 
-    let payload_str = match String::from_utf8(body.to_vec()) {
-        Ok(s) => s,
+    let payload_str = match std::str::from_utf8(&body) {
+        Ok(s) => s.to_string(),
         Err(_) => return (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()),
     };
 
@@ -264,6 +419,7 @@ async fn handle_event(
     match process_event(&state, "app", &event_type, &payload_str, &headers).await {
         Ok(_) => (StatusCode::ACCEPTED, "Event accepted".to_string()),
         Err(e) => {
+            state.metrics.inc_db_errors();
             tracing::error!(error = %e, "Failed to process event");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -285,8 +441,8 @@ async fn handle_sns(
         _ => return (StatusCode::NOT_FOUND, "Unknown source".to_string()),
     };
 
-    let body_str = match String::from_utf8(body.to_vec()) {
-        Ok(s) => s,
+    let body_str = match std::str::from_utf8(&body) {
+        Ok(s) => s.to_string(),
         Err(_) => return (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()),
     };
 
@@ -307,6 +463,12 @@ async fn handle_sns(
             Ok(true) => {}
             Ok(false) => {
                 tracing::warn!(source = source_name, "SNS signature verification failed");
+                state.metrics.inc_verification_failure(&source_name);
+                if let Some(ref alerter) = state.alerter {
+                    alerter.send(AlertEvent::VerificationFailure {
+                        source: source_name.clone(),
+                    });
+                }
                 return (StatusCode::UNAUTHORIZED, "Invalid signature".to_string());
             }
             Err(e) => {
@@ -323,6 +485,15 @@ async fn handle_sns(
     match sns_msg.message_type.as_str() {
         "SubscriptionConfirmation" => {
             if let Some(ref subscribe_url) = sns_msg.subscribe_url {
+                // Validate SubscribeURL to prevent SSRF
+                if !crate::verify::is_valid_sns_url(subscribe_url) {
+                    tracing::warn!(
+                        source = source_name,
+                        url = subscribe_url,
+                        "Rejected SNS SubscribeURL: not a valid SNS endpoint"
+                    );
+                    return (StatusCode::BAD_REQUEST, "Invalid SubscribeURL".to_string());
+                }
                 tracing::info!(
                     source = source_name,
                     topic = sns_msg.topic_arn,
@@ -370,6 +541,7 @@ async fn handle_sns(
                     }
                 }
                 Err(e) => {
+                    state.metrics.inc_db_errors();
                     tracing::error!(error = %e, "Failed to process SNS event");
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -443,7 +615,7 @@ async fn process_event(
         )
         .await?;
 
-    state.metrics.inc_events_received();
+    state.metrics.inc_events_received_for(source);
 
     if !created {
         state.metrics.inc_events_duplicated();
@@ -451,8 +623,20 @@ async fn process_event(
         return Ok(false);
     }
 
-    // Create jobs for each matching handler
+    // Create jobs for each matching handler (apply filter if configured)
     for (handler_name, handler) in &matching_handlers {
+        // Apply JSONPath filter — skip job creation if filter doesn't match
+        if let Some(ref filter) = handler.filter {
+            if !evaluate_filter(payload, filter) {
+                tracing::debug!(
+                    handler = *handler_name,
+                    filter,
+                    "Event filtered out"
+                );
+                continue;
+            }
+        }
+
         let job_id = ulid::Ulid::new().to_string();
         let max_attempts = handler
             .retry
@@ -512,18 +696,19 @@ fn extract_event_type(source: &str, payload: &str, headers: &HeaderMap) -> Strin
         return ce_type.to_string();
     }
 
+    // Parse JSON once and reuse
+    let json: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
+
     // CloudEvents structured mode: application/cloudevents+json
     if let Some(ct) = headers.get("content-type").and_then(|v| v.to_str().ok())
         && ct.contains("application/cloudevents+json")
     {
-        let json: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
         if let Some(ce_type) = json.get("type").and_then(|v| v.as_str()) {
             return ce_type.to_string();
         }
     }
 
     // Provider-specific extraction
-    let json: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
 
     match source {
         // Stripe: { "type": "invoice.paid" }
@@ -587,26 +772,139 @@ fn event_matches(pattern: &str, event_type: &str) -> bool {
 }
 
 fn extract_json_path(payload: &str, path: &str) -> Option<String> {
-    let json: Value = serde_json::from_str(payload).ok()?;
+    extract_json_path_value(payload, path)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+}
 
-    // Simple JSON path: $.field or $.field.nested
+fn extract_json_path_value(payload: &str, path: &str) -> Option<Value> {
+    let json: Value = serde_json::from_str(payload).ok()?;
+    resolve_path(&json, path)
+}
+
+fn resolve_path(json: &Value, path: &str) -> Option<Value> {
     let path = path.strip_prefix("$.").unwrap_or(path);
-    let mut current = &json;
+    let mut current = json;
 
     for part in path.split('.') {
         current = current.get(part)?;
     }
 
-    current.as_str().map(|s| s.to_string())
+    Some(current.clone())
+}
+
+/// Evaluate a filter expression against a JSON payload.
+/// Supported formats:
+///   "$.path"           — truthy check (exists and not null/false/0/"")
+///   "$.path == value"  — equality
+///   "$.path != value"  — inequality
+///   "$.path in [a,b]"  — set membership
+fn evaluate_filter(payload: &str, filter: &str) -> bool {
+    let filter = filter.trim();
+
+    // "$.path == value"
+    if let Some((path, value)) = filter.split_once("==") {
+        let path = path.trim();
+        let expected = value.trim().trim_matches('"');
+        return match extract_json_path_value(payload, path) {
+            Some(Value::String(s)) => s == expected,
+            Some(Value::Number(n)) => n.to_string() == expected,
+            Some(Value::Bool(b)) => b.to_string() == expected,
+            _ => false,
+        };
+    }
+
+    // "$.path != value"
+    if let Some((path, value)) = filter.split_once("!=") {
+        let path = path.trim();
+        let expected = value.trim().trim_matches('"');
+        return match extract_json_path_value(payload, path) {
+            Some(Value::String(s)) => s != expected,
+            Some(Value::Number(n)) => n.to_string() != expected,
+            Some(Value::Bool(b)) => b.to_string() != expected,
+            Some(Value::Null) => true,
+            None => true,
+            _ => true,
+        };
+    }
+
+    // "$.path in [a, b, c]"
+    if let Some((path, set_str)) = filter.split_once(" in ") {
+        let path = path.trim();
+        let set_str = set_str.trim();
+        if let Some(inner) = set_str.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            let values: Vec<&str> = inner.split(',').map(|v| v.trim().trim_matches('"')).collect();
+            return match extract_json_path_value(payload, path) {
+                Some(Value::String(s)) => values.contains(&s.as_str()),
+                Some(Value::Number(n)) => values.contains(&n.to_string().as_str()),
+                _ => false,
+            };
+        }
+    }
+
+    // "$.path" — truthy check
+    match extract_json_path_value(payload, filter) {
+        Some(Value::Null) | None => false,
+        Some(Value::Bool(b)) => b,
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
+        _ => true, // arrays, objects are truthy
+    }
+}
+
+/// Apply a JSON template transformation to a payload.
+/// Replaces `{{$.path}}` references with values from the original payload.
+/// If the template is valid JSON with `{{...}}` placeholders, returns transformed JSON.
+/// Otherwise returns the original payload unchanged.
+pub fn apply_transform(payload: &str, template: &str) -> String {
+    let json: Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return payload.to_string(),
+    };
+
+    let mut result = template.to_string();
+    // Find all {{$.path}} references and replace them
+    while let Some(start) = result.find("{{") {
+        let Some(end) = result[start..].find("}}") else {
+            break;
+        };
+        let placeholder = &result[start + 2..start + end];
+        let replacement = match resolve_path(&json, placeholder.trim()) {
+            Some(Value::String(s)) => {
+                // JSON-escape the string to prevent injection
+                let escaped = serde_json::to_string(&s).unwrap_or_else(|_| format!("\"{}\"", s));
+                // Remove surrounding quotes — the template controls quoting
+                escaped[1..escaped.len() - 1].to_string()
+            }
+            Some(Value::Number(n)) => n.to_string(),
+            Some(Value::Bool(b)) => b.to_string(),
+            Some(Value::Null) => "null".to_string(),
+            Some(v) => v.to_string(), // arrays/objects as JSON
+            None => "null".to_string(),
+        };
+        result = format!(
+            "{}{}{}",
+            &result[..start],
+            replacement,
+            &result[start + end + 2..]
+        );
+    }
+
+    result
 }
 
 fn serialize_headers(headers: &HeaderMap) -> String {
+    // Only store CloudEvents and content-type headers to reduce DB bloat
     let map: std::collections::HashMap<String, String> = headers
         .iter()
         .filter_map(|(k, v)| {
-            v.to_str()
-                .ok()
-                .map(|v| (k.as_str().to_string(), v.to_string()))
+            let name = k.as_str();
+            if name.starts_with("ce-") || name == "content-type" {
+                v.to_str()
+                    .ok()
+                    .map(|v| (name.to_string(), v.to_string()))
+            } else {
+                None
+            }
         })
         .collect();
 
@@ -801,5 +1099,143 @@ mod tests {
         assert_eq!(map.get("ce-type").unwrap(), "test.event");
         assert_eq!(map.get("ce-source").unwrap(), "/myapp");
         assert_eq!(map.get("content-type").unwrap(), "application/json");
+    }
+
+    // --- IP rate limiter ---
+
+    #[test]
+    fn test_ip_rate_limiter_allows_within_limit() {
+        let limiter = IpRateLimiter::new(3);
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        assert!(limiter.check(ip));
+        assert!(limiter.check(ip));
+        assert!(limiter.check(ip));
+        // 4th request should be rejected
+        assert!(!limiter.check(ip));
+    }
+
+    #[test]
+    fn test_ip_rate_limiter_separate_ips() {
+        let limiter = IpRateLimiter::new(1);
+        let ip1: IpAddr = "1.2.3.4".parse().unwrap();
+        let ip2: IpAddr = "5.6.7.8".parse().unwrap();
+        assert!(limiter.check(ip1));
+        assert!(!limiter.check(ip1)); // over limit
+        assert!(limiter.check(ip2)); // different IP, ok
+    }
+
+    // --- Filter evaluation ---
+
+    #[test]
+    fn test_filter_equality() {
+        let payload = r#"{"status": "paid", "amount": 100}"#;
+        assert!(evaluate_filter(payload, r#"$.status == paid"#));
+        assert!(evaluate_filter(payload, r#"$.status == "paid""#));
+        assert!(!evaluate_filter(payload, r#"$.status == pending"#));
+        assert!(evaluate_filter(payload, r#"$.amount == 100"#));
+    }
+
+    #[test]
+    fn test_filter_inequality() {
+        let payload = r#"{"status": "failed"}"#;
+        assert!(evaluate_filter(payload, r#"$.status != paid"#));
+        assert!(!evaluate_filter(payload, r#"$.status != failed"#));
+    }
+
+    #[test]
+    fn test_filter_in_set() {
+        let payload = r#"{"type": "order.created"}"#;
+        assert!(evaluate_filter(
+            payload,
+            r#"$.type in [order.created, order.updated]"#
+        ));
+        assert!(!evaluate_filter(
+            payload,
+            r#"$.type in [payment.success]"#
+        ));
+    }
+
+    #[test]
+    fn test_filter_truthy() {
+        assert!(evaluate_filter(r#"{"active": true}"#, "$.active"));
+        assert!(!evaluate_filter(r#"{"active": false}"#, "$.active"));
+        assert!(!evaluate_filter(r#"{"val": null}"#, "$.val"));
+        assert!(!evaluate_filter(r#"{"val": ""}"#, "$.val"));
+        assert!(evaluate_filter(r#"{"val": "yes"}"#, "$.val"));
+        assert!(!evaluate_filter(r#"{}"#, "$.missing"));
+        assert!(evaluate_filter(r#"{"n": 42}"#, "$.n"));
+        assert!(!evaluate_filter(r#"{"n": 0}"#, "$.n"));
+    }
+
+    #[test]
+    fn test_filter_nested_path() {
+        let payload = r#"{"data": {"object": {"status": "active"}}}"#;
+        assert!(evaluate_filter(payload, "$.data.object.status == active"));
+        assert!(!evaluate_filter(payload, "$.data.object.status == inactive"));
+    }
+
+    // --- Payload transformation ---
+
+    #[test]
+    fn test_transform_simple() {
+        let payload = r#"{"id": "evt_1", "data": {"name": "Alice", "amount": 42}}"#;
+        let template = r#"{"event_id": "{{$.id}}", "user": "{{$.data.name}}", "total": {{$.data.amount}}}"#;
+        let result = apply_transform(payload, template);
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["event_id"], "evt_1");
+        assert_eq!(v["user"], "Alice");
+        assert_eq!(v["total"], 42);
+    }
+
+    #[test]
+    fn test_transform_missing_field() {
+        let payload = r#"{"id": "evt_1"}"#;
+        let template = r#"{"id": "{{$.id}}", "missing": "{{$.nonexistent}}"}"#;
+        let result = apply_transform(payload, template);
+        assert!(result.contains("null"));
+        assert!(result.contains("evt_1"));
+    }
+
+    #[test]
+    fn test_transform_passthrough_on_no_placeholders() {
+        let payload = r#"{"id": "evt_1"}"#;
+        let template = r#"{"static": "value"}"#;
+        let result = apply_transform(payload, template);
+        assert_eq!(result, r#"{"static": "value"}"#);
+    }
+
+    #[test]
+    fn test_transform_nested_object() {
+        let payload = r#"{"meta": {"tags": ["a", "b"]}}"#;
+        let template = r#"{"labels": {{$.meta.tags}}}"#;
+        let result = apply_transform(payload, template);
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["labels"], serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn test_transform_escapes_special_chars() {
+        // Payload with quotes and backslashes in string values
+        let payload = r#"{"name": "foo\"bar\\baz"}"#;
+        let template = r#"{"user": "{{$.name}}"}"#;
+        let result = apply_transform(payload, template);
+        // Must produce valid JSON
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["user"], r#"foo"bar\baz"#);
+    }
+
+    // --- IP rate limiter ---
+
+    #[test]
+    fn test_ip_rate_limiter_max_entries() {
+        let limiter = IpRateLimiter::new(100);
+        // Fill to MAX_IP_ENTRIES
+        for i in 0..MAX_IP_ENTRIES {
+            let ip: IpAddr = std::net::Ipv4Addr::from((i as u32).to_be_bytes()).into();
+            assert!(limiter.check(ip));
+        }
+        // New IP beyond cap should be rejected
+        let new_ip: IpAddr = "255.255.255.255".parse().unwrap();
+        assert!(!limiter.check(new_ip));
     }
 }

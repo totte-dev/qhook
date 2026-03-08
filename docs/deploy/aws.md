@@ -1,3 +1,8 @@
+---
+layout: default
+title: Deploy to AWS
+---
+
 # Deploy qhook to AWS
 
 ## Prerequisites

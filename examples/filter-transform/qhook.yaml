@@ -1,0 +1,39 @@
+# Filter & Transform example config
+
+database:
+  driver: sqlite
+
+server:
+  port: 8888
+
+sources:
+  app:
+    type: event
+
+handlers:
+  # Only receives paid orders (filter, no transform)
+  paid-only:
+    source: app
+    events: [order.completed]
+    url: http://app:5000/paid
+    filter: "$.status == paid"
+    retry: { max: 3 }
+
+  # Receives all orders, reshapes payload for Slack (transform, no filter)
+  slack-notify:
+    source: app
+    events: [order.completed]
+    url: http://app:5000/slack
+    transform: |
+      {"text": "Order {{$.id}}: {{$.customer}} {{$.status}} {{$.amount}} {{$.currency}}"}
+    retry: { max: 2 }
+
+  # Only paid orders, with a compact audit format (filter + transform)
+  audit-log:
+    source: app
+    events: [order.completed]
+    url: http://app:5000/audit
+    filter: "$.status == paid"
+    transform: |
+      {"order_id": "{{$.id}}", "status": "{{$.status}}", "amount": {{$.amount}}}
+    retry: { max: 3 }

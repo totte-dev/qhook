@@ -4,56 +4,60 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.1.0] - 2025-03-08
 
-### Added
-- **Stripe replay protection**: Reject Stripe signatures older than 5 minutes to prevent replay attacks.
-- **Request body size limit**: Configurable `server.max_body_size` (default: 1MB) to prevent OOM from oversized payloads.
-- **Inbound concurrency limit**: Configurable `server.max_inbound` (default: 100) returns 503 when exceeded.
-- **Security headers**: All responses include `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cache-Control: no-store`.
-- **Constant-time auth token comparison**: Bearer token check uses `subtle::ct_eq` to prevent timing attacks.
-- **Audit logging**: Authentication failures (missing/invalid token) are logged with `tracing::warn`.
-- **LICENSE file**: Full Apache-2.0 license text at repository root.
+Initial release.
 
-### Changed
-- **Migrated `serde_yaml` → `serde_yaml_ng`**: `serde_yaml` was archived by dtolnay; replaced with actively maintained fork.
-
-### Previous (v0.3)
-
-#### Added
-- **Stale job recovery**: Jobs stuck in `running` for over 5 minutes are automatically recovered to `retryable` on startup and every hour.
-- **Concurrent delivery**: Up to 10 jobs are delivered in parallel (was sequential).
-- **Graceful shutdown**: SIGTERM/SIGINT stops accepting new requests, drains in-flight deliveries, then exits cleanly.
-- **Auto cleanup**: Completed/dead jobs and their attempt records older than 72 hours are automatically purged every hour.
-- **Postgres atomic locking**: `SELECT ... FOR UPDATE SKIP LOCKED` eliminates race conditions when running multiple qhook instances.
-- **Adaptive polling**: Worker polls every 50ms while jobs are available, drops to 1s when idle. ~10x throughput improvement.
-- **Benchmark script**: `tests/bench.sh` measures receive RPS and delivery throughput.
-- **Prometheus metrics**: `GET /metrics` exposes counters (events, jobs, deliveries, duration) and gauges (queue depth, dead jobs) in Prometheus text format. Zero external dependencies.
-- **Health check**: `GET /health` returns JSON with `status` and `queue_depth`, returns 503 if DB is unreachable.
-- **GitHub Actions CI**: Format, clippy, unit tests, and E2E tests on push/PR to main.
-- **Rate limiting**: Per-handler `rate_limit` config (max deliveries/sec). Uses semaphore with 1-second hold to enforce sliding window.
-
-## [0.2.0] - 2025-03-02
-
-### Added
-- **CloudEvents support**: Binary mode (`ce-type` header) and structured mode (`application/cloudevents+json`). `ce-*` headers are forwarded to handlers on delivery.
-- **AWS SNS input**: `POST /sns/{source}` endpoint with automatic subscription confirmation, message envelope unwrapping, and X.509 signature verification (SHA1/SHA256).
-- **`skip_verify` option**: Bypass SNS signature verification for LocalStack / testing.
-- Unit tests (34 tests) and E2E tests (14 + 8 SNS tests).
-- devcontainer with LocalStack for SNS integration testing.
-
-### Changed
-- Project description updated from "webhook receiver" to "event gateway".
-
-## [0.1.0] - 2025-02-22
-
-### Added
+### Core
 - Webhook receive, queue, and retry with exponential backoff.
-- Signature verification: GitHub, Stripe, Shopify, generic HMAC.
+- Signature verification: Stripe (`t=...,v1=...`), GitHub (`sha256=...`), Shopify (Base64 HMAC), generic HMAC.
 - Idempotency via configurable JSONPath dedup key.
 - Dead Letter Queue for exhausted jobs.
-- CLI commands: `init`, `start`, `validate`, `jobs list/retry`, `events list`.
 - SQLite and Postgres support via sqlx AnyPool.
+
+### Event Sources
+- **CloudEvents**: Binary mode (`ce-type` header) and structured mode (`application/cloudevents+json`). `ce-*` headers forwarded to handlers.
+- **AWS SNS**: Automatic subscription confirmation, envelope unwrapping, X.509 signature verification (SHA1/SHA256). `skip_verify` option for LocalStack testing.
+
+### Processing
+- **Event filtering**: `handler.filter` with JSONPath-like syntax (`==`, `!=`, `in [a, b]`, truthy).
+- **Payload transformation**: `handler.transform` with `{{$.path}}` placeholders. Applied at delivery time, original payload preserved.
+- **gRPC output**: `handler.type: grpc` with `qhook.v1.EventReceiver/Deliver` unary RPC. Proto file included.
+
+### Production
+- Concurrent delivery (max 10 parallel).
+- Adaptive polling (50ms busy / 1s idle).
+- Stale job recovery (5min threshold).
+- Auto cleanup (72h retention).
+- Graceful shutdown (SIGTERM/SIGINT + drain with configurable timeout).
+- Postgres `SELECT FOR UPDATE SKIP LOCKED` for multi-instance deployments.
+- Prometheus metrics (`/metrics`) with per-source and per-handler labels.
+- Health check (`/health`) with queue depth.
+- Per-handler rate limiting.
+- Per-IP rate limiting (`server.ip_rate_limit`).
+
+### Security
+- Stripe replay protection (5min signature timestamp).
+- Request body size limit (default 1MB).
+- Inbound concurrency limit (default 100).
+- Constant-time auth token comparison.
+- Security headers (nosniff, DENY, no-store).
+- SNS cert URL domain validation.
+- Transform JSON injection prevention.
+
+### Operations
+- Alert system (Slack, Discord, generic webhook) on DLQ and verification failures.
+- Structured JSON logging (`QHOOK_LOG_FORMAT=json`).
+- Slow query logging (>100ms).
+- SIGHUP config validation (dry-run reload).
+- Configurable DB pool size, stale threshold, retention hours, drain timeout.
+
+### CLI
+- Commands: `init`, `start`, `validate`, `jobs list/retry`, `events list`.
+
+### Deployment
 - Docker image and Compose files.
 - Deployment guides: AWS (ECS Fargate / EC2), Railway, Fly.io, Render.
-- Stripe checkout example app.
+- GitHub Actions CI (fmt + clippy + test + E2E).
+- Documentation site (GitHub Pages).
+- Examples: quickstart, github-webhook, filter-transform, stripe-checkout.

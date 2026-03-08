@@ -7,6 +7,8 @@
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![CI](https://github.com/totte-dev/qhook/actions/workflows/ci.yml/badge.svg)](https://github.com/totte-dev/qhook/actions/workflows/ci.yml)
 
+**[Documentation](https://totte-dev.github.io/qhook/)** | **[Examples](./examples/)** | **[Why qhook?](./docs/why-qhook.md)**
+
 ---
 
 ## Why qhook?
@@ -92,11 +94,13 @@ qhook is configured via a single YAML file. Environment variables are expanded u
 database:
   driver: sqlite                    # sqlite (default) or postgres
   # url: ${DATABASE_URL}            # connection string (required for postgres)
+  max_connections: 10               # DB pool size (default: 10)
 
 server:
   port: 8888                        # listen port (default: 8888)
   max_body_size: 1048576            # max request body in bytes (default: 1MB)
   max_inbound: 100                  # max concurrent inbound requests (default: 100)
+  ip_rate_limit: 100                # per-IP requests/sec limit (default: 0 = disabled)
 
 api:
   auth_token: ${QHOOK_API_TOKEN}    # bearer token for /events endpoint (optional)
@@ -108,6 +112,11 @@ delivery:
     max: 5                          # max delivery attempts (default: 5)
     backoff: exponential            # exponential (default) or fixed
     interval: 30s                   # base retry interval (default: 30s)
+
+worker:
+  stale_threshold_secs: 300         # recover stuck jobs after N seconds (default: 300)
+  retention_hours: 72               # purge completed/dead records after N hours (default: 72)
+  drain_timeout_secs: 30            # max wait for in-flight deliveries on shutdown (default: 30)
 
 sources:
   stripe:
@@ -134,6 +143,7 @@ handlers:
       - checkout.session.completed
       - invoice.paid
     url: http://backend:3000/jobs/payment  # delivery target URL
+    type: http                     # http (default) or grpc
     retry: { max: 8 }              # override default_retry per handler
     timeout: 60s                   # override delivery timeout per handler
     idempotency_key: "$.id"        # JSONPath to dedup key in payload
@@ -143,11 +153,20 @@ handlers:
     source: github
     events: [push]
     url: http://deployer:4000/deploy
+    filter: "$.ref == refs/heads/main"   # only deploy on push to main
 
   on-sns-notification:
     source: my-sns
     events: [order.created]
     url: http://backend:3000/jobs/sns-order
+    transform: |                         # reshape payload before delivery
+      {"order_id": "{{$.data.id}}", "total": {{$.data.amount}}}
+
+# Optional: alert on DLQ and verification failures
+alerts:
+  url: ${SLACK_WEBHOOK_URL}
+  type: slack  # slack / discord / generic
+  on: [dlq, verification_failure]
 ```
 
 Generate a starter config:
@@ -360,6 +379,79 @@ Webhook / SNS / Event     qhook                          Your App
 | `GET /health` | Health check (JSON: status + queue depth, 503 if DB unreachable) |
 | `GET /metrics` | Prometheus metrics |
 
+## Filtering & Transformation
+
+### Event filtering
+
+Use `filter` on a handler to only create jobs when the payload matches a condition:
+
+```yaml
+handlers:
+  paid-only:
+    source: stripe
+    events: [invoice.*]
+    url: http://backend:3000/paid
+    filter: "$.data.object.status == paid"
+```
+
+Supported filter expressions:
+
+| Syntax | Example | Description |
+|--------|---------|-------------|
+| `$.path == value` | `$.status == active` | Equality (strings, numbers, booleans) |
+| `$.path != value` | `$.env != test` | Inequality |
+| `$.path in [a, b]` | `$.type in [created, updated]` | Set membership |
+| `$.path` | `$.data.verified` | Truthy (exists, not null/false/0/"") |
+
+Nested paths work: `$.data.object.customer.email == user@example.com`
+
+### Payload transformation
+
+Use `transform` to reshape the payload before delivery:
+
+```yaml
+handlers:
+  notify:
+    source: stripe
+    events: [checkout.session.completed]
+    url: http://slack-bot:3000/notify
+    transform: |
+      {"text": "New order from {{$.data.object.customer_email}} for {{$.data.object.amount_total}} cents"}
+```
+
+- Placeholders use `{{$.path}}` syntax (same JSONPath as filter/idempotency_key)
+- Original payload is preserved in the database; transformation is applied at delivery time
+- Supports strings, numbers, booleans, arrays, and nested objects
+- Missing fields resolve to `null`
+
+## gRPC Output
+
+Handlers can deliver events via gRPC instead of HTTP by setting `type: grpc`:
+
+```yaml
+handlers:
+  grpc-handler:
+    source: app
+    events: [order.created]
+    url: http://grpc-service:50051
+    type: grpc
+```
+
+qhook calls the `qhook.v1.EventReceiver/Deliver` unary RPC. The proto definition is at [`proto/qhook.proto`](proto/qhook.proto) — use it to generate server stubs in your language.
+
+The `DeliverRequest` includes:
+
+| Field | Description |
+|-------|-------------|
+| `event_id` | ULID of the original event |
+| `event_type` | Event type (from CloudEvents header or payload) |
+| `handler` | Handler name from config |
+| `payload` | JSON payload (original or transformed) |
+| `metadata` | CloudEvents headers and qhook metadata |
+| `attempt` | Current attempt number (1-based) |
+
+Return `success: true` in `DeliverResponse` to mark delivery complete. `success: false` triggers retry with exponential backoff (same as HTTP non-2xx).
+
 ## Monitoring
 
 ### Health check
@@ -382,15 +474,49 @@ Exposed metrics:
 | Metric | Type | Description |
 |--------|------|-------------|
 | `qhook_events_received_total` | counter | Total events received |
+| `qhook_events_by_source_total{source}` | counter | Events received per source |
 | `qhook_events_duplicated_total` | counter | Duplicate events ignored |
 | `qhook_jobs_created_total` | counter | Total jobs created |
 | `qhook_deliveries_total{result}` | counter | Delivery attempts (success/failure) |
+| `qhook_deliveries_by_handler_total{handler,result}` | counter | Delivery attempts per handler |
 | `qhook_delivery_duration_seconds_sum` | counter | Total delivery duration |
 | `qhook_delivery_duration_seconds_count` | counter | Total delivery attempts |
+| `qhook_verification_failures_total{source}` | counter | Signature verification failures per source |
+| `qhook_dlq_total{handler}` | counter | Jobs moved to DLQ per handler |
+| `qhook_delivery_errors_by_type_total{type}` | counter | Delivery errors by type (4xx/5xx/timeout/network) |
+| `qhook_delivery_duration_seconds_max` | gauge | Max single delivery duration |
+| `qhook_db_errors_total` | counter | Database errors |
+| `qhook_alerts_sent_total` | counter | Alert webhooks sent successfully |
+| `qhook_alerts_failed_total` | counter | Alert webhooks that failed |
 | `qhook_queue_depth` | gauge | Jobs waiting to be delivered |
 | `qhook_dead_jobs` | gauge | Jobs in dead letter queue |
+| `qhook_metric_label_count` | gauge | Unique label values (monitors for label explosion) |
 
 No external dependencies -- metrics are formatted using atomic counters.
+
+### Alerts
+
+qhook can send webhook alerts when jobs are moved to the DLQ or signature verification fails. Configure in `qhook.yaml`:
+
+```yaml
+alerts:
+  url: https://hooks.slack.com/services/T.../B.../xxx
+  type: slack  # slack / discord / generic
+  on: [dlq, verification_failure]
+```
+
+Supported alert types:
+- **`generic`** (default): JSON payload with `alert`, `message`, and event-specific fields.
+- **`slack`**: Slack incoming webhook format (`{ "text": "..." }`).
+- **`discord`**: Discord webhook format with embeds (`{ "embeds": [...] }`).
+
+### Structured logging
+
+By default, qhook outputs human-readable logs. For production log aggregation (CloudWatch, Datadog, etc.), enable JSON logging:
+
+```bash
+QHOOK_LOG_FORMAT=json qhook start
+```
 
 ## Security
 
@@ -399,6 +525,8 @@ No external dependencies -- metrics are formatted using atomic counters.
 - **Request body limit**: Configurable max body size (default: 1MB) prevents memory exhaustion from oversized payloads.
 - **Inbound concurrency limit**: Configurable max concurrent requests (default: 100) protects against overload.
 - **Security headers**: All responses include `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and `Cache-Control: no-store`.
+- **Handler URL validation**: URLs are validated at config load (http/https only). Private IP ranges (10.x, 172.x, 192.168.x) trigger warnings.
+- **Config validation**: `qhook validate` checks source references, URL formats, and alert configuration.
 - **TLS**: qhook does not terminate TLS itself. Use a reverse proxy (nginx, Caddy, ALB) in front of qhook for HTTPS.
 
 ```yaml
@@ -406,6 +534,7 @@ server:
   port: 8888
   max_body_size: 1048576   # 1MB (default)
   max_inbound: 100         # max concurrent requests (default)
+  ip_rate_limit: 100       # per-IP requests/sec (0 = disabled)
 ```
 
 ## Reliability
@@ -419,16 +548,25 @@ qhook is designed to not lose events, even during crashes or restarts.
 - **Rate limiting**: Set `rate_limit` on a handler to cap deliveries per second and protect downstream services.
 - **Multi-instance safe (Postgres)**: Uses `SELECT ... FOR UPDATE SKIP LOCKED` to prevent duplicate delivery across multiple qhook instances.
 
+## Examples
+
+| Example | Description |
+|---------|-------------|
+| [quickstart](./examples/quickstart/) | Minimal setup, no Docker needed. Run in 2 minutes. |
+| [github-webhook](./examples/github-webhook/) | GitHub push/PR events with signature verification and fan-out. |
+| [filter-transform](./examples/filter-transform/) | Event filtering (`$.status == paid`) and payload transformation. |
+| [stripe-checkout](./examples/stripe-checkout/) | Stripe checkout with dual handlers (payment + fulfillment). |
+
 ## Deployment
 
 Deployment examples are provided for common setups:
 
 - [`docker-compose.yaml`](./docker-compose.yaml) -- Local development with SQLite
 - [`docker-compose.prod.yaml`](./docker-compose.prod.yaml) -- Production with Postgres
-- [`docs/deploy-aws.md`](./docs/deploy-aws.md) -- AWS (ECS Fargate / EC2)
-- [`docs/deploy-railway.md`](./docs/deploy-railway.md) -- Railway
-- [`docs/deploy-flyio.md`](./docs/deploy-flyio.md) -- Fly.io
-- [`docs/deploy-render.md`](./docs/deploy-render.md) -- Render
+- [`docs/deploy/aws.md`](./docs/deploy/aws.md) -- AWS (ECS Fargate / EC2)
+- [`docs/deploy/railway.md`](./docs/deploy/railway.md) -- Railway
+- [`docs/deploy/flyio.md`](./docs/deploy/flyio.md) -- Fly.io
+- [`docs/deploy/render.md`](./docs/deploy/render.md) -- Render
 
 ### Docker quick reference
 

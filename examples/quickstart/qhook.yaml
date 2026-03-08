@@ -1,0 +1,17 @@
+# Minimal qhook config -- no external dependencies
+database:
+  driver: sqlite
+
+server:
+  port: 8888
+
+sources:
+  app:
+    type: event
+
+handlers:
+  process-order:
+    source: app
+    events: [order.created]
+    url: http://localhost:9000/order
+    retry: { max: 3 }
