@@ -1,0 +1,35 @@
+# GitHub webhook example config
+
+database:
+  driver: sqlite
+
+server:
+  port: 8888
+
+sources:
+  # In production, use type: webhook with verify: github
+  # For local testing, we use type: event (no signature check)
+  github:
+    type: event
+    # Uncomment for production:
+    # type: webhook
+    # verify: github
+    # secret: ${GITHUB_WEBHOOK_SECRET}
+
+handlers:
+  # Deploy on push to main branch
+  deploy:
+    source: github
+    events: [push]
+    url: http://app:5000/deploy
+    filter: "$.ref == refs/heads/main"
+    retry: { max: 3 }
+
+  # Notify on pull request activity
+  notify-pr:
+    source: github
+    events: [pull_request]
+    url: http://app:5000/notify
+    transform: |
+      {"text": "PR #{{$.number}} {{$.action}} by {{$.pull_request.user.login}}: {{$.pull_request.title}}"}
+    retry: { max: 2 }

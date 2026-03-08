@@ -1,3 +1,8 @@
+---
+layout: default
+title: Deploy to Fly.io
+---
+
 # Deploy qhook to Fly.io
 
 ## 1. Initial Setup

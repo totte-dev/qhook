@@ -1,8 +1,12 @@
 use anyhow::{Context, Result};
 use chrono::{NaiveDateTime, Utc};
 use sqlx::{AnyPool, any::AnyPoolOptions};
+use std::time::Instant;
 
 use crate::config::DatabaseConfig;
+
+/// Log queries that take longer than this.
+const SLOW_QUERY_MS: u128 = 100;
 
 #[allow(dead_code)]
 pub struct Database {
@@ -27,7 +31,7 @@ impl Database {
         sqlx::any::install_default_drivers();
 
         let pool = AnyPoolOptions::new()
-            .max_connections(10)
+            .max_connections(config.max_connections)
             .connect(&url)
             .await
             .with_context(|| format!("Failed to connect to database: {url}"))?;
@@ -210,10 +214,9 @@ impl Database {
             .format("%Y-%m-%dT%H:%M:%S%.3f")
             .to_string();
 
-        if self.driver == "postgres" {
-            // Atomic fetch-and-lock: no race between multiple workers.
-            // Return attempt - 1 so the caller sees the pre-update value (same as SQLite path).
-            let rows = sqlx::query_as::<_, JobRow>(
+        let start = Instant::now();
+        let rows = if self.driver == "postgres" {
+            sqlx::query_as::<_, JobRow>(
                 "UPDATE jobs SET status = 'running', started_at = $1, attempt = attempt + 1 \
                  WHERE id IN ( \
                      SELECT id FROM jobs \
@@ -227,11 +230,9 @@ impl Database {
             .bind(&now)
             .bind(limit)
             .fetch_all(&self.pool)
-            .await?;
-
-            Ok(rows)
+            .await?
         } else {
-            let rows = sqlx::query_as::<_, JobRow>(
+            sqlx::query_as::<_, JobRow>(
                 "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
                  FROM jobs \
                  WHERE status IN ('available', 'retryable') AND scheduled_at <= $1 \
@@ -241,10 +242,14 @@ impl Database {
             .bind(&now)
             .bind(limit)
             .fetch_all(&self.pool)
-            .await?;
-
-            Ok(rows)
+            .await?
+        };
+        let elapsed = start.elapsed().as_millis();
+        if elapsed > SLOW_QUERY_MS {
+            tracing::warn!(query = "fetch_available_jobs", duration_ms = elapsed, rows = rows.len(), "Slow query");
         }
+
+        Ok(rows)
     }
 
     /// Mark a job as running (SQLite only — Postgres does this in fetch_available_jobs).
@@ -371,6 +376,17 @@ impl Database {
         Ok(row.0)
     }
 
+    /// Fetch payload and headers in a single query.
+    pub async fn get_event_data(&self, event_id: &str) -> Result<(String, Option<String>)> {
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT payload, headers FROM events WHERE id = $1")
+                .bind(event_id)
+                .fetch_one(&self.pool)
+                .await?;
+
+        Ok(row)
+    }
+
     pub async fn list_jobs(&self, status: Option<&str>, limit: i32) -> Result<Vec<JobRow>> {
         let rows = if let Some(status) = status {
             sqlx::query_as::<_, JobRow>(
@@ -426,6 +442,7 @@ impl Database {
             .to_string();
         let now_str = now.format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
 
+        let start = Instant::now();
         let result = sqlx::query(
             "UPDATE jobs SET status = 'retryable', scheduled_at = $1 \
              WHERE status = 'running' AND started_at <= $2",
@@ -434,6 +451,10 @@ impl Database {
         .bind(&cutoff)
         .execute(&self.pool)
         .await?;
+        let elapsed = start.elapsed().as_millis();
+        if elapsed > SLOW_QUERY_MS {
+            tracing::warn!(query = "recover_stale_jobs", duration_ms = elapsed, "Slow query");
+        }
 
         Ok(result.rows_affected())
     }
@@ -444,6 +465,7 @@ impl Database {
             .format("%Y-%m-%dT%H:%M:%S%.3f")
             .to_string();
 
+        let start = Instant::now();
         let attempts = sqlx::query(
             "DELETE FROM job_attempts WHERE job_id IN \
              (SELECT id FROM jobs WHERE status IN ('completed', 'dead') AND completed_at < $1)",
@@ -458,6 +480,10 @@ impl Database {
         .bind(&cutoff)
         .execute(&self.pool)
         .await?;
+        let elapsed = start.elapsed().as_millis();
+        if elapsed > SLOW_QUERY_MS {
+            tracing::warn!(query = "cleanup_old_records", duration_ms = elapsed, "Slow query");
+        }
 
         Ok((jobs.rows_affected(), attempts.rows_affected()))
     }

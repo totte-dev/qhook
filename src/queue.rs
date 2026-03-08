@@ -8,6 +8,8 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::interval;
 
+use crate::alert::{AlertEvent, SharedAlerter};
+use crate::config::WorkerConfig;
 use crate::db::Database;
 use crate::metrics::Metrics;
 
@@ -15,29 +17,37 @@ use crate::metrics::Metrics;
 const MAX_CONCURRENCY: usize = 10;
 /// Batch size for job fetching.
 const BATCH_SIZE: i32 = 10;
-/// Jobs stuck in 'running' longer than this are recovered (seconds).
-const STALE_THRESHOLD_SECS: i64 = 300;
-/// Completed/dead records older than this are purged (hours).
-const RETENTION_HOURS: i64 = 72;
 /// How often to run maintenance (stale recovery + cleanup).
 const MAINTENANCE_INTERVAL_SECS: u64 = 3600;
 
 pub struct Worker {
     db: Arc<Database>,
     metrics: Arc<Metrics>,
+    alerter: SharedAlerter,
+    worker_config: WorkerConfig,
     http: reqwest::Client,
     poll_interval: Duration,
     shutdown: tokio::sync::watch::Receiver<bool>,
     /// Per-handler rate limiters (handler_name -> semaphore with N permits = N/sec).
     rate_limiters: HashMap<String, Arc<Semaphore>>,
+    /// Per-handler payload transform templates.
+    transforms: Arc<HashMap<String, String>>,
+    /// Per-handler type overrides (only non-"http" entries).
+    handler_types: Arc<HashMap<String, String>>,
+    /// Lazily created gRPC channels keyed by URL.
+    grpc_channels: Arc<std::sync::Mutex<HashMap<String, tonic::transport::Channel>>>,
 }
 
 impl Worker {
     pub fn new(
         db: Arc<Database>,
         metrics: Arc<Metrics>,
+        alerter: SharedAlerter,
+        worker_config: WorkerConfig,
         shutdown: tokio::sync::watch::Receiver<bool>,
         handler_rate_limits: HashMap<String, u32>,
+        handler_transforms: HashMap<String, String>,
+        handler_types: HashMap<String, String>,
     ) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -52,10 +62,15 @@ impl Worker {
         Self {
             db,
             metrics,
+            alerter,
+            worker_config,
             http,
             poll_interval: Duration::from_secs(1),
             shutdown,
             rate_limiters,
+            transforms: Arc::new(handler_transforms),
+            handler_types: Arc::new(handler_types),
+            grpc_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -63,7 +78,7 @@ impl Worker {
         tracing::info!("Queue worker started");
 
         // Recover stale jobs on startup
-        run_maintenance(&self.db).await;
+        run_maintenance(&self.db, &self.metrics, self.worker_config.stale_threshold_secs, self.worker_config.retention_hours).await;
 
         let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENCY));
         let mut in_flight = JoinSet::new();
@@ -71,6 +86,7 @@ impl Worker {
         let busy_interval = Duration::from_millis(50);
         let mut maint_ticker = interval(Duration::from_secs(MAINTENANCE_INTERVAL_SECS));
         maint_ticker.tick().await; // skip immediate first tick
+        let mut consecutive_db_errors: u32 = 0;
 
         loop {
             tokio::select! {
@@ -86,9 +102,22 @@ impl Worker {
                         semaphore.available_permits() as i32
                     ).max(1);
                     let jobs = match self.db.fetch_available_jobs(batch).await {
-                        Ok(j) => j,
+                        Ok(j) => {
+                            consecutive_db_errors = 0;
+                            j
+                        }
                         Err(e) => {
-                            tracing::error!(error = %e, "Failed to fetch jobs");
+                            consecutive_db_errors += 1;
+                            self.metrics.inc_db_errors();
+                            let backoff = Duration::from_secs(
+                                (1u64 << consecutive_db_errors.min(5)).min(30)
+                            );
+                            tracing::error!(
+                                error = %e,
+                                backoff_secs = backoff.as_secs(),
+                                "Failed to fetch jobs, backing off"
+                            );
+                            poll_ticker.reset_after(backoff);
                             continue;
                         }
                     };
@@ -106,6 +135,7 @@ impl Worker {
                                 Ok(true) => {}
                                 Ok(false) => { drop(permit); continue; }
                                 Err(e) => {
+                                    self.metrics.inc_db_errors();
                                     tracing::error!(job_id = job.id, error = %e, "Failed to lock job");
                                     drop(permit);
                                     continue;
@@ -116,6 +146,10 @@ impl Worker {
                         let db = self.db.clone();
                         let http = self.http.clone();
                         let metrics = self.metrics.clone();
+                        let alerter = self.alerter.clone();
+                        let transforms = self.transforms.clone();
+                        let handler_types = self.handler_types.clone();
+                        let grpc_channels = self.grpc_channels.clone();
                         let rate_sem = self.rate_limiters.get(&job.handler).cloned();
 
                         in_flight.spawn(async move {
@@ -126,7 +160,7 @@ impl Worker {
                                 None
                             };
 
-                            deliver_job(&db, &http, &metrics, &job).await;
+                            deliver_job(&db, &http, &metrics, &alerter, &transforms, &handler_types, &grpc_channels, &job).await;
                             drop(permit);
 
                             // Hold rate permit for 1s to enforce per-second limit
@@ -150,35 +184,48 @@ impl Worker {
                     }
                 }
                 _ = maint_ticker.tick() => {
-                    run_maintenance(&self.db).await;
+                    run_maintenance(&self.db, &self.metrics, self.worker_config.stale_threshold_secs, self.worker_config.retention_hours).await;
                 }
             }
         }
 
-        // Drain in-flight deliveries before stopping
+        // Drain in-flight deliveries with timeout
         let remaining = in_flight.len();
         if remaining > 0 {
-            tracing::info!(count = remaining, "Draining in-flight deliveries");
-        }
-        while let Some(result) = in_flight.join_next().await {
-            if let Err(e) = result {
-                tracing::error!(error = %e, "Delivery task panicked during shutdown");
+            let timeout = Duration::from_secs(self.worker_config.drain_timeout_secs);
+            tracing::info!(count = remaining, timeout_secs = timeout.as_secs(), "Draining in-flight deliveries");
+            let drain = async {
+                while let Some(result) = in_flight.join_next().await {
+                    if let Err(e) = result {
+                        tracing::error!(error = %e, "Delivery task panicked during shutdown");
+                    }
+                }
+            };
+            if tokio::time::timeout(timeout, drain).await.is_err() {
+                let abandoned = in_flight.len();
+                tracing::warn!(count = abandoned, "Drain timeout reached, abandoning remaining deliveries");
             }
         }
         tracing::info!("Worker stopped");
     }
 }
 
-async fn run_maintenance(db: &Database) {
-    match db.recover_stale_jobs(STALE_THRESHOLD_SECS).await {
+async fn run_maintenance(db: &Database, metrics: &Metrics, stale_secs: i64, retention_hours: i64) {
+    match db.recover_stale_jobs(stale_secs).await {
         Ok(0) => {}
         Ok(n) => tracing::info!(count = n, "Recovered stale running jobs"),
-        Err(e) => tracing::error!(error = %e, "Failed to recover stale jobs"),
+        Err(e) => {
+            metrics.inc_db_errors();
+            tracing::error!(error = %e, "Failed to recover stale jobs");
+        }
     }
-    match db.cleanup_old_records(RETENTION_HOURS).await {
+    match db.cleanup_old_records(retention_hours).await {
         Ok((0, 0)) => {}
         Ok((jobs, attempts)) => tracing::info!(jobs, attempts, "Cleaned up old records"),
-        Err(e) => tracing::error!(error = %e, "Failed to cleanup old records"),
+        Err(e) => {
+            metrics.inc_db_errors();
+            tracing::error!(error = %e, "Failed to cleanup old records");
+        }
     }
 }
 
@@ -186,10 +233,16 @@ async fn deliver_job(
     db: &Database,
     http: &reqwest::Client,
     metrics: &Metrics,
+    alerter: &SharedAlerter,
+    transforms: &HashMap<String, String>,
+    handler_types: &HashMap<String, String>,
+    grpc_channels: &std::sync::Mutex<HashMap<String, tonic::transport::Channel>>,
     job: &crate::db::JobRow,
 ) {
     let start = std::time::Instant::now();
-    let result = deliver(db, http, job).await;
+    let transform = transforms.get(&job.handler);
+    let is_grpc = handler_types.get(&job.handler).is_some_and(|t| t == "grpc");
+    let result = deliver(db, http, grpc_channels, job, transform.map(|s| s.as_str()), is_grpc).await;
     let duration_ms = start.elapsed().as_millis() as i64;
 
     match result {
@@ -207,13 +260,15 @@ async fn deliver_job(
                 )
                 .await
             {
+                metrics.inc_db_errors();
                 tracing::error!(job_id = job.id, error = %e, "Failed to insert attempt");
                 return;
             }
 
             if (200..300).contains(&status_code) {
-                metrics.inc_delivery_success(duration_ms as u64);
+                metrics.inc_delivery_success_for(&job.handler, duration_ms as u64);
                 if let Err(e) = db.mark_job_completed(&job.id).await {
+                    metrics.inc_db_errors();
                     tracing::error!(job_id = job.id, error = %e, "Failed to mark completed");
                 }
                 tracing::info!(
@@ -224,17 +279,40 @@ async fn deliver_job(
                     "Job completed"
                 );
             } else {
-                metrics.inc_delivery_failure(duration_ms as u64);
+                metrics.inc_delivery_failure_for(&job.handler, duration_ms as u64);
+                let error_type = if (400..500).contains(&status_code) {
+                    "4xx"
+                } else {
+                    "5xx"
+                };
+                metrics.inc_delivery_error_type(error_type);
                 let error = format!("HTTP {status_code}");
-                if let Err(e) = handle_failure(db, job, &error).await {
-                    tracing::error!(job_id = job.id, error = %e, "Failed to handle failure");
+                match handle_failure(db, job, &error).await {
+                    Ok(true) => {
+                        metrics.inc_dlq(&job.handler);
+                        if let Some(a) = alerter {
+                            a.send(AlertEvent::Dlq {
+                                job_id: job.id.clone(),
+                                handler: job.handler.clone(),
+                                attempts: job.attempt + 1,
+                            });
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => tracing::error!(job_id = job.id, error = %e, "Failed to handle failure"),
                 }
             }
         }
         Err(e) => {
             let error = e.to_string();
             let attempt_id = ulid::Ulid::new().to_string();
-            metrics.inc_delivery_failure(duration_ms as u64);
+            metrics.inc_delivery_failure_for(&job.handler, duration_ms as u64);
+            let error_type = if e.downcast_ref::<reqwest::Error>().is_some_and(|re| re.is_timeout()) {
+                "timeout"
+            } else {
+                "network"
+            };
+            metrics.inc_delivery_error_type(error_type);
             let _ = db
                 .insert_attempt(
                     &attempt_id,
@@ -246,17 +324,44 @@ async fn deliver_job(
                     duration_ms,
                 )
                 .await;
-            if let Err(e) = handle_failure(db, job, &error).await {
-                tracing::error!(job_id = job.id, error = %e, "Failed to handle failure");
+            match handle_failure(db, job, &error).await {
+                Ok(true) => metrics.inc_dlq(&job.handler),
+                Ok(false) => {}
+                Err(e) => tracing::error!(job_id = job.id, error = %e, "Failed to handle failure"),
             }
         }
     }
 }
 
-async fn deliver(db: &Database, http: &reqwest::Client, job: &crate::db::JobRow) -> Result<u16> {
-    let payload = db.get_event_payload(&job.event_id).await?;
-    let headers_json = db.get_event_headers(&job.event_id).await?;
+async fn deliver(
+    db: &Database,
+    http: &reqwest::Client,
+    grpc_channels: &std::sync::Mutex<HashMap<String, tonic::transport::Channel>>,
+    job: &crate::db::JobRow,
+    transform: Option<&str>,
+    is_grpc: bool,
+) -> Result<u16> {
+    let (raw_payload, headers_json) = db.get_event_data(&job.event_id).await?;
 
+    // Apply transformation if configured
+    let payload = match transform {
+        Some(template) => crate::api::apply_transform(&raw_payload, template),
+        None => raw_payload,
+    };
+
+    if is_grpc {
+        deliver_grpc(grpc_channels, job, &payload, &headers_json).await
+    } else {
+        deliver_http(http, job, &payload, &headers_json).await
+    }
+}
+
+async fn deliver_http(
+    http: &reqwest::Client,
+    job: &crate::db::JobRow,
+    payload: &str,
+    headers_json: &Option<String>,
+) -> Result<u16> {
     let mut request = http
         .post(&job.url)
         .header("Content-Type", "application/json")
@@ -266,7 +371,7 @@ async fn deliver(db: &Database, http: &reqwest::Client, job: &crate::db::JobRow)
         .header("X-Qhook-Attempt", (job.attempt + 1).to_string());
 
     // Forward CloudEvents headers from the original event
-    if let Some(ref hj) = headers_json
+    if let Some(hj) = headers_json
         && let Ok(headers) = serde_json::from_str::<std::collections::HashMap<String, String>>(hj)
     {
         for (key, value) in &headers {
@@ -276,11 +381,77 @@ async fn deliver(db: &Database, http: &reqwest::Client, job: &crate::db::JobRow)
         }
     }
 
-    let response = request.body(payload).send().await?;
+    let response = request.body(payload.to_string()).send().await?;
     Ok(response.status().as_u16())
 }
 
-async fn handle_failure(db: &Database, job: &crate::db::JobRow, error: &str) -> Result<()> {
+async fn deliver_grpc(
+    grpc_channels: &std::sync::Mutex<HashMap<String, tonic::transport::Channel>>,
+    job: &crate::db::JobRow,
+    payload: &str,
+    headers_json: &Option<String>,
+) -> Result<u16> {
+    // Get or create channel for this URL
+    let channel = {
+        let mut channels = grpc_channels.lock().unwrap_or_else(|e| e.into_inner());
+        match channels.get(&job.url) {
+            Some(ch) => ch.clone(),
+            None => {
+                let ch = crate::grpc::create_channel(&job.url)?;
+                channels.insert(job.url.clone(), ch.clone());
+                ch
+            }
+        }
+    };
+
+    // Build metadata from CloudEvents headers
+    let mut metadata = HashMap::new();
+    metadata.insert("job_id".to_string(), job.id.clone());
+    if let Some(hj) = headers_json
+        && let Ok(headers) = serde_json::from_str::<HashMap<String, String>>(hj)
+    {
+        for (key, value) in headers {
+            if key.starts_with("ce-") {
+                metadata.insert(key, value);
+            }
+        }
+    }
+
+    // Get event_type from the event
+    let event_type = metadata
+        .get("ce-type")
+        .cloned()
+        .unwrap_or_else(|| "event".to_string());
+
+    let request = crate::grpc::DeliverRequest {
+        event_id: job.event_id.clone(),
+        event_type,
+        handler: job.handler.clone(),
+        payload: payload.to_string(),
+        metadata,
+        attempt: job.attempt + 1,
+    };
+
+    match crate::grpc::deliver(&channel, request).await {
+        Ok(response) => {
+            if response.success {
+                Ok(200)
+            } else {
+                tracing::warn!(
+                    job_id = job.id,
+                    handler = job.handler,
+                    message = response.message,
+                    "gRPC handler returned failure"
+                );
+                Ok(500) // Treat as server error for retry logic
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Handle delivery failure. Returns `true` if the job was moved to DLQ.
+async fn handle_failure(db: &Database, job: &crate::db::JobRow, error: &str) -> Result<bool> {
     let current_attempt = job.attempt + 1;
 
     if current_attempt >= job.max_attempts {
@@ -291,6 +462,7 @@ async fn handle_failure(db: &Database, job: &crate::db::JobRow, error: &str) -> 
             attempts = current_attempt,
             "Job moved to DLQ"
         );
+        Ok(true)
     } else {
         // Exponential backoff: 30s * 2^attempt
         let backoff_secs = 30i64 * (1i64 << current_attempt.min(10));
@@ -304,7 +476,6 @@ async fn handle_failure(db: &Database, job: &crate::db::JobRow, error: &str) -> 
             error,
             "Job scheduled for retry"
         );
+        Ok(false)
     }
-
-    Ok(())
 }

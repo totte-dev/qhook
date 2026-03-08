@@ -1,3 +1,8 @@
+---
+layout: default
+title: Deploy to Render
+---
+
 # Deploy qhook to Render
 
 ## 1. Create a Web Service

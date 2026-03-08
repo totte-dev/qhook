@@ -104,10 +104,18 @@ impl Args {
                 db.migrate().await?;
 
                 let state = crate::api::AppState::new(cfg, db);
-                crate::api::serve(state).await
+                crate::api::serve(state, config).await
             }
             Command::Validate { config } => {
-                Config::load(&config).context("Validation failed")?;
+                let cfg = Config::load(&config).context("Validation failed")?;
+                println!("Sources: {}", cfg.sources.len());
+                println!("Handlers: {}", cfg.handlers.len());
+                for (name, handler) in &cfg.handlers {
+                    println!("  {} -> {} (source: {})", name, handler.url, handler.source);
+                }
+                if cfg.alerts.is_some() {
+                    println!("Alerts: configured");
+                }
                 tracing::info!("Config is valid");
                 Ok(())
             }

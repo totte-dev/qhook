@@ -1,3 +1,8 @@
+---
+layout: default
+title: Deploy to Railway
+---
+
 # Deploy qhook to Railway
 
 > Railway's free plan has execution hour limits, but works well for testing.

@@ -16,15 +16,17 @@ qhook is a lightweight event gateway with built-in queue and retry. Rust (axum +
 - **Update `CHANGELOG.md`** when completing features (Keep a Changelog format).
 - **Update `README.md` and docs** when adding features — new config options, endpoints, sections as needed.
 
-### 2. Test-Driven Development
+### 2. Test-Driven Development (MANDATORY)
 
-Write or update tests **before** implementing features:
+**NEVER implement before tests exist.** Always:
 
 1. Write unit tests in `#[cfg(test)] mod tests` within the relevant source file.
 2. Write E2E tests in `tests/e2e.sh` (basic) or `tests/e2e_sns.sh` (SNS/LocalStack).
-3. Run tests to confirm they fail.
+3. Run tests to **confirm they fail**.
 4. Implement the feature.
-5. Run tests to confirm they pass.
+5. Run tests to **confirm they pass**.
+
+If implementing multiple features, repeat this cycle per feature — do not batch implementations before writing tests.
 
 ### 3. Test Commands
 
@@ -59,16 +61,28 @@ src/
   db.rs         — SQLite/Postgres via sqlx AnyPool
   metrics.rs    — Prometheus metrics (atomic counters, no deps)
   queue.rs      — Job worker (poll, deliver, retry, DLQ)
+  grpc.rs       — gRPC output (prost types, tonic client, no codegen)
   verify.rs     — Signature verification (GitHub, Stripe, Shopify, HMAC, SNS X.509)
   cli.rs        — CLI commands (start, init, validate, jobs, events)
 tests/
-  e2e.sh        — E2E tests (14 tests)
+  e2e.sh        — E2E tests (20 tests)
   e2e_sns.sh    — SNS E2E tests with LocalStack (8 tests)
   mock_server.py — Python mock HTTP server for E2E
   bench.sh      — Benchmark script (receive RPS + delivery throughput)
 .github/workflows/
   ci.yml        — GitHub Actions CI (fmt, clippy, test, E2E)
-docs/           — Deployment guides, why-qhook comparison
+  pages.yml     — GitHub Pages deploy (docs/ on push to main)
+examples/
+  quickstart/       — Minimal setup, no Docker (qhook binary + curl)
+  github-webhook/   — GitHub push/PR with verification + fan-out
+  filter-transform/ — Event filtering + payload transformation
+  stripe-checkout/  — Stripe checkout with dual handlers
+docs/               — GitHub Pages user guide (Jekyll, Cayman theme)
+  index.md          — Top page with navigation
+  getting-started.md, configuration.md, cli.md, examples.md
+  guides/           — Feature guides (webhook-verification, cloudevents, sns, filtering, grpc, monitoring, security)
+  deploy/           — Platform deploy guides (aws, flyio, railway, render)
+  why-qhook.md      — DIY vs qhook comparison
 ```
 
 ## Conventions
@@ -81,7 +95,7 @@ docs/           — Deployment guides, why-qhook comparison
 - **Timestamps**: UTC, format `%Y-%m-%dT%H:%M:%S%.3f` stored as TEXT.
 - **Config env vars**: `${VAR}` or `${VAR:-default}` syntax.
 - **Rust version**: 1.85+ (edition 2024). Use latest stable features (e.g., let chains).
-- **Version**: Currently v0.2.0. Update in Cargo.toml for releases.
+- **Version**: Currently v0.1.0. Update in Cargo.toml for releases.
 - **Docker image**: `ghcr.io/totte-dev/qhook`. Multi-stage build, ~119MB.
 - **Commit**: Include `Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>`.
 

@@ -1,3 +1,8 @@
+---
+layout: default
+title: Why qhook?
+---
+
 # Why qhook?
 
 Receiving a webhook is trivial -- a few lines of code. But running webhooks **safely in production** is a different story. This document shows the concrete difference in code volume and operational burden between a DIY implementation and qhook.
@@ -329,6 +334,48 @@ qhook jobs retry <job-id>
 # Retry all dead jobs
 qhook jobs retry
 ```
+
+---
+
+## 6. How qhook Compares
+
+### vs. Cloud messaging services (SQS + SNS, Pub/Sub, Event Grid)
+
+Cloud-managed event services are the standard approach for event-driven architectures. They handle queuing, retry, and fan-out at scale.
+
+| | AWS SQS + SNS | GCP Pub/Sub | Azure Event Grid | qhook |
+|---|---|---|---|---|
+| **Queuing + retry** | Yes | Yes | Yes | Yes |
+| **Fan-out** | SNS → multiple SQS | Topic → multiple subscriptions | Topic → multiple subscribers | Multiple handlers in YAML |
+| **Webhook verification** | No (DIY) | No (DIY) | No (DIY) | Stripe, GitHub, Shopify, HMAC, SNS X.509 |
+| **Local development** | LocalStack / emulators | Emulator | No emulator | SQLite, works anywhere |
+| **Vendor lock-in** | AWS only | GCP only | Azure only | None |
+| **Cost** | Pay per message | Pay per message | Pay per event | Free (self-hosted) |
+| **Setup** | IAM + Topic + Queue + DLQ + permissions | Topic + Subscription + IAM | Topic + Subscription | One YAML file |
+
+Cloud services are the right choice for large-scale production systems. But for small teams, side projects, or multi-cloud setups, the overhead of IAM policies, queue configuration, and vendor-specific SDKs adds up. qhook gives you the same receive → queue → fan-out → retry pattern in a single config file, running locally with SQLite or in production with Postgres.
+
+### vs. DIY queue setups (Redis + Celery, BullMQ, Sidekiq)
+
+A common pattern: use Redis as a message broker with a worker framework.
+
+| | Redis + Celery | Redis + BullMQ | Redis + Sidekiq | qhook |
+|---|---|---|---|---|
+| **Language** | Python | Node.js | Ruby | Any (HTTP/gRPC delivery) |
+| **External deps** | Redis | Redis | Redis | None |
+| **Webhook verification** | DIY | DIY | DIY | Built-in (5 providers) |
+| **Retry + DLQ** | Built-in | Built-in | Built-in | Built-in |
+| **Fan-out** | Manual dispatch | Manual dispatch | Manual dispatch | YAML config |
+| **Idempotency** | DIY (DB table + code) | DIY | DIY | `idempotency_key: "$.id"` |
+| **Monitoring** | Flower / Bull Board | Bull Board | Sidekiq Web | Prometheus + CLI |
+
+These work well as general-purpose job queues. But for webhook handling specifically, you still need to write signature verification, idempotency checks, and routing logic yourself. And you need to run and maintain Redis. qhook bundles all of this into a single binary with zero infrastructure dependencies.
+
+### Where qhook fits
+
+qhook is not a replacement for SQS or Celery in general-purpose queuing. It's purpose-built for a specific pattern: **receive events (webhooks or internal) → verify → queue → deliver reliably to HTTP/gRPC endpoints**.
+
+If you need complex workflows, priority queues, or scheduled jobs, use a general-purpose job queue. If you need to fan out events to multiple services with retry and verification, qhook handles that with minimal setup.
 
 ---
 

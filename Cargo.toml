@@ -1,10 +1,31 @@
 [package]
 name = "qhook"
-version = "0.2.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Lightweight event gateway with queue and retry. SQS for webhooks and events."
 license = "Apache-2.0"
+repository = "https://github.com/totte-dev/qhook"
+homepage = "https://totte-dev.github.io/qhook/"
+documentation = "https://totte-dev.github.io/qhook/"
+readme = "README.md"
+keywords = ["webhook", "event-gateway", "queue", "retry", "cloudevents"]
+categories = ["web-programming", "asynchronous", "network-programming"]
+exclude = [
+    "tests/",
+    "examples/",
+    "docs/",
+    ".github/",
+    ".claude/",
+    ".devcontainer/",
+    ".dockerignore",
+    "docker-compose*.yaml",
+    "Dockerfile",
+    "KANBAN.md",
+    "CLAUDE.md",
+    "renovate.json",
+    "CHANGELOG.md",
+]
 
 [dependencies]
 # Web
@@ -34,6 +55,11 @@ x509-parser = "0.16"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+
+# gRPC
+tonic = { version = "0.12", default-features = false, features = ["transport", "prost", "channel"] }
+http = "1"
+prost = "0.13"
 
 # Utilities
 ulid = "1"

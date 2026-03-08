@@ -293,6 +293,184 @@ else:
 
 ########################################
 echo ""
+echo "=== Test 7: Event filtering ==="
+########################################
+
+start_mock 19006
+
+cat > /tmp/e2e_qhook_7.yaml <<'EOF'
+database:
+  driver: sqlite
+  url: "sqlite:/tmp/e2e_qhook_7.db?mode=rwc"
+server:
+  port: 19107
+sources:
+  app:
+    type: event
+handlers:
+  paid-only:
+    source: app
+    events: [order.*]
+    url: http://127.0.0.1:19006/jobs/paid
+    filter: "$.status == paid"
+EOF
+
+start_qhook /tmp/e2e_qhook_7.yaml
+
+# Should be filtered OUT (status != paid)
+curl -s --max-time 3 -o /dev/null \
+    -X POST http://127.0.0.1:19107/events/order.created \
+    -H "Content-Type: application/json" \
+    -d '{"status": "pending", "id": "ord_1"}'
+
+# Should pass filter (status == paid)
+curl -s --max-time 3 -o /dev/null \
+    -X POST http://127.0.0.1:19107/events/order.updated \
+    -H "Content-Type: application/json" \
+    -d '{"status": "paid", "id": "ord_2"}'
+
+sleep 2
+
+COUNT=$(curl -s --max-time 3 http://127.0.0.1:19006/count 2>/dev/null || echo "0")
+[ "$COUNT" = "1" ] && pass "Filter: only paid event delivered (count=$COUNT)" || fail "Filter" "expected 1, got $COUNT"
+
+########################################
+echo ""
+echo "=== Test 8: Payload transformation ==="
+########################################
+
+start_mock 19007
+
+cat > /tmp/e2e_qhook_8.yaml <<'EOF'
+database:
+  driver: sqlite
+  url: "sqlite:/tmp/e2e_qhook_8.db?mode=rwc"
+server:
+  port: 19108
+sources:
+  app:
+    type: event
+handlers:
+  transform-test:
+    source: app
+    events: [transform.test]
+    url: http://127.0.0.1:19007/jobs/transform
+    transform: '{"event_id": "{{$.id}}", "amount": {{$.data.amount}}}'
+EOF
+
+start_qhook /tmp/e2e_qhook_8.yaml
+
+curl -s --max-time 3 -o /dev/null \
+    -X POST http://127.0.0.1:19108/events/transform.test \
+    -H "Content-Type: application/json" \
+    -d '{"id": "evt_t1", "data": {"amount": 42, "extra": "ignored"}}'
+
+sleep 2
+
+RECEIVED=$(curl -s --max-time 3 http://127.0.0.1:19007/received 2>/dev/null || echo "[]")
+TRANSFORMED=$(echo "$RECEIVED" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if d:
+    body = json.loads(d[0].get('body', '{}'))
+    has_id = body.get('event_id') == 'evt_t1'
+    has_amount = body.get('amount') == 42
+    no_extra = 'extra' not in body
+    print('yes' if has_id and has_amount and no_extra else 'no')
+else:
+    print('no')
+" 2>/dev/null || echo "no")
+[ "$TRANSFORMED" = "yes" ] && pass "Transform: payload reshaped correctly" || fail "Transform" "unexpected payload"
+
+########################################
+echo ""
+echo "=== Test 9: IP rate limiting ==="
+########################################
+
+start_mock 19008
+
+cat > /tmp/e2e_qhook_9.yaml <<'EOF'
+database:
+  driver: sqlite
+  url: "sqlite:/tmp/e2e_qhook_9.db?mode=rwc"
+server:
+  port: 19109
+  ip_rate_limit: 3
+sources:
+  app:
+    type: event
+handlers:
+  rate-test:
+    source: app
+    events: [rate.test]
+    url: http://127.0.0.1:19008/jobs/rate
+EOF
+
+start_qhook /tmp/e2e_qhook_9.yaml
+
+# Send 5 requests rapidly — first 3 should succeed, rest should get 429
+CODES=""
+for i in $(seq 1 5); do
+    CODE=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" \
+        -X POST http://127.0.0.1:19109/events/rate.test \
+        -H "Content-Type: application/json" \
+        -d "{\"i\": $i}")
+    CODES="$CODES $CODE"
+done
+
+HAS_429=$(echo "$CODES" | grep -c "429" || true)
+[ "$HAS_429" -ge 1 ] && pass "IP rate limit: 429 returned ($CODES)" || fail "IP rate limit" "no 429 in:$CODES"
+
+########################################
+echo ""
+echo "=== Test 10: auth_token protection ==="
+########################################
+
+cat > /tmp/e2e_qhook_10.yaml <<'EOF'
+database:
+  driver: sqlite
+  url: "sqlite:/tmp/e2e_qhook_10.db?mode=rwc"
+server:
+  port: 19110
+api:
+  auth_token: secret-token-123
+sources:
+  app:
+    type: event
+handlers:
+  auth-test:
+    source: app
+    events: [auth.test]
+    url: http://127.0.0.1:19008/jobs/auth
+EOF
+
+start_qhook /tmp/e2e_qhook_10.yaml
+
+# Without token → 401
+HTTP_CODE=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" \
+    -X POST http://127.0.0.1:19110/events/auth.test \
+    -H "Content-Type: application/json" \
+    -d '{"test": true}')
+[ "$HTTP_CODE" = "401" ] && pass "Missing auth token rejected (401)" || fail "Auth missing" "got $HTTP_CODE"
+
+# With wrong token → 401
+HTTP_CODE=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" \
+    -X POST http://127.0.0.1:19110/events/auth.test \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer wrong-token" \
+    -d '{"test": true}')
+[ "$HTTP_CODE" = "401" ] && pass "Wrong auth token rejected (401)" || fail "Auth wrong" "got $HTTP_CODE"
+
+# With correct token → 202
+HTTP_CODE=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" \
+    -X POST http://127.0.0.1:19110/events/auth.test \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer secret-token-123" \
+    -d '{"test": true}')
+[ "$HTTP_CODE" = "202" ] && pass "Correct auth token accepted (202)" || fail "Auth correct" "got $HTTP_CODE"
+
+########################################
+echo ""
 echo "==============================="
 echo -e "Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"
 echo "==============================="
