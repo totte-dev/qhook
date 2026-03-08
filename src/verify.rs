@@ -169,7 +169,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// Cache for SNS signing certificates. TTL = 1 hour.
-static SNS_CERT_CACHE: std::sync::LazyLock<Mutex<HashMap<String, (Vec<u8>, Instant)>>> =
+type CertCache = Mutex<HashMap<String, (Vec<u8>, Instant)>>;
+static SNS_CERT_CACHE: std::sync::LazyLock<CertCache> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 use std::collections::HashMap;

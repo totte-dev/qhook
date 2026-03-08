@@ -39,6 +39,7 @@ pub struct Worker {
 }
 
 impl Worker {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Arc<Database>,
         metrics: Arc<Metrics>,
@@ -242,6 +243,7 @@ async fn run_maintenance(db: &Database, metrics: &Metrics, stale_secs: i64, rete
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn deliver_job(
     db: &Database,
     http: &reqwest::Client,
