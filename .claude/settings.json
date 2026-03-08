@@ -1,0 +1,22 @@
+{
+    "env": {
+        "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+    },
+    "permissions": {
+        "allow": [],
+        "deny": [
+            "Bash(git push --force*)",
+            "Bash(git push -f*)",
+            "Bash(git reset --hard*)",
+            "Bash(git filter-branch*)",
+            "Bash(git filter-repo*)",
+            "Bash(git reflog expire*)",
+            "Bash(git gc --prune=now*)",
+            "Bash(git branch -D*)",
+            "Bash(rm -rf /*)",
+            "Bash(rm -rf /)",
+            "Bash(chmod -R 777*)"
+        ],
+        "defaultMode": "bypassPermissions"
+    }
+}
