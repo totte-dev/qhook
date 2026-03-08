@@ -123,6 +123,8 @@ pub struct SourceConfig {
     pub source_type: String,
     pub verify: Option<String>,
     pub secret: Option<String>,
+    #[serde(default)]
+    pub skip_verify: bool,
 }
 
 #[derive(Debug, Deserialize)]

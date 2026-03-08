@@ -241,6 +241,8 @@ Signature verification, idempotency, retry, DLQ -- all handled by qhook. Return 
 | **Event persistence** | Design your own DB schema | Auto-saved to SQLite/Postgres |
 | **Fan-out** | Manual dispatch logic | Define multiple handlers |
 | **Adding providers** | New endpoint + verification | Add a few lines to sources |
+| **AWS SNS** | Parse envelope, verify X.509, confirm subscription | `type: sns` -- one line |
+| **CloudEvents** | Parse headers/envelope, forward metadata | Automatic detection |
 | **External deps** | Redis/RabbitMQ, Celery, etc. | Single qhook binary |
 | **Monitoring** | Flower or custom UI | `qhook jobs` / `qhook events` CLI |
 | **Recovery** | Custom recovery procedures | `qhook jobs retry` |
@@ -270,6 +272,18 @@ sources:
 ```
 
 qhook absorbs the algorithm differences (Stripe's `t=...` format, GitHub's `sha256=...` format, Shopify's Base64 HMAC). Your app only receives verified payloads.
+
+### AWS SNS as an event source
+
+Receiving events from SNS requires handling subscription confirmation, envelope unwrapping, and X.509 certificate verification. With qhook, it's one line:
+
+```yaml
+sources:
+  notifications:
+    type: sns
+```
+
+qhook automatically confirms subscriptions, verifies message signatures, unwraps the SNS envelope, and delivers the actual message payload to your handlers.
 
 ### Fan-out to multiple services
 

@@ -236,6 +236,63 @@ COUNT=$(curl -s --max-time 3 http://127.0.0.1:19004/count 2>/dev/null || echo "0
 
 ########################################
 echo ""
+echo "=== Test 6: CloudEvents binary mode ==="
+########################################
+
+start_mock 19005
+
+cat > /tmp/e2e_qhook_6.yaml <<'EOF'
+database:
+  driver: sqlite
+  url: "sqlite:/tmp/e2e_qhook_6.db?mode=rwc"
+server:
+  port: 19106
+sources:
+  app:
+    type: event
+handlers:
+  on-ce:
+    source: app
+    events: [com.example.order.created]
+    url: http://127.0.0.1:19005/jobs/ce
+EOF
+
+start_qhook /tmp/e2e_qhook_6.yaml
+
+# CloudEvents binary mode: event type from ce-type header (overrides URL path)
+HTTP_CODE=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" \
+    -X POST http://127.0.0.1:19106/events/ignored.by.header \
+    -H "Content-Type: application/json" \
+    -H "ce-type: com.example.order.created" \
+    -H "ce-source: /myapp" \
+    -H "ce-id: evt-ce-001" \
+    -H "ce-specversion: 1.0" \
+    -d '{"orderId": "ord_ce_1"}')
+
+[ "$HTTP_CODE" = "202" ] && pass "CloudEvents binary mode accepted (202)" || fail "CE binary" "got $HTTP_CODE"
+
+sleep 2
+
+COUNT=$(curl -s --max-time 3 http://127.0.0.1:19005/count 2>/dev/null || echo "0")
+[ "$COUNT" -ge 1 ] 2>/dev/null && pass "CloudEvents event matched handler (count=$COUNT)" || fail "CE match" "count=$COUNT"
+
+# Check that ce-* headers are forwarded
+RECEIVED=$(curl -s --max-time 3 http://127.0.0.1:19005/received 2>/dev/null || echo "[]")
+HAS_CE=$(echo "$RECEIVED" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if d:
+    h = d[0].get('headers', {})
+    has_type = any('ce-type' in k.lower() for k in h)
+    has_source = any('ce-source' in k.lower() for k in h)
+    print('yes' if has_type and has_source else 'no')
+else:
+    print('no')
+" 2>/dev/null || echo "no")
+[ "$HAS_CE" = "yes" ] && pass "CloudEvents headers forwarded" || fail "CE headers" "ce-type/ce-source not found"
+
+########################################
+echo ""
 echo "==============================="
 echo -e "Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"
 echo "==============================="
