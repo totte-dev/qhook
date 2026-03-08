@@ -4,16 +4,16 @@ The simplest qhook setup. No Docker required -- just the binary and curl.
 
 ## Setup
 
-1. Build qhook (or `cargo install qhook`):
+1. Install qhook:
 
 ```bash
-cargo build --release
+cargo install qhook
 ```
 
 2. Start qhook with the example config:
 
 ```bash
-./target/release/qhook start -c examples/quickstart/qhook.yaml
+qhook start -c examples/quickstart/qhook.yaml
 ```
 
 3. In another terminal, start the mock receiver:
