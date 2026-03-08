@@ -7,16 +7,52 @@ title: Deploy to AWS
 
 ## Prerequisites
 
-- Docker image: `qhook:latest`
+- Base image: `ghcr.io/totte-dev/qhook:latest`
 - Server port: `8888`
-- Config file: `/data/qhook.yaml`
+- Config file: `qhook.yaml` (baked into image or volume-mounted)
 - DB: SQLite (standalone) or PostgreSQL (recommended for production)
 
 ---
 
 ## 1. ECS Fargate (Recommended)
 
-### 1.1 Push Image to ECR
+### 1.1 Bake Config into Docker Image
+
+Create a project-specific Dockerfile that embeds your `qhook.yaml` into the image. Secrets (DB credentials, webhook secrets) should use `${VAR}` placeholders — qhook expands environment variables at startup.
+
+```
+your-project/
+├── Dockerfile
+└── qhook.yaml       # config with ${VAR} placeholders for secrets
+```
+
+`qhook.yaml` example:
+
+```yaml
+server:
+  port: 8888
+
+database:
+  url: "${DATABASE_URL}"
+
+sources:
+  stripe:
+    type: webhook
+    path: /webhook/stripe
+    verify: stripe
+    secret: "${STRIPE_WEBHOOK_SECRET}"
+    handlers:
+      - url: http://billing-service:3000/stripe
+```
+
+`Dockerfile`:
+
+```dockerfile
+FROM ghcr.io/totte-dev/qhook:latest
+COPY qhook.yaml /data/qhook.yaml
+```
+
+Build and push:
 
 ```bash
 aws ecr create-repository --repository-name qhook
@@ -27,9 +63,11 @@ AWS_REGION=ap-northeast-1
 aws ecr get-login-password --region $AWS_REGION | \
   docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
 
-docker tag qhook:latest $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/qhook:latest
+docker build -t $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/qhook:latest .
 docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/qhook:latest
 ```
+
+> **Config changes = image rebuild.** This is intentional — config is part of your deployment artifact, versioned and reproducible. Secrets stay in environment variables / Secrets Manager.
 
 ### 1.2 Task Definition
 
@@ -52,14 +90,16 @@ docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/qhook:latest
         }
       ],
       "environment": [
-        { "name": "RUST_LOG", "value": "qhook=info" },
-        { "name": "DATABASE_URL", "value": "postgres://qhook:password@rds-host:5432/qhook" }
+        { "name": "RUST_LOG", "value": "qhook=info" }
       ],
-      "mountPoints": [
+      "secrets": [
         {
-          "sourceVolume": "qhook-config",
-          "containerPath": "/data",
-          "readOnly": true
+          "name": "DATABASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:ACCOUNT_ID:secret:qhook/database-url"
+        },
+        {
+          "name": "STRIPE_WEBHOOK_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:ACCOUNT_ID:secret:qhook/stripe-webhook-secret"
         }
       ],
       "logConfiguration": {
@@ -72,20 +112,11 @@ docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/qhook:latest
       },
       "essential": true
     }
-  ],
-  "volumes": [
-    {
-      "name": "qhook-config",
-      "efsVolumeConfiguration": {
-        "fileSystemId": "fs-xxxxxxxxx",
-        "rootDirectory": "/qhook"
-      }
-    }
   ]
 }
 ```
 
-> **Config file placement:** Put `qhook.yaml` on EFS, or remove the `mountPoints` / `volumes` sections if you pass everything via environment variables.
+> No volumes or EFS needed. Config is baked into the image; secrets are injected via Secrets Manager at runtime.
 
 ### 1.3 Create Service (with ALB)
 
@@ -113,23 +144,22 @@ aws ecs create-service \
 ### 1.4 RDS PostgreSQL
 
 - Allow port `5432` from the ECS task security group in the RDS security group
-- Pass `DATABASE_URL` via task definition environment variables or Secrets Manager
+- Store `DATABASE_URL` in Secrets Manager (already referenced in the task definition above)
+- Grant `secretsmanager:GetSecretValue` permission to `executionRoleArn`
 
-```json
-{
-  "name": "DATABASE_URL",
-  "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:ACCOUNT_ID:secret:qhook/database-url"
-}
+```bash
+aws secretsmanager create-secret \
+  --name qhook/database-url \
+  --secret-string "postgres://qhook:password@rds-host:5432/qhook"
 ```
-
-When using Secrets Manager, add it to the `secrets` field and grant `secretsmanager:GetSecretValue` permission to `executionRoleArn`.
 
 ### 1.5 Environment Variables
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `DATABASE_URL` | DB connection string | `postgres://user:pass@host:5432/qhook` |
+| `DATABASE_URL` | DB connection string (via Secrets Manager) | `postgres://user:pass@host:5432/qhook` |
 | `RUST_LOG` | Log level | `qhook=info` |
+| `STRIPE_WEBHOOK_SECRET` | Webhook secret (via Secrets Manager) | `whsec_...` |
 | `QHOOK_CONFIG` | Config file path (default: `/data/qhook.yaml`) | `/data/qhook.yaml` |
 
 ---
