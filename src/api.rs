@@ -6,6 +6,7 @@ use axum::{
     body::Bytes,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
+    middleware,
     response::IntoResponse,
     routing::post,
 };
@@ -77,12 +78,39 @@ pub async fn serve(state: AppState) -> Result<()> {
         worker.run().await;
     });
 
+    let body_limit = shared.config.server.max_body_size;
+    let max_inbound = shared.config.server.max_inbound;
+    let inbound_semaphore = Arc::new(tokio::sync::Semaphore::new(max_inbound as usize));
+
+    let sem = inbound_semaphore.clone();
+    let concurrency_limit = middleware::from_fn(move |req, next: middleware::Next| {
+        let sem = sem.clone();
+        async move {
+            match sem.try_acquire() {
+                Ok(_permit) => next.run(req).await,
+                Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            }
+        }
+    });
+
+    let security_headers = middleware::from_fn(|req, next: middleware::Next| async move {
+        let mut resp = next.run(req).await;
+        let headers = resp.headers_mut();
+        headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+        headers.insert("x-frame-options", "DENY".parse().unwrap());
+        headers.insert("cache-control", "no-store".parse().unwrap());
+        resp
+    });
+
     let app = Router::new()
         .route("/webhooks/{source}", post(handle_webhook))
         .route("/events/{event_type}", post(handle_event))
         .route("/sns/{source}", post(handle_sns))
         .route("/health", axum::routing::get(handle_health))
         .route("/metrics", axum::routing::get(handle_metrics))
+        .layer(security_headers)
+        .layer(concurrency_limit)
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(body_limit))
         .with_state(shared);
 
     let addr = format!("0.0.0.0:{port}");
@@ -193,7 +221,7 @@ async fn handle_event(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    // Check auth token if configured
+    // Check auth token if configured (constant-time comparison)
     if let Some(expected_token) = &state.config.api.auth_token {
         let provided = headers
             .get("Authorization")
@@ -201,8 +229,23 @@ async fn handle_event(
             .and_then(|v| v.strip_prefix("Bearer "));
 
         match provided {
-            Some(token) if token == expected_token => {}
-            _ => return (StatusCode::UNAUTHORIZED, "Invalid token".to_string()),
+            Some(token) => {
+                use subtle::ConstantTimeEq;
+                if !bool::from(token.as_bytes().ct_eq(expected_token.as_bytes())) {
+                    tracing::warn!(
+                        endpoint = "events",
+                        "Authentication failed: invalid bearer token"
+                    );
+                    return (StatusCode::UNAUTHORIZED, "Invalid token".to_string());
+                }
+            }
+            _ => {
+                tracing::warn!(
+                    endpoint = "events",
+                    "Authentication failed: missing bearer token"
+                );
+                return (StatusCode::UNAUTHORIZED, "Invalid token".to_string());
+            }
         }
     }
 
@@ -470,12 +513,12 @@ fn extract_event_type(source: &str, payload: &str, headers: &HeaderMap) -> Strin
     }
 
     // CloudEvents structured mode: application/cloudevents+json
-    if let Some(ct) = headers.get("content-type").and_then(|v| v.to_str().ok()) {
-        if ct.contains("application/cloudevents+json") {
-            let json: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
-            if let Some(ce_type) = json.get("type").and_then(|v| v.as_str()) {
-                return ce_type.to_string();
-            }
+    if let Some(ct) = headers.get("content-type").and_then(|v| v.to_str().ok())
+        && ct.contains("application/cloudevents+json")
+    {
+        let json: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
+        if let Some(ce_type) = json.get("type").and_then(|v| v.as_str()) {
+            return ce_type.to_string();
         }
     }
 
@@ -508,10 +551,10 @@ fn extract_event_type(source: &str, payload: &str, headers: &HeaderMap) -> Strin
 fn extract_sns_event_type(message: &str, subject: Option<&str>) -> String {
     if let Ok(json) = serde_json::from_str::<Value>(message) {
         // CloudEvents structured mode
-        if json.get("specversion").is_some() {
-            if let Some(t) = json.get("type").and_then(|v| v.as_str()) {
-                return t.to_string();
-            }
+        if json.get("specversion").is_some()
+            && let Some(t) = json.get("type").and_then(|v| v.as_str())
+        {
+            return t.to_string();
         }
         // Generic type field
         if let Some(t) = json.get("type").and_then(|v| v.as_str()) {
@@ -524,10 +567,10 @@ fn extract_sns_event_type(message: &str, subject: Option<&str>) -> String {
     }
 
     // Subject as event type
-    if let Some(s) = subject {
-        if !s.is_empty() {
-            return s.to_string();
-        }
+    if let Some(s) = subject
+        && !s.is_empty()
+    {
+        return s.to_string();
     }
 
     "sns.notification".to_string()

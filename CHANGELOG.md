@@ -7,6 +7,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **Stripe replay protection**: Reject Stripe signatures older than 5 minutes to prevent replay attacks.
+- **Request body size limit**: Configurable `server.max_body_size` (default: 1MB) to prevent OOM from oversized payloads.
+- **Inbound concurrency limit**: Configurable `server.max_inbound` (default: 100) returns 503 when exceeded.
+- **Security headers**: All responses include `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cache-Control: no-store`.
+- **Constant-time auth token comparison**: Bearer token check uses `subtle::ct_eq` to prevent timing attacks.
+- **Audit logging**: Authentication failures (missing/invalid token) are logged with `tracing::warn`.
+- **LICENSE file**: Full Apache-2.0 license text at repository root.
+
+### Changed
+- **Migrated `serde_yaml` → `serde_yaml_ng`**: `serde_yaml` was archived by dtolnay; replaced with actively maintained fork.
+
+### Previous (v0.3)
+
+#### Added
 - **Stale job recovery**: Jobs stuck in `running` for over 5 minutes are automatically recovered to `retryable` on startup and every hour.
 - **Concurrent delivery**: Up to 10 jobs are delivered in parallel (was sequential).
 - **Graceful shutdown**: SIGTERM/SIGINT stops accepting new requests, drains in-flight deliveries, then exits cleanly.

@@ -94,6 +94,8 @@ database:
 
 server:
   port: 8888                        # listen port (default: 8888)
+  max_body_size: 1048576            # max request body in bytes (default: 1MB)
+  max_inbound: 100                  # max concurrent inbound requests (default: 100)
 
 api:
   auth_token: ${QHOOK_API_TOKEN}    # bearer token for /events endpoint (optional)
@@ -388,6 +390,22 @@ Exposed metrics:
 | `qhook_dead_jobs` | gauge | Jobs in dead letter queue |
 
 No external dependencies -- metrics are formatted using atomic counters.
+
+## Security
+
+- **Signature verification**: All supported providers use constant-time comparison to prevent timing attacks.
+- **Stripe replay protection**: Stripe signatures older than 5 minutes are automatically rejected.
+- **Request body limit**: Configurable max body size (default: 1MB) prevents memory exhaustion from oversized payloads.
+- **Inbound concurrency limit**: Configurable max concurrent requests (default: 100) protects against overload.
+- **Security headers**: All responses include `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and `Cache-Control: no-store`.
+- **TLS**: qhook does not terminate TLS itself. Use a reverse proxy (nginx, Caddy, ALB) in front of qhook for HTTPS.
+
+```yaml
+server:
+  port: 8888
+  max_body_size: 1048576   # 1MB (default)
+  max_inbound: 100         # max concurrent requests (default)
+```
 
 ## Reliability
 
