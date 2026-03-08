@@ -114,8 +114,9 @@ impl Worker {
 
     async fn deliver(&self, job: &crate::db::JobRow) -> Result<u16> {
         let payload = self.db.get_event_payload(&job.event_id).await?;
+        let headers_json = self.db.get_event_headers(&job.event_id).await?;
 
-        let response = self
+        let mut request = self
             .http
             .post(&job.url)
             .header("Content-Type", "application/json")
@@ -125,10 +126,20 @@ impl Worker {
             .header(
                 "X-Qhook-Attempt",
                 (job.attempt + 1).to_string(),
-            )
-            .body(payload)
-            .send()
-            .await?;
+            );
+
+        // Forward CloudEvents headers from the original event
+        if let Some(ref hj) = headers_json {
+            if let Ok(headers) = serde_json::from_str::<std::collections::HashMap<String, String>>(hj) {
+                for (key, value) in &headers {
+                    if key.starts_with("ce-") {
+                        request = request.header(key.as_str(), value.as_str());
+                    }
+                }
+            }
+        }
+
+        let response = request.body(payload).send().await?;
 
         Ok(response.status().as_u16())
     }
