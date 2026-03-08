@@ -57,7 +57,8 @@ x509-parser = "0.18"
 clap = { version = "4", features = ["derive"] }
 
 # gRPC
-tonic = { version = "0.14", default-features = false, features = ["transport", "prost", "channel"] }
+tonic = { version = "0.14", default-features = false, features = ["transport", "channel"] }
+tonic-prost = "0.14"
 http = "1"
 prost = "0.14"
 

@@ -49,8 +49,8 @@ pub async fn deliver(channel: &Channel, request: DeliverRequest) -> Result<Deliv
         .parse()
         .expect("valid gRPC path");
 
-    let codec: tonic::codec::ProstCodec<DeliverRequest, DeliverResponse> =
-        tonic::codec::ProstCodec::default();
+    let codec: tonic_prost::ProstCodec<DeliverRequest, DeliverResponse> =
+        tonic_prost::ProstCodec::default();
 
     let response = client
         .unary(tonic::Request::new(request), path, codec)
