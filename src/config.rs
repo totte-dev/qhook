@@ -43,14 +43,30 @@ fn default_driver() -> String {
 pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Maximum request body size in bytes (default: 1MB).
+    #[serde(default = "default_max_body_size")]
+    pub max_body_size: usize,
+    /// Maximum concurrent inbound requests (default: 100). Excess requests get 503.
+    #[serde(default = "default_max_inbound")]
+    pub max_inbound: u32,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: default_port(),
+            max_body_size: default_max_body_size(),
+            max_inbound: default_max_inbound(),
         }
     }
+}
+
+fn default_max_body_size() -> usize {
+    1_048_576 // 1MB
+}
+
+fn default_max_inbound() -> u32 {
+    100
 }
 
 fn default_port() -> u16 {
@@ -137,6 +153,8 @@ pub struct HandlerConfig {
     pub retry: Option<RetryConfig>,
     pub timeout: Option<String>,
     pub idempotency_key: Option<String>,
+    /// Max deliveries per second for this handler (optional).
+    pub rate_limit: Option<u32>,
 }
 
 impl Config {
@@ -145,7 +163,7 @@ impl Config {
             .with_context(|| format!("Failed to read config: {}", path.display()))?;
         let content = expand_env_vars(&content);
         let config: Config =
-            serde_yaml::from_str(&content).context("Failed to parse YAML config")?;
+            serde_yaml_ng::from_str(&content).context("Failed to parse YAML config")?;
         Ok(config)
     }
 
@@ -202,7 +220,12 @@ fn expand_env_vars(input: &str) -> String {
             } else {
                 std::env::var(expr).unwrap_or_default()
             };
-            result = format!("{}{}{}", &result[..start], value, &result[start + end + 1..]);
+            result = format!(
+                "{}{}{}",
+                &result[..start],
+                value,
+                &result[start + end + 1..]
+            );
         } else {
             break;
         }
