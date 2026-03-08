@@ -178,7 +178,7 @@ For running the binary directly without Docker Compose.
 
 ```ini
 [Unit]
-Description=qhook webhook receiver
+Description=qhook event gateway
 After=network.target postgresql.service
 
 [Service]

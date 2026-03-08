@@ -1,6 +1,6 @@
 # qhook
 
-**SQS for webhooks** -- a lightweight webhook receiver with built-in queue and retry.
+**SQS for webhooks and events** -- a lightweight event gateway with built-in queue and retry.
 
 <!-- badges -->
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
