@@ -266,12 +266,12 @@ async fn deliver(db: &Database, http: &reqwest::Client, job: &crate::db::JobRow)
         .header("X-Qhook-Attempt", (job.attempt + 1).to_string());
 
     // Forward CloudEvents headers from the original event
-    if let Some(ref hj) = headers_json {
-        if let Ok(headers) = serde_json::from_str::<std::collections::HashMap<String, String>>(hj) {
-            for (key, value) in &headers {
-                if key.starts_with("ce-") {
-                    request = request.header(key.as_str(), value.as_str());
-                }
+    if let Some(ref hj) = headers_json
+        && let Ok(headers) = serde_json::from_str::<std::collections::HashMap<String, String>>(hj)
+    {
+        for (key, value) in &headers {
+            if key.starts_with("ce-") {
+                request = request.header(key.as_str(), value.as_str());
             }
         }
     }

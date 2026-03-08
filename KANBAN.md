@@ -42,25 +42,25 @@
 | GitHub Actions CI/CD (fmt + clippy + test + E2E) | Medium |
 | Rate limiting per handler | Low |
 
+## Done (v0.4)
+
+| Task | Priority |
+|------|----------|
+| Stripe signature timestamp validation (5min replay protection) | High |
+| Request body size limit (configurable, default 1MB) | High |
+| Inbound concurrency limit (configurable, default 100) | High |
+| Constant-time auth token comparison | Medium |
+| TLS documentation (reverse proxy recommended) | Medium |
+| Audit logging (auth failures) | Medium |
+| Migrate serde_yaml → serde_yaml_ng | Medium |
+| Security headers (nosniff, DENY, no-store) | Low |
+| Add LICENSE file (Apache-2.0) | Low |
+
 ## In Progress
 
 | Task | Priority |
 |------|----------|
 | (none) | |
-
-## Todo (v0.4) — Security hardening
-
-| Task | Priority | Notes |
-|------|----------|-------|
-| Stripe signature timestamp validation | High | Reject signatures older than 5 minutes to prevent replay attacks (Stripe recommended) |
-| Migrate serde_yaml → serde_yml | Medium | serde_yaml is deprecated (archived by dtolnay) |
-| Add LICENSE file to repo root | Low | Full Apache-2.0 text file |
-| Request body size limit | High | Prevent OOM from oversized payloads |
-| TLS support (or document reverse proxy) | Medium | Ensure webhook secrets are not sent over plaintext |
-| Auth token hashing | Medium | Store api.auth_token as hash, not plaintext in memory |
-| Rate limiting on inbound endpoints | High | Prevent abuse / DDoS on /webhooks, /events, /sns endpoints |
-| Security headers on responses | Low | X-Content-Type-Options, X-Frame-Options, etc. |
-| Audit logging | Medium | Log signature verification failures, auth failures, DLQ events |
 
 ## Backlog
 

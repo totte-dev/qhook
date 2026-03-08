@@ -43,14 +43,30 @@ fn default_driver() -> String {
 pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Maximum request body size in bytes (default: 1MB).
+    #[serde(default = "default_max_body_size")]
+    pub max_body_size: usize,
+    /// Maximum concurrent inbound requests (default: 100). Excess requests get 503.
+    #[serde(default = "default_max_inbound")]
+    pub max_inbound: u32,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: default_port(),
+            max_body_size: default_max_body_size(),
+            max_inbound: default_max_inbound(),
         }
     }
+}
+
+fn default_max_body_size() -> usize {
+    1_048_576 // 1MB
+}
+
+fn default_max_inbound() -> u32 {
+    100
 }
 
 fn default_port() -> u16 {
@@ -147,7 +163,7 @@ impl Config {
             .with_context(|| format!("Failed to read config: {}", path.display()))?;
         let content = expand_env_vars(&content);
         let config: Config =
-            serde_yaml::from_str(&content).context("Failed to parse YAML config")?;
+            serde_yaml_ng::from_str(&content).context("Failed to parse YAML config")?;
         Ok(config)
     }
 
