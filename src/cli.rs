@@ -5,7 +5,10 @@ use std::path::PathBuf;
 use crate::config::Config;
 
 #[derive(Parser)]
-#[command(name = "qhook", about = "Lightweight event gateway with queue and retry")]
+#[command(
+    name = "qhook",
+    about = "Lightweight event gateway with queue and retry"
+)]
 pub struct Args {
     #[command(subcommand)]
     command: Command,

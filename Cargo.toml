@@ -10,7 +10,7 @@ license = "Apache-2.0"
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.6", features = ["trace", "limit"] }
 
 # DB
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "chrono"] }
@@ -18,7 +18,7 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "ch
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+serde_yaml_ng = "0.10"
 
 # Crypto
 hmac = "0.12"
