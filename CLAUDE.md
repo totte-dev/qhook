@@ -97,7 +97,6 @@ docs/               — GitHub Pages user guide (Jekyll, Cayman theme)
 - **Rust version**: 1.85+ (edition 2024). Use latest stable features (e.g., let chains).
 - **Version**: Currently v0.1.0. Update in Cargo.toml for releases.
 - **Docker image**: `ghcr.io/totte-dev/qhook`. Multi-stage build, ~119MB.
-- **Commit**: Include `Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>`.
 
 ## Key Design Decisions
 
