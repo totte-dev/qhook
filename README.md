@@ -14,6 +14,8 @@
 - **Webhook verification built in.** GitHub, Stripe, Shopify, and generic HMAC -- signature checks happen before your app ever sees the payload.
 - **Reliable delivery.** Exponential backoff retry with configurable limits. Dead Letter Queue for jobs that exhaust all attempts.
 - **Idempotency.** Configurable dedup key (JSONPath) prevents double-processing of the same event.
+- **CloudEvents native.** Automatically detects CloudEvents (binary and structured mode) and forwards `ce-*` headers to your handlers.
+- **AWS SNS ready.** Receive events from SNS topics with automatic subscription confirmation and X.509 signature verification.
 
 > See [docs/why-qhook.md](./docs/why-qhook.md) for a detailed before/after comparison.
 
@@ -117,6 +119,10 @@ sources:
   app:
     type: event                     # no verification, uses auth_token if set
 
+  my-sns:
+    type: sns                       # AWS SNS input (auto-confirms subscriptions)
+    # skip_verify: true             # skip X.509 verification (for LocalStack / testing)
+
 handlers:
   payment-success:
     source: stripe                  # must match a source name
@@ -132,6 +138,11 @@ handlers:
     source: github
     events: [push]
     url: http://deployer:4000/deploy
+
+  on-sns-notification:
+    source: my-sns
+    events: [order.created]
+    url: http://backend:3000/jobs/sns-order
 ```
 
 Generate a starter config:
@@ -235,13 +246,89 @@ Checks the `X-Webhook-Signature` header using HMAC-SHA256 (hex-encoded).
 
 All signature comparisons use constant-time equality to prevent timing attacks.
 
+## AWS SNS
+
+qhook can receive events from AWS SNS topics. It handles the full lifecycle automatically:
+
+1. **Subscription confirmation** -- when SNS sends a `SubscriptionConfirmation` message, qhook automatically confirms by fetching the `SubscribeURL`.
+2. **Message unwrapping** -- SNS wraps your payload in an envelope. qhook extracts the `Message` field and delivers only the actual payload to your handlers.
+3. **Signature verification** -- each SNS message is verified using the X.509 certificate from AWS (SHA1/SHA256).
+
+### Setup
+
+```yaml
+sources:
+  my-sns:
+    type: sns
+```
+
+Point your SNS subscription to `https://your-qhook-host/sns/my-sns`. The event type is extracted from the message payload (`type` field, `detail-type` for EventBridge, or the SNS `Subject`).
+
+### Testing with LocalStack
+
+For local development, use `skip_verify: true` to bypass X.509 signature verification:
+
+```yaml
+sources:
+  my-sns:
+    type: sns
+    skip_verify: true     # LocalStack does not sign messages
+```
+
+## CloudEvents
+
+qhook automatically detects and handles [CloudEvents](https://cloudevents.io/) in both content modes.
+
+### Binary mode
+
+CloudEvents metadata is sent as HTTP headers (`ce-type`, `ce-source`, `ce-id`, etc.). The body contains the event data directly.
+
+```bash
+curl -X POST http://localhost:8888/events/ignored \
+  -H "Content-Type: application/json" \
+  -H "ce-type: com.example.order.created" \
+  -H "ce-source: /shop" \
+  -H "ce-id: evt-001" \
+  -H "ce-specversion: 1.0" \
+  -d '{"orderId": "ord_123"}'
+```
+
+The `ce-type` header overrides the event type from the URL path.
+
+### Structured mode
+
+The entire CloudEvents envelope is sent as JSON with `Content-Type: application/cloudevents+json`.
+
+```bash
+curl -X POST http://localhost:8888/webhooks/my-source \
+  -H "Content-Type: application/cloudevents+json" \
+  -d '{
+    "specversion": "1.0",
+    "type": "com.example.order.created",
+    "source": "/shop",
+    "id": "evt-001",
+    "data": {"orderId": "ord_123"}
+  }'
+```
+
+The `type` field from the envelope is used as the event type.
+
+### Header forwarding
+
+All `ce-*` headers from the original event are automatically forwarded to your handlers on delivery, so your app can access CloudEvents metadata without parsing the payload.
+
 ## Architecture
 
 ```
-Webhook Provider          qhook                          Your App
-(GitHub, Stripe, ...)     +--------------------------+
+Webhook / SNS / Event     qhook                          Your App
+                          +--------------------------+
                           |                          |
   POST /webhooks/stripe ---> Verify signature        |
+  POST /sns/my-topic ------> Verify X.509 + unwrap   |
+  POST /events/order ------> Auth token check        |
+                          |   |                      |
+                          |   v                      |
+                          | Detect CloudEvents       |
                           |   |                      |
                           |   v                      |
                           | Store event (dedup)      |
@@ -251,7 +338,7 @@ Webhook Provider          qhook                          Your App
                           |   |                      |
                           |   v                      |
                           | Queue worker ------------>  POST http://backend/jobs/payment
-                          |   |                      |
+                          |   |                      |   (+ ce-* headers forwarded)
                           |   |-- success ----------->  mark completed
                           |   |-- failure (< max) -->  exponential backoff, retry
                           |   |-- failure (= max) -->  move to Dead Letter Queue
@@ -263,7 +350,8 @@ Webhook Provider          qhook                          Your App
 | Route | Purpose |
 |-------|---------|
 | `POST /webhooks/{source}` | Receive external webhooks (signature verified) |
-| `POST /events/{event_type}` | Receive internal events (bearer token auth) |
+| `POST /sns/{source}` | Receive AWS SNS messages (X.509 verified, auto-confirms subscriptions) |
+| `POST /events/{event_type}` | Receive internal events (bearer token auth, CloudEvents-aware) |
 | `GET /health` | Health check |
 
 ## Deployment

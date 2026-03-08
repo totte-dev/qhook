@@ -317,6 +317,15 @@ impl Database {
         Ok(row.0)
     }
 
+    pub async fn get_event_headers(&self, event_id: &str) -> Result<Option<String>> {
+        let row: (Option<String>,) = sqlx::query_as("SELECT headers FROM events WHERE id = $1")
+            .bind(event_id)
+            .fetch_one(&self.pool)
+            .await?;
+
+        Ok(row.0)
+    }
+
     pub async fn list_jobs(&self, status: Option<&str>, limit: i32) -> Result<Vec<JobRow>> {
         let rows = if let Some(status) = status {
             sqlx::query_as::<_, JobRow>(

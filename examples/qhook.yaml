@@ -18,9 +18,20 @@ sources:
   app:
     type: event
 
+  # Uncomment to receive AWS SNS notifications
+  # my-sns:
+  #   type: sns
+  #   skip_verify: true    # set to false in production
+
 # Handlers - deliver received events to the specified URL
 handlers:
   order-webhook:
     source: app
     events: [order.created]
     url: http://localhost:3000/webhooks/orders
+
+  # Uncomment to handle SNS events
+  # on-sns:
+  #   source: my-sns
+  #   events: ["*"]
+  #   url: http://localhost:3000/webhooks/sns
