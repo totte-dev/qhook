@@ -14,12 +14,13 @@ max_failures = 0
 
 
 class Handler(BaseHTTPRequestHandler):
-    def do_POST(self):
+    def _handle_delivery(self, method):
         content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length).decode("utf-8")
+        body = self.rfile.read(content_length).decode("utf-8") if content_length > 0 else ""
 
         with lock:
             entry = {
+                "method": method,
                 "path": self.path,
                 "headers": dict(self.headers),
                 "body": body,
@@ -36,6 +37,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(response_code)
             self.end_headers()
             self.wfile.write(b"OK")
+
+    def do_POST(self):
+        self._handle_delivery("POST")
+
+    def do_PUT(self):
+        self._handle_delivery("PUT")
+
+    def do_PATCH(self):
+        self._handle_delivery("PATCH")
+
+    def do_DELETE(self):
+        self._handle_delivery("DELETE")
 
     def do_GET(self):
         if self.path == "/received":
@@ -58,8 +71,8 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"reset")
         else:
-            self.send_response(404)
-            self.end_headers()
+            # Treat as delivery (e.g., handler with method: GET)
+            self._handle_delivery("GET")
 
     def log_message(self, format, *args):
         pass  # Suppress logs

@@ -36,6 +36,8 @@ pub struct Worker {
     handler_types: Arc<HashMap<String, String>>,
     /// Per-handler custom HTTP headers.
     handler_headers: Arc<HashMap<String, HashMap<String, String>>>,
+    /// Per-handler HTTP method overrides (only non-"POST" entries).
+    handler_methods: Arc<HashMap<String, String>>,
     /// Lazily created gRPC channels keyed by URL.
     grpc_channels: Arc<std::sync::Mutex<HashMap<String, tonic::transport::Channel>>>,
     /// Workflow configs for step progression.
@@ -56,6 +58,7 @@ impl Worker {
         handler_transforms: HashMap<String, String>,
         handler_types: HashMap<String, String>,
         handler_headers: HashMap<String, HashMap<String, String>>,
+        handler_methods: HashMap<String, String>,
         workflows: HashMap<String, config::WorkflowConfig>,
         default_retry_max: u32,
     ) -> Self {
@@ -81,6 +84,7 @@ impl Worker {
             transforms: Arc::new(handler_transforms),
             handler_types: Arc::new(handler_types),
             handler_headers: Arc::new(handler_headers),
+            handler_methods: Arc::new(handler_methods),
             grpc_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             workflows: Arc::new(workflows),
             default_retry_max,
@@ -169,6 +173,7 @@ impl Worker {
                         let transforms = self.transforms.clone();
                         let handler_types = self.handler_types.clone();
                         let handler_headers = self.handler_headers.clone();
+                        let handler_methods = self.handler_methods.clone();
                         let grpc_channels = self.grpc_channels.clone();
                         let workflows = self.workflows.clone();
                         let default_retry_max = self.default_retry_max;
@@ -182,7 +187,7 @@ impl Worker {
                                 None
                             };
 
-                            deliver_job(&db, &http, &metrics, &alerter, &transforms, &handler_types, &handler_headers, &grpc_channels, &workflows, default_retry_max, &job).await;
+                            deliver_job(&db, &http, &metrics, &alerter, &transforms, &handler_types, &handler_headers, &handler_methods, &grpc_channels, &workflows, default_retry_max, &job).await;
                             drop(permit);
 
                             // Hold rate permit for 1s to enforce per-second limit
@@ -267,6 +272,7 @@ async fn deliver_job(
     transforms: &HashMap<String, String>,
     handler_types: &HashMap<String, String>,
     handler_headers: &HashMap<String, HashMap<String, String>>,
+    handler_methods: &HashMap<String, String>,
     grpc_channels: &std::sync::Mutex<HashMap<String, tonic::transport::Channel>>,
     workflows: &HashMap<String, config::WorkflowConfig>,
     default_retry_max: u32,
@@ -413,26 +419,46 @@ async fn deliver_job(
     }
 
     // For workflow jobs, use step_input as payload; for regular jobs, use event payload
-    let (transform, is_grpc, custom_headers) = if is_workflow {
-        // Get custom headers from step config
+    let (transform, is_grpc, custom_headers, method) = if is_workflow {
+        // Get custom headers and method from step/branch config
         let workflow_name = job.handler.split('/').next().unwrap_or("");
         let step_name = job.handler.split('/').nth(1).unwrap_or("");
-        let step_headers = workflows
-            .get(workflow_name)
-            .and_then(|wf| wf.steps.iter().find(|s| s.name == step_name))
-            .map(|s| &s.headers)
-            .filter(|h| !h.is_empty());
-        (None, false, step_headers.cloned())
+        let wf = workflows.get(workflow_name);
+        let step = wf.and_then(|wf| wf.steps.iter().find(|s| s.name == step_name));
+
+        // For branch jobs, look up method from the branch config
+        let wf_data = db.get_workflow_job_data(&job.id).await.ok().flatten();
+        let branch_name = wf_data.as_ref().and_then(|d| d.branch_name.as_deref());
+
+        let (headers, method) = if let Some(bn) = branch_name {
+            // Branch job: get method from branch config
+            let branch = step
+                .and_then(|s| s.branches.as_ref())
+                .and_then(|bs| bs.iter().find(|b| b.name == bn));
+            let h = branch.map(|b| &b.headers).filter(|h| !h.is_empty());
+            let m = branch.map(|b| b.method.as_str()).unwrap_or("POST");
+            (h.cloned(), m.to_string())
+        } else {
+            // Regular step job
+            let h = step.map(|s| &s.headers).filter(|h| !h.is_empty());
+            let m = step.map(|s| s.method.as_str()).unwrap_or("POST");
+            (h.cloned(), m.to_string())
+        };
+        (None, false, headers, method)
     } else {
         (
             transforms.get(&job.handler).map(|s| s.as_str()),
             handler_types.get(&job.handler).is_some_and(|t| t == "grpc"),
             handler_headers.get(&job.handler).cloned(),
+            handler_methods
+                .get(&job.handler)
+                .cloned()
+                .unwrap_or_else(|| "POST".into()),
         )
     };
 
     let result = if is_workflow {
-        deliver_workflow_step(db, http, job, custom_headers.as_ref()).await
+        deliver_workflow_step(db, http, job, custom_headers.as_ref(), &method).await
     } else {
         deliver(
             db,
@@ -442,6 +468,7 @@ async fn deliver_job(
             transform,
             is_grpc,
             custom_headers.as_ref(),
+            &method,
         )
         .await
         .map(|status_code| DeliveryResult {
@@ -605,6 +632,7 @@ async fn deliver_workflow_step(
     http: &reqwest::Client,
     job: &crate::db::JobRow,
     custom_headers: Option<&HashMap<String, String>>,
+    method: &str,
 ) -> Result<DeliveryResult> {
     // Get step_input from workflow job data
     let wf_data = db.get_workflow_job_data(&job.id).await?;
@@ -612,8 +640,16 @@ async fn deliver_workflow_step(
         .and_then(|d| d.step_input)
         .unwrap_or_else(|| "{}".to_string());
 
+    let reqwest_method = match method {
+        "GET" => reqwest::Method::GET,
+        "PUT" => reqwest::Method::PUT,
+        "PATCH" => reqwest::Method::PATCH,
+        "DELETE" => reqwest::Method::DELETE,
+        _ => reqwest::Method::POST,
+    };
+
     let mut request = http
-        .post(&job.url)
+        .request(reqwest_method.clone(), &job.url)
         .header("Content-Type", "application/json")
         .header("X-Qhook-Job-ID", &job.id)
         .header("X-Qhook-Event-ID", &job.event_id)
@@ -627,7 +663,12 @@ async fn deliver_workflow_step(
         }
     }
 
-    let response = request.body(payload).send().await?;
+    // Skip body for GET requests
+    let response = if reqwest_method == reqwest::Method::GET {
+        request.send().await?
+    } else {
+        request.body(payload).send().await?
+    };
 
     let status_code = response.status().as_u16();
     let body = response.text().await.ok();
@@ -1850,6 +1891,7 @@ fn error_type_matches(errors: &[config::ErrorType], error_type: &str) -> bool {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn deliver(
     db: &Database,
     http: &reqwest::Client,
@@ -1858,6 +1900,7 @@ async fn deliver(
     transform: Option<&str>,
     is_grpc: bool,
     custom_headers: Option<&HashMap<String, String>>,
+    method: &str,
 ) -> Result<u16> {
     let (raw_payload, headers_json) = db.get_event_data(&job.event_id).await?;
 
@@ -1870,7 +1913,7 @@ async fn deliver(
     if is_grpc {
         deliver_grpc(grpc_channels, job, &payload, &headers_json).await
     } else {
-        deliver_http(http, job, &payload, &headers_json, custom_headers).await
+        deliver_http(http, job, &payload, &headers_json, custom_headers, method).await
     }
 }
 
@@ -1880,9 +1923,18 @@ async fn deliver_http(
     payload: &str,
     headers_json: &Option<String>,
     custom_headers: Option<&HashMap<String, String>>,
+    method: &str,
 ) -> Result<u16> {
+    let reqwest_method = match method {
+        "GET" => reqwest::Method::GET,
+        "PUT" => reqwest::Method::PUT,
+        "PATCH" => reqwest::Method::PATCH,
+        "DELETE" => reqwest::Method::DELETE,
+        _ => reqwest::Method::POST,
+    };
+
     let mut request = http
-        .post(&job.url)
+        .request(reqwest_method.clone(), &job.url)
         .header("Content-Type", "application/json")
         .header("X-Qhook-Job-ID", &job.id)
         .header("X-Qhook-Event-ID", &job.event_id)
@@ -1907,7 +1959,12 @@ async fn deliver_http(
         }
     }
 
-    let response = request.body(payload.to_string()).send().await?;
+    // Skip body for GET requests
+    let response = if reqwest_method == reqwest::Method::GET {
+        request.send().await?
+    } else {
+        request.body(payload.to_string()).send().await?
+    };
     Ok(response.status().as_u16())
 }
 
