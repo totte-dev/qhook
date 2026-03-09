@@ -58,6 +58,7 @@ src/
   lib.rs        — Module exports (for Cloud version dependency)
   api.rs        — HTTP handlers (webhook, event, sns, health)
   config.rs     — YAML config parsing + env var expansion
+  cron.rs       — Cron scheduler (periodic event generation)
   db.rs         — SQLite/Postgres via sqlx AnyPool
   metrics.rs    — Prometheus metrics (atomic counters, no deps)
   queue.rs      — Job worker (poll, deliver, retry, DLQ)
@@ -65,7 +66,7 @@ src/
   verify.rs     — Signature verification (GitHub, Stripe, Shopify, HMAC, SNS X.509)
   cli.rs        — CLI commands (start, init, validate, jobs, events)
 tests/
-  e2e.sh        — E2E tests (20 tests)
+  e2e.sh        — E2E tests (26 tests)
   e2e_sns.sh    — SNS E2E tests with LocalStack (8 tests)
   mock_server.py — Python mock HTTP server for E2E
   bench.sh      — Benchmark script (receive RPS + delivery throughput)
@@ -88,7 +89,7 @@ docs/               — GitHub Pages user guide (Jekyll, Cayman theme)
 ## Conventions
 
 - **Language**: Code, comments, and all documentation in English. Exception: `docs/private/` may be in Japanese. User communication in Japanese.
-- **Source type strings**: `webhook`, `event`, `sns` (in config YAML and source_type field).
+- **Source type strings**: `webhook`, `event`, `sns`, `cron` (in config YAML and source_type field).
 - **Event type extraction order**: CloudEvents `ce-type` header → structured mode `type` field → provider-specific logic.
 - **Database**: SQLite for dev/testing, Postgres for production. Both via sqlx AnyPool.
 - **IDs**: ULID for event_id and job_id.

@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.2] - 2026-03-10
+
+### Added
+- **HTTP method specification**: `method` field on handlers, workflow steps, and parallel branches. Supports `GET`, `POST` (default), `PUT`, `PATCH`, `DELETE`. GET requests omit the body.
+- **Cron triggers**: New `cron` source type with `schedule` (cron expression) and optional `timezone`. Fires `cron.tick` events on schedule, matching handlers and workflows.
+
+### Changed
+- Test coverage improvements: 14 gap-coverage tests added, 4 redundant tests removed (174 total unit tests).
+
 ## [0.2.0] - 2026-03-09
 
 ### Added

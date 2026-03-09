@@ -181,6 +181,14 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
         .map(|(name, h)| (name.clone(), h.headers.clone()))
         .collect();
 
+    let handler_methods: std::collections::HashMap<String, String> = shared
+        .config
+        .handlers
+        .iter()
+        .filter(|(_, h)| h.method != "POST")
+        .map(|(name, h)| (name.clone(), h.method.clone()))
+        .collect();
+
     let worker = Worker::new(
         shared.db.clone(),
         shared.metrics.clone(),
@@ -191,12 +199,29 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
         handler_transforms,
         handler_types,
         handler_headers,
+        handler_methods,
         shared.config.workflows.clone(),
         shared.config.delivery.default_retry.max,
     );
     let worker_handle = tokio::spawn(async move {
         worker.run().await;
     });
+
+    // Spawn cron scheduler if any cron sources exist
+    let has_cron = shared
+        .config
+        .sources
+        .values()
+        .any(|s| s.source_type == "cron");
+    let cron_shutdown_rx = shutdown_tx.subscribe();
+    let cron_handle = if has_cron {
+        let cron_state = shared.clone();
+        Some(tokio::spawn(async move {
+            crate::cron::run(cron_state, cron_shutdown_rx).await;
+        }))
+    } else {
+        None
+    };
 
     let body_limit = shared.config.server.max_body_size;
     let max_inbound = shared.config.server.max_inbound;
@@ -317,6 +342,9 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
     tracing::info!("HTTP server stopped, shutting down worker...");
     let _ = shutdown_tx.send(true);
     worker_handle.await?;
+    if let Some(handle) = cron_handle {
+        handle.await?;
+    }
 
     tracing::info!("qhook stopped");
     Ok(())
@@ -719,7 +747,7 @@ async fn process_event(
 }
 
 /// Start a workflow by creating a workflow_run and the first step's job.
-async fn start_workflow(
+pub async fn start_workflow(
     state: &AppState,
     workflow_name: &str,
     workflow: &crate::config::WorkflowConfig,
@@ -1002,7 +1030,7 @@ fn extract_sns_event_type(message: &str, subject: Option<&str>) -> String {
     "sns.notification".to_string()
 }
 
-fn event_matches(pattern: &str, event_type: &str) -> bool {
+pub fn event_matches(pattern: &str, event_type: &str) -> bool {
     if pattern == "*" {
         return true;
     }
@@ -1060,7 +1088,7 @@ pub fn evaluate_filter_pub(payload: &str, filter: &str) -> bool {
     evaluate_filter(payload, filter)
 }
 
-fn evaluate_filter(payload: &str, filter: &str) -> bool {
+pub fn evaluate_filter(payload: &str, filter: &str) -> bool {
     let filter = filter.trim();
 
     // "$.path >= value" (must check before > and ==)
@@ -1670,6 +1698,31 @@ mod tests {
         ];
         let payload = r#"{"tenant_id": "t-1", "config": {"key": "val"}}"#;
         assert!(validate_workflow_params("test", &params, payload).is_ok());
+    }
+
+    #[test]
+    fn test_filter_inequality_missing_field() {
+        // != with missing field returns true (field doesn't equal the value)
+        assert!(evaluate_filter(r#"{"a": 1}"#, "$.missing != x"));
+    }
+
+    #[test]
+    fn test_filter_in_numeric() {
+        assert!(evaluate_filter(
+            r#"{"code": 200}"#,
+            "$.code in [200, 201, 202]"
+        ));
+        assert!(!evaluate_filter(r#"{"code": 404}"#, "$.code in [200, 201]"));
+    }
+
+    #[test]
+    fn test_validate_params_invalid_json() {
+        let params = vec![crate::config::ParamConfig {
+            name: "id".into(),
+            param_type: "string".into(),
+            required: true,
+        }];
+        assert!(validate_workflow_params("test", &params, "not json").is_err());
     }
 
     #[test]

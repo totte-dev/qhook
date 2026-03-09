@@ -870,6 +870,38 @@ mod tests {
         assert!(verify_signature("gitlab", secret, b"any", &headers).unwrap());
     }
 
+    #[test]
+    fn test_shopify_signature_invalid() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Shopify-Hmac-SHA256", "bad-signature".parse().unwrap());
+        assert!(!verify_shopify("secret", b"payload", &headers).unwrap());
+    }
+
+    #[test]
+    fn test_shopify_signature_missing() {
+        let headers = HeaderMap::new();
+        assert!(!verify_shopify("secret", b"payload", &headers).unwrap());
+    }
+
+    #[test]
+    fn test_custom_hmac_invalid() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Webhook-Signature", "wrong-hex".parse().unwrap());
+        assert!(!verify_custom_hmac("secret", b"payload", &headers).unwrap());
+    }
+
+    #[test]
+    fn test_custom_hmac_missing() {
+        let headers = HeaderMap::new();
+        assert!(!verify_custom_hmac("secret", b"payload", &headers).unwrap());
+    }
+
+    #[test]
+    fn test_stripe_signature_missing() {
+        let headers = HeaderMap::new();
+        assert!(!verify_stripe("whsec_test", b"payload", &headers).unwrap());
+    }
+
     // --- SNS cert cache ---
 
     #[test]
