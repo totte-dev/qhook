@@ -46,6 +46,7 @@ database:
 
 server:
   port: 8888
+  allow_private_urls: true    # required for localhost handler URLs
 
 sources:
   app:
@@ -62,6 +63,7 @@ handlers:
 This config:
 - Uses SQLite (no external database needed)
 - Listens on port 8888
+- `allow_private_urls` allows handler URLs pointing to localhost (disabled by default for SSRF protection)
 - Defines one source called `app` (no signature verification)
 - Routes `order.created` events to `http://localhost:3000/jobs/order`
 - Retries up to 5 times on failure

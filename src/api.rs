@@ -170,6 +170,17 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
         .map(|(name, h)| (name.clone(), h.handler_type.clone()))
         .collect();
 
+    let handler_headers: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, String>,
+    > = shared
+        .config
+        .handlers
+        .iter()
+        .filter(|(_, h)| !h.headers.is_empty())
+        .map(|(name, h)| (name.clone(), h.headers.clone()))
+        .collect();
+
     let worker = Worker::new(
         shared.db.clone(),
         shared.metrics.clone(),
@@ -179,6 +190,9 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
         rate_limits,
         handler_transforms,
         handler_types,
+        handler_headers,
+        shared.config.workflows.clone(),
+        shared.config.delivery.default_retry.max,
     );
     let worker_handle = tokio::spawn(async move {
         worker.run().await;
@@ -187,6 +201,7 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
     let body_limit = shared.config.server.max_body_size;
     let max_inbound = shared.config.server.max_inbound;
     let ip_rate_limit = shared.config.server.ip_rate_limit;
+    let trust_proxy = shared.config.server.trust_proxy;
     let inbound_semaphore = Arc::new(tokio::sync::Semaphore::new(max_inbound as usize));
 
     let sem = inbound_semaphore.clone();
@@ -213,6 +228,7 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
         .route("/webhooks/{source}", post(handle_webhook))
         .route("/events/{event_type}", post(handle_event))
         .route("/sns/{source}", post(handle_sns))
+        .route("/callback/{token}", post(handle_callback))
         .route("/health", axum::routing::get(handle_health))
         .route("/metrics", axum::routing::get(handle_metrics))
         .layer(security_headers)
@@ -225,6 +241,7 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
         let limiter = Arc::new(IpRateLimiter::new(ip_rate_limit));
         tracing::info!(
             limit = ip_rate_limit,
+            trust_proxy,
             "Per-IP rate limiting enabled (req/s)"
         );
 
@@ -242,15 +259,40 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
             move |req: axum::extract::Request, next: middleware::Next| {
                 let limiter = limiter.clone();
                 async move {
-                    // Extract IP from ConnectInfo or peer addr
-                    let ip = req
-                        .extensions()
-                        .get::<ConnectInfo<std::net::SocketAddr>>()
-                        .map(|ci| ci.0.ip());
+                    // Extract IP: prefer proxy headers when trust_proxy is enabled
+                    let ip = if trust_proxy {
+                        req.headers()
+                            .get("x-forwarded-for")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.split(',').next())
+                            .and_then(|s| s.trim().parse::<IpAddr>().ok())
+                            .or_else(|| {
+                                req.headers()
+                                    .get("x-real-ip")
+                                    .and_then(|v| v.to_str().ok())
+                                    .and_then(|s| s.trim().parse::<IpAddr>().ok())
+                            })
+                    } else {
+                        None
+                    }
+                    .or_else(|| {
+                        req.extensions()
+                            .get::<ConnectInfo<std::net::SocketAddr>>()
+                            .map(|ci| ci.0.ip())
+                    });
 
-                    if let Some(ip) = ip {
-                        if !limiter.check(ip) {
-                            tracing::debug!(ip = %ip, "IP rate limited");
+                    match ip {
+                        Some(ip) => {
+                            if !limiter.check(ip) {
+                                tracing::debug!(ip = %ip, "IP rate limited");
+                                return StatusCode::TOO_MANY_REQUESTS.into_response();
+                            }
+                        }
+                        None => {
+                            // Cannot determine IP — deny to prevent bypass
+                            tracing::warn!(
+                                "Cannot determine client IP for rate limiting, denying request"
+                            );
                             return StatusCode::TOO_MANY_REQUESTS.into_response();
                         }
                     }
@@ -590,8 +632,19 @@ async fn process_event(
         })
         .collect();
 
-    if matching_handlers.is_empty() {
-        tracing::debug!(source, event_type, "No matching handlers");
+    // Find matching workflows
+    let matching_workflows: Vec<_> = state
+        .config
+        .workflows
+        .iter()
+        .filter(|(_, w)| {
+            w.source == source
+                && (w.events.is_empty() || w.events.iter().any(|e| event_matches(e, event_type)))
+        })
+        .collect();
+
+    if matching_handlers.is_empty() && matching_workflows.is_empty() {
+        tracing::debug!(source, event_type, "No matching handlers or workflows");
         return Ok(true);
     }
 
@@ -657,7 +710,176 @@ async fn process_event(
         );
     }
 
+    // Start matching workflows
+    for (workflow_name, workflow) in &matching_workflows {
+        start_workflow(state, workflow_name, workflow, &event_id, payload).await?;
+    }
+
     Ok(true)
+}
+
+/// Start a workflow by creating a workflow_run and the first step's job.
+async fn start_workflow(
+    state: &AppState,
+    workflow_name: &str,
+    workflow: &crate::config::WorkflowConfig,
+    event_id: &str,
+    payload: &str,
+) -> Result<()> {
+    // Validate input params if defined
+    if !workflow.params.is_empty() {
+        validate_workflow_params(workflow_name, &workflow.params, payload)?;
+    }
+
+    let first_step = &workflow.steps[0];
+    let run_id = ulid::Ulid::new().to_string();
+
+    state
+        .db
+        .insert_workflow_run(&run_id, workflow_name, event_id, &first_step.name)
+        .await?;
+
+    // Set workflow timeout if configured
+    if let Some(timeout_secs) = workflow.timeout {
+        let timeout_at = (chrono::Utc::now().naive_utc()
+            + chrono::Duration::seconds(timeout_secs as i64))
+        .format("%Y-%m-%dT%H:%M:%S%.3f")
+        .to_string();
+        state.db.set_workflow_timeout(&run_id, &timeout_at).await?;
+    }
+
+    state.metrics.inc_workflow_started(workflow_name);
+
+    // Create the first step's job
+    create_step_job(
+        state,
+        workflow_name,
+        &run_id,
+        event_id,
+        first_step,
+        0,
+        payload,
+    )
+    .await?;
+
+    tracing::info!(
+        workflow = workflow_name,
+        run_id,
+        event_id,
+        first_step = first_step.name,
+        "Workflow started"
+    );
+    Ok(())
+}
+
+/// Create a job for a workflow step.
+async fn create_step_job(
+    state: &AppState,
+    workflow_name: &str,
+    run_id: &str,
+    event_id: &str,
+    step: &crate::config::StepConfig,
+    step_index: i32,
+    input_payload: &str,
+) -> Result<()> {
+    let url = step.url.as_deref().unwrap_or("");
+    let max_attempts = step
+        .retry
+        .as_ref()
+        .map(|r| r.max)
+        .unwrap_or(state.config.delivery.default_retry.max);
+
+    let job_id = ulid::Ulid::new().to_string();
+    let handler_name = format!("{}/{}", workflow_name, step.name);
+
+    // Apply input transform if configured
+    let step_input = match &step.input {
+        Some(template) => apply_transform(input_payload, template),
+        None => input_payload.to_string(),
+    };
+
+    state
+        .db
+        .insert_workflow_job(
+            &job_id,
+            event_id,
+            &handler_name,
+            url,
+            max_attempts,
+            run_id,
+            &step.name,
+            step_index,
+            Some(&step_input),
+        )
+        .await?;
+
+    state.metrics.inc_jobs_created();
+    tracing::info!(
+        workflow = workflow_name,
+        run_id,
+        job_id,
+        step = step.name,
+        step_index,
+        "Workflow step job created"
+    );
+    Ok(())
+}
+
+/// Handle callback webhook: resume a waiting workflow step.
+/// The token itself serves as authentication — it is a 160-bit cryptographic random value.
+async fn handle_callback(
+    State(state): State<SharedState>,
+    Path(token): Path<String>,
+    body: Bytes,
+) -> impl IntoResponse {
+    // Reject obviously invalid tokens early (valid tokens are 52 chars: two ULIDs)
+    if token.len() < 26 {
+        // Return same 404 as invalid/expired to prevent enumeration
+        let body = serde_json::json!({"error": "not found"});
+        return (StatusCode::NOT_FOUND, axum::Json(body)).into_response();
+    }
+
+    let payload = String::from_utf8_lossy(&body).to_string();
+
+    // Build workflow configs map
+    let workflows: std::collections::HashMap<String, crate::config::WorkflowConfig> = state
+        .config
+        .workflows
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    let default_retry_max = state.config.delivery.default_retry.max;
+
+    // Log only token prefix to avoid leaking the full secret
+    let token_prefix = &token[..token.len().min(8)];
+
+    match crate::queue::resume_callback(
+        &state.db,
+        &state.metrics,
+        &workflows,
+        default_retry_max,
+        &token,
+        &payload,
+    )
+    .await
+    {
+        Ok(true) => {
+            let body = serde_json::json!({"status": "ok", "message": "callback received"});
+            (StatusCode::OK, axum::Json(body)).into_response()
+        }
+        Ok(false) => {
+            tracing::debug!(token_prefix, "Callback token not found or already used");
+            // Uniform 404 for invalid, expired, and already-used tokens (no enumeration)
+            let body = serde_json::json!({"error": "not found"});
+            (StatusCode::NOT_FOUND, axum::Json(body)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(token_prefix, error = %e, "Callback processing failed");
+            let body = serde_json::json!({"error": "internal error"});
+            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
+        }
+    }
 }
 
 async fn handle_health(State(state): State<SharedState>) -> impl IntoResponse {
@@ -676,7 +898,27 @@ async fn handle_health(State(state): State<SharedState>) -> impl IntoResponse {
     }
 }
 
-async fn handle_metrics(State(state): State<SharedState>) -> impl IntoResponse {
+async fn handle_metrics(State(state): State<SharedState>, headers: HeaderMap) -> impl IntoResponse {
+    // Check metrics auth token if configured
+    if let Some(ref expected_token) = state.config.api.metrics_auth_token {
+        let provided = headers
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+
+        match provided {
+            Some(token) => {
+                use subtle::ConstantTimeEq;
+                if !bool::from(token.as_bytes().ct_eq(expected_token.as_bytes())) {
+                    return (StatusCode::UNAUTHORIZED, "Invalid token".to_string()).into_response();
+                }
+            }
+            _ => {
+                return (StatusCode::UNAUTHORIZED, "Invalid token".to_string()).into_response();
+            }
+        }
+    }
+
     let queue_depth = state.db.queue_depth().await.unwrap_or(0);
     let dead_jobs = state.db.dead_job_count().await.unwrap_or(0);
     let body = state.metrics.to_prometheus(queue_depth, dead_jobs);
@@ -686,6 +928,7 @@ async fn handle_metrics(State(state): State<SharedState>) -> impl IntoResponse {
         [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
         body,
     )
+        .into_response()
 }
 
 fn extract_event_type(source: &str, payload: &str, headers: &HeaderMap) -> String {
@@ -778,6 +1021,11 @@ fn extract_json_path_value(payload: &str, path: &str) -> Option<Value> {
     resolve_path(&json, path)
 }
 
+/// Public wrapper for resolve_path (used by queue.rs for map step).
+pub fn resolve_path_pub(json: &Value, path: &str) -> Option<Value> {
+    resolve_path(json, path)
+}
+
 fn resolve_path(json: &Value, path: &str) -> Option<Value> {
     let path = path.strip_prefix("$.").unwrap_or(path);
     let mut current = json;
@@ -795,8 +1043,53 @@ fn resolve_path(json: &Value, path: &str) -> Option<Value> {
 ///   "$.path == value"  — equality
 ///   "$.path != value"  — inequality
 ///   "$.path in [a,b]"  — set membership
+/// Numeric comparison helper for filter expressions.
+fn compare_numeric(payload: &str, path: &str, expected: &str, cmp: fn(f64, f64) -> bool) -> bool {
+    let expected_num = match expected.parse::<f64>() {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    match extract_json_path_value(payload, path) {
+        Some(Value::Number(n)) => n.as_f64().is_some_and(|v| cmp(v, expected_num)),
+        _ => false,
+    }
+}
+
+/// Public wrapper for evaluate_filter (used by queue.rs for choice steps).
+pub fn evaluate_filter_pub(payload: &str, filter: &str) -> bool {
+    evaluate_filter(payload, filter)
+}
+
 fn evaluate_filter(payload: &str, filter: &str) -> bool {
     let filter = filter.trim();
+
+    // "$.path >= value" (must check before > and ==)
+    if let Some((path, value)) = filter.split_once(">=") {
+        let path = path.trim();
+        let expected = value.trim().trim_matches('"');
+        return compare_numeric(payload, path, expected, |a, b| a >= b);
+    }
+
+    // "$.path <= value" (must check before < and ==)
+    if let Some((path, value)) = filter.split_once("<=") {
+        let path = path.trim();
+        let expected = value.trim().trim_matches('"');
+        return compare_numeric(payload, path, expected, |a, b| a <= b);
+    }
+
+    // "$.path > value"
+    if let Some((path, value)) = filter.split_once(">") {
+        let path = path.trim();
+        let expected = value.trim().trim_matches('"');
+        return compare_numeric(payload, path, expected, |a, b| a > b);
+    }
+
+    // "$.path < value"
+    if let Some((path, value)) = filter.split_once("<") {
+        let path = path.trim();
+        let expected = value.trim().trim_matches('"');
+        return compare_numeric(payload, path, expected, |a, b| a < b);
+    }
 
     // "$.path == value"
     if let Some((path, value)) = filter.split_once("==") {
@@ -853,6 +1146,61 @@ fn evaluate_filter(payload: &str, filter: &str) -> bool {
 
 /// Apply a JSON template transformation to a payload.
 /// Replaces `{{$.path}}` references with values from the original payload.
+/// Validate event payload against workflow input parameters.
+fn validate_workflow_params(
+    workflow_name: &str,
+    params: &[crate::config::ParamConfig],
+    payload: &str,
+) -> Result<()> {
+    let json: Value = serde_json::from_str(payload).map_err(|e| {
+        anyhow::anyhow!(
+            "workflow '{}' param validation: invalid JSON: {}",
+            workflow_name,
+            e
+        )
+    })?;
+
+    let obj = json.as_object().ok_or_else(|| {
+        anyhow::anyhow!(
+            "workflow '{}' param validation: payload must be a JSON object",
+            workflow_name
+        )
+    })?;
+
+    for param in params {
+        match obj.get(&param.name) {
+            None if param.required => {
+                anyhow::bail!(
+                    "workflow '{}' missing required param '{}'",
+                    workflow_name,
+                    param.name
+                );
+            }
+            None => continue,
+            Some(value) => {
+                let type_ok = match param.param_type.as_str() {
+                    "string" => value.is_string(),
+                    "number" => value.is_number(),
+                    "boolean" => value.is_boolean(),
+                    "object" => value.is_object(),
+                    "array" => value.is_array(),
+                    _ => true,
+                };
+                if !type_ok {
+                    anyhow::bail!(
+                        "workflow '{}' param '{}' expected type '{}', got {:?}",
+                        workflow_name,
+                        param.name,
+                        param.param_type,
+                        value
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// If the template is valid JSON with `{{...}}` placeholders, returns transformed JSON.
 /// Otherwise returns the original payload unchanged.
 pub fn apply_transform(payload: &str, template: &str) -> String {
@@ -1172,6 +1520,21 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_filter_numeric_comparisons() {
+        let payload = r#"{"amount": 5000, "score": 0.8}"#;
+        assert!(evaluate_filter(payload, "$.amount >= 5000"));
+        assert!(evaluate_filter(payload, "$.amount >= 4999"));
+        assert!(!evaluate_filter(payload, "$.amount >= 5001"));
+        assert!(evaluate_filter(payload, "$.amount > 4999"));
+        assert!(!evaluate_filter(payload, "$.amount > 5000"));
+        assert!(evaluate_filter(payload, "$.amount <= 5000"));
+        assert!(evaluate_filter(payload, "$.amount < 5001"));
+        assert!(!evaluate_filter(payload, "$.amount < 5000"));
+        assert!(evaluate_filter(payload, "$.score >= 0.5"));
+        assert!(!evaluate_filter(payload, "$.score >= 0.9"));
+    }
+
     // --- Payload transformation ---
 
     #[test]
@@ -1236,5 +1599,87 @@ mod tests {
         // New IP beyond cap should be rejected
         let new_ip: IpAddr = "255.255.255.255".parse().unwrap();
         assert!(!limiter.check(new_ip));
+    }
+
+    // --- Workflow param validation ---
+
+    #[test]
+    fn test_validate_params_required_present() {
+        let params = vec![crate::config::ParamConfig {
+            name: "tenant_id".into(),
+            param_type: "string".into(),
+            required: true,
+        }];
+        let payload = r#"{"tenant_id": "t-123"}"#;
+        assert!(validate_workflow_params("test", &params, payload).is_ok());
+    }
+
+    #[test]
+    fn test_validate_params_required_missing() {
+        let params = vec![crate::config::ParamConfig {
+            name: "tenant_id".into(),
+            param_type: "string".into(),
+            required: true,
+        }];
+        let payload = r#"{"other": "value"}"#;
+        let err = validate_workflow_params("test", &params, payload).unwrap_err();
+        assert!(err.to_string().contains("missing required param"));
+    }
+
+    #[test]
+    fn test_validate_params_optional_missing() {
+        let params = vec![crate::config::ParamConfig {
+            name: "region".into(),
+            param_type: "string".into(),
+            required: false,
+        }];
+        let payload = r#"{}"#;
+        assert!(validate_workflow_params("test", &params, payload).is_ok());
+    }
+
+    #[test]
+    fn test_validate_params_type_mismatch() {
+        let params = vec![crate::config::ParamConfig {
+            name: "count".into(),
+            param_type: "number".into(),
+            required: true,
+        }];
+        let payload = r#"{"count": "not-a-number"}"#;
+        let err = validate_workflow_params("test", &params, payload).unwrap_err();
+        assert!(err.to_string().contains("expected type 'number'"));
+    }
+
+    #[test]
+    fn test_validate_params_multiple() {
+        let params = vec![
+            crate::config::ParamConfig {
+                name: "tenant_id".into(),
+                param_type: "string".into(),
+                required: true,
+            },
+            crate::config::ParamConfig {
+                name: "config".into(),
+                param_type: "object".into(),
+                required: true,
+            },
+            crate::config::ParamConfig {
+                name: "tags".into(),
+                param_type: "array".into(),
+                required: false,
+            },
+        ];
+        let payload = r#"{"tenant_id": "t-1", "config": {"key": "val"}}"#;
+        assert!(validate_workflow_params("test", &params, payload).is_ok());
+    }
+
+    #[test]
+    fn test_validate_params_boolean_type() {
+        let params = vec![crate::config::ParamConfig {
+            name: "enabled".into(),
+            param_type: "boolean".into(),
+            required: true,
+        }];
+        assert!(validate_workflow_params("test", &params, r#"{"enabled": true}"#).is_ok());
+        assert!(validate_workflow_params("test", &params, r#"{"enabled": "yes"}"#).is_err());
     }
 }

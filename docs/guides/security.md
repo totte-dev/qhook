@@ -27,6 +27,17 @@ Requests without a valid token receive `401 Unauthorized`. Token comparison uses
 
 If `auth_token` is not configured, qhook logs a warning at startup reminding you to secure the endpoint in production.
 
+### Metrics Endpoint
+
+Protect the `/metrics` endpoint with a bearer token:
+
+```yaml
+api:
+  metrics_auth_token: ${QHOOK_METRICS_TOKEN}
+```
+
+Without this, the `/metrics` endpoint is open and exposes operational details (queue depth, handler names, error rates). Configure this in production or restrict access at the network level.
+
 ### Webhook Signatures
 
 External webhook sources are protected via provider-specific signature verification. See [Webhook Verification](webhook-verification.md).
@@ -56,9 +67,25 @@ Returns `503 Service Unavailable` when exceeded. Protects qhook and its database
 ```yaml
 server:
   ip_rate_limit: 100        # requests/sec per IP (default: 0 = disabled)
+  trust_proxy: true          # use X-Forwarded-For when behind a reverse proxy
 ```
 
 Returns `429 Too Many Requests` when exceeded. Sliding window counter per IP address. Capped at 100K tracked IPs to prevent memory exhaustion; new IPs beyond the cap are rate-limited by default.
+
+**Important:** When running behind a reverse proxy (nginx, ALB, etc.), set `trust_proxy: true` so that rate limiting uses the real client IP from the `X-Forwarded-For` or `X-Real-IP` header instead of the proxy's IP. Without this, all requests appear to come from the proxy and rate limiting is ineffective.
+
+### SSRF Protection
+
+Handler and workflow step URLs are validated against private/loopback IP ranges by default:
+
+```yaml
+server:
+  allow_private_urls: true   # allow localhost/private IPs (dev only)
+```
+
+Without `allow_private_urls`, URLs pointing to `localhost`, `127.0.0.1`, `10.x.x.x`, `172.16-31.x.x`, `192.168.x.x`, and `169.254.x.x` are rejected at config validation time. This prevents SSRF attacks (e.g., accessing cloud metadata at `169.254.169.254`).
+
+Enable `allow_private_urls` only for local development or when handlers run on the same host.
 
 ## Security Headers
 

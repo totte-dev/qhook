@@ -1,0 +1,45 @@
+# Workflow example: Order processing pipeline
+#
+# Three-step sequential workflow:
+#   1. validate — check order validity
+#   2. fulfill  — process fulfillment
+#   3. notify   — send notification
+#
+# Each step's response is chained to the next step's input.
+# If validation fails with 4xx, the catch block routes to handle-error.
+
+database:
+  driver: sqlite
+
+server:
+  port: 8888
+  allow_private_urls: true
+
+sources:
+  app:
+    type: event
+
+handlers: {}
+
+workflows:
+  order-pipeline:
+    source: app
+    events: [order.created]
+    steps:
+      - name: validate
+        url: http://localhost:3000/validate
+        retry:
+          max: 3
+          errors: [5xx, timeout]
+        catch:
+          - errors: [4xx]
+            goto: handle-error
+      - name: fulfill
+        url: http://localhost:3000/fulfill
+        result_path: "$.fulfillment"
+      - name: notify
+        url: http://localhost:3000/notify
+        end: true
+      - name: handle-error
+        url: http://localhost:3000/error-handler
+        end: true
