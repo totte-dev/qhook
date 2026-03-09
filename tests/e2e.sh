@@ -480,6 +480,153 @@ HTTP_CODE=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" \
 
 ########################################
 echo ""
+echo "=== Test 11: HTTP method specification ==="
+########################################
+
+start_mock 19111
+cat > /tmp/e2e_qhook_11.yaml <<EOF
+database:
+  driver: sqlite
+  url: "sqlite:/tmp/e2e_qhook_11.db?mode=rwc"
+server:
+  port: 19211
+  allow_private_urls: true
+sources:
+  app:
+    type: event
+handlers:
+  put-handler:
+    source: app
+    events: ["resource.update"]
+    url: http://127.0.0.1:19111/jobs/put
+    method: PUT
+    retry: { max: 0 }
+  get-handler:
+    source: app
+    events: ["resource.check"]
+    url: http://127.0.0.1:19111/jobs/get
+    method: GET
+    retry: { max: 0 }
+  default-handler:
+    source: app
+    events: ["resource.create"]
+    url: http://127.0.0.1:19111/jobs/post
+    retry: { max: 0 }
+EOF
+start_qhook /tmp/e2e_qhook_11.yaml
+
+# Send events
+curl -sf -X POST http://127.0.0.1:19211/events/resource.update \
+    -H "Content-Type: application/json" \
+    -d '{"id": "res_1"}' > /dev/null
+
+curl -sf -X POST http://127.0.0.1:19211/events/resource.check \
+    -H "Content-Type: application/json" \
+    -d '{"id": "res_2"}' > /dev/null
+
+curl -sf -X POST http://127.0.0.1:19211/events/resource.create \
+    -H "Content-Type: application/json" \
+    -d '{"id": "res_3"}' > /dev/null
+
+sleep 3
+
+# Check delivery methods
+RECEIVED=$(curl -sf http://127.0.0.1:19111/received 2>/dev/null || echo "[]")
+PUT_METHOD=$(echo "$RECEIVED" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for r in d:
+    if '/put' in r.get('path', ''):
+        print(r.get('method', 'unknown'))
+        break
+else:
+    print('none')
+" 2>/dev/null || echo "none")
+[ "$PUT_METHOD" = "PUT" ] && pass "PUT method used for put-handler" || fail "PUT method" "got $PUT_METHOD"
+
+GET_METHOD=$(echo "$RECEIVED" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for r in d:
+    if '/get' in r.get('path', ''):
+        print(r.get('method', 'unknown'))
+        break
+else:
+    print('none')
+" 2>/dev/null || echo "none")
+[ "$GET_METHOD" = "GET" ] && pass "GET method used for get-handler" || fail "GET method" "got $GET_METHOD"
+
+POST_METHOD=$(echo "$RECEIVED" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for r in d:
+    if '/post' in r.get('path', ''):
+        print(r.get('method', 'unknown'))
+        break
+else:
+    print('none')
+" 2>/dev/null || echo "none")
+[ "$POST_METHOD" = "POST" ] && pass "POST method used by default" || fail "POST default" "got $POST_METHOD"
+
+# Check GET has no body
+GET_BODY=$(echo "$RECEIVED" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for r in d:
+    if '/get' in r.get('path', ''):
+        print('empty' if not r.get('body', '') else 'has_body')
+        break
+else:
+    print('none')
+" 2>/dev/null || echo "none")
+[ "$GET_BODY" = "empty" ] && pass "GET request has no body" || fail "GET body" "got $GET_BODY"
+
+########################################
+echo ""
+echo "=== Test 12: Cron trigger ==="
+########################################
+
+start_mock 19112
+cat > /tmp/e2e_qhook_12.yaml <<EOF
+database:
+  driver: sqlite
+  url: "sqlite:/tmp/e2e_qhook_12.db?mode=rwc"
+server:
+  port: 19212
+  allow_private_urls: true
+sources:
+  heartbeat:
+    type: cron
+    schedule: "*/3 * * * * *"
+handlers:
+  on-tick:
+    source: heartbeat
+    url: http://127.0.0.1:19112/jobs/cron
+    retry: { max: 0 }
+EOF
+start_qhook /tmp/e2e_qhook_12.yaml
+
+# Wait for at least one cron fire (3 seconds + margin)
+sleep 5
+
+COUNT=$(curl -sf http://127.0.0.1:19112/count 2>/dev/null || echo "0")
+[ "$COUNT" -ge 1 ] 2>/dev/null && pass "Cron trigger fired (count=$COUNT)" || fail "Cron trigger" "count=$COUNT"
+
+# Check payload contains source and fired_at
+RECEIVED=$(curl -sf http://127.0.0.1:19112/received 2>/dev/null || echo "[]")
+HAS_SOURCE=$(echo "$RECEIVED" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if d:
+    body = d[0].get('body', '')
+    print('yes' if 'heartbeat' in body and 'fired_at' in body else 'no')
+else:
+    print('no')
+" 2>/dev/null || echo "no")
+[ "$HAS_SOURCE" = "yes" ] && pass "Cron payload has source and fired_at" || fail "Cron payload" "missing fields"
+
+########################################
+echo ""
 echo "==============================="
 echo -e "Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"
 echo "==============================="
