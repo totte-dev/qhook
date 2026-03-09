@@ -1,0 +1,80 @@
+# Alert Remediation example
+#
+# PagerDuty alert triggers severity-based automatic remediation:
+#   1. triage    — route by severity (choice step)
+#   2. restart   — restart service (critical)
+#   3. scale-up  — scale service (warning)
+#   4. verify    — wait 30s for recovery
+#   5. check     — health check
+#   6. escalate  — escalate via PagerDuty API if health check fails
+#
+# Trigger:
+#   curl -X POST http://localhost:8888/webhooks/pagerduty \
+#     -H "Content-Type: application/json" \
+#     -H "X-PagerDuty-Signature: v1=<hmac>" \
+#     -d '{"event":{"event_type":"incident.triggered"},"severity":"critical"}'
+
+database:
+  driver: sqlite
+
+server:
+  port: 8888
+  allow_private_urls: true
+
+sources:
+  pagerduty:
+    type: webhook
+    verify: pagerduty
+    secret: ${PAGERDUTY_WEBHOOK_SECRET:-demo-secret}
+
+handlers: {}
+
+workflows:
+  remediate:
+    source: pagerduty
+    events: [incident.triggered]
+    timeout: 300
+    steps:
+      - name: triage
+        type: choice
+        choices:
+          - condition: "$.severity == critical"
+            goto: restart
+          - condition: "$.severity == warning"
+            goto: scale-up
+        default: notify
+
+      - name: restart
+        url: http://localhost:3000/restart
+        goto: verify
+
+      - name: scale-up
+        url: http://localhost:3000/scale
+        goto: verify
+
+      - name: verify
+        type: wait
+        seconds: 30
+        goto: health-check
+
+      - name: health-check
+        url: http://localhost:3000/health
+        catch:
+          - errors: [all]
+            goto: escalate
+        end: true
+
+      - name: escalate
+        url: https://api.pagerduty.com/incidents
+        headers:
+          Authorization: "Token token=${PAGERDUTY_API_KEY:-demo-key}"
+          Content-Type: "application/json"
+        input: |
+          {"incident":{"type":"incident","title":"Auto-remediation failed"}}
+        end: true
+
+      - name: notify
+        url: http://localhost:3000/notify
+        input: |
+          {"message": "Low-severity alert, notification only"}
+        end: true

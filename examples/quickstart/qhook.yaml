@@ -4,6 +4,7 @@ database:
 
 server:
   port: 8888
+  allow_private_urls: true
 
 sources:
   app:

@@ -49,6 +49,62 @@ sources:
 
 Checks the `X-Shopify-Hmac-SHA256` header using HMAC-SHA256 (base64-encoded).
 
+### PagerDuty
+
+```yaml
+sources:
+  pagerduty:
+    type: webhook
+    verify: pagerduty
+    secret: ${PAGERDUTY_WEBHOOK_SECRET}
+```
+
+Checks the `X-PagerDuty-Signature` header (`v1=...` format) using HMAC-SHA256.
+
+**PagerDuty setup:** In PagerDuty, go to Integrations > Generic Webhooks (v3). Add a subscription with the URL `https://your-host/webhooks/pagerduty`. Copy the signing secret to your config.
+
+### Grafana
+
+```yaml
+sources:
+  grafana:
+    type: webhook
+    verify: grafana
+    secret: ${GRAFANA_WEBHOOK_SECRET}
+```
+
+Checks the `X-Grafana-Alerting-Signature` header using HMAC-SHA256.
+
+**Grafana setup:** In Grafana, go to Alerting > Contact points. Add a webhook contact point with the URL `https://your-host/webhooks/grafana`. Under Optional Webhook Settings, enter the same secret.
+
+### Terraform Cloud
+
+```yaml
+sources:
+  terraform:
+    type: webhook
+    verify: terraform
+    secret: ${TF_NOTIFICATION_SECRET}
+```
+
+Checks the `X-TFE-Notification-Signature` header using HMAC-SHA512.
+
+**Terraform Cloud setup:** In your workspace settings, go to Notifications > Create a Notification. Set the destination URL to `https://your-host/webhooks/terraform` and enter a token (used as the HMAC secret).
+
+### GitLab
+
+```yaml
+sources:
+  gitlab:
+    type: webhook
+    verify: gitlab
+    secret: ${GITLAB_WEBHOOK_TOKEN}
+```
+
+Compares the `X-Gitlab-Token` header directly against the configured secret (constant-time comparison).
+
+**GitLab setup:** In your project settings, go to Webhooks > Add new webhook. Set the URL to `https://your-host/webhooks/gitlab` and enter the secret token.
+
 ### Custom HMAC
 
 ```yaml
@@ -60,6 +116,20 @@ sources:
 ```
 
 Checks the `X-Webhook-Signature` header using HMAC-SHA256 (hex-encoded). Use this for any service that sends an HMAC signature in a custom header.
+
+## Provider Summary
+
+| Provider | `verify` value | Algorithm | Header |
+|----------|---------------|-----------|--------|
+| GitHub | `github` | HMAC-SHA256 | `X-Hub-Signature-256` |
+| Stripe | `stripe` | HMAC-SHA256 + timestamp | `Stripe-Signature` |
+| Shopify | `shopify` | HMAC-SHA256 (base64) | `X-Shopify-Hmac-SHA256` |
+| PagerDuty | `pagerduty` | HMAC-SHA256 | `X-PagerDuty-Signature` |
+| Grafana | `grafana` | HMAC-SHA256 | `X-Grafana-Alerting-Signature` |
+| Terraform Cloud | `terraform` | HMAC-SHA512 | `X-TFE-Notification-Signature` |
+| GitLab | `gitlab` | Token comparison | `X-Gitlab-Token` |
+| Custom | `hmac` | HMAC-SHA256 | `X-Webhook-Signature` |
+| AWS SNS | (automatic) | X.509 RSA | (in body) |
 
 ## Security Notes
 

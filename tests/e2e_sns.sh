@@ -54,6 +54,7 @@ database:
   url: "sqlite:/tmp/e2e_sns_1.db?mode=rwc"
 server:
   port: $QHOOK_PORT
+  allow_private_urls: true
 sources:
   my-sns:
     type: sns
