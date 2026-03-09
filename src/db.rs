@@ -1165,6 +1165,14 @@ mod tests {
     }
 
     #[test]
+    fn test_redact_url_scheme_no_credentials() {
+        assert_eq!(
+            redact_url("postgres://db.example.com:5432/mydb"),
+            "postgres://db.example.com:5432/mydb"
+        );
+    }
+
+    #[test]
     fn test_redact_url_complex_password() {
         assert_eq!(
             redact_url("postgres://user:p%40ss%3Dw0rd@db.example.com:5432/mydb"),

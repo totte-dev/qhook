@@ -53,12 +53,18 @@ sources:
     type: sns
     # skip_verify: true             # for LocalStack testing
 
+  daily-report:
+    type: cron
+    schedule: "0 9 * * MON-FRI"      # 9 AM on weekdays
+    # timezone: "+09:00"             # default: UTC
+
 handlers:
   payment-success:
     source: stripe
     events: [checkout.session.completed, invoice.paid]
     url: http://backend:3000/jobs/payment
     type: http                      # http (default) or grpc
+    method: POST                    # GET, POST (default), PUT, PATCH, DELETE
     retry: { max: 8 }
     timeout: 60s
     idempotency_key: "$.id"
@@ -157,10 +163,12 @@ Each source is a named entry under `sources:`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | string | required | `webhook`, `event`, or `sns` |
+| `type` | string | required | `webhook`, `event`, `sns`, or `cron` |
 | `verify` | string | - | Signature verification: `github`, `stripe`, `shopify`, or `hmac` |
 | `secret` | string | - | Shared secret for signature verification. Required when `verify` is set |
 | `skip_verify` | boolean | `false` | Skip SNS X.509 verification (for testing with LocalStack) |
+| `schedule` | string | - | Cron expression (required for `cron` sources). 5-field standard or 6-field with seconds |
+| `timezone` | string | `UTC` | Timezone for cron evaluation. `UTC` or fixed offset like `+09:00` |
 
 **Source types:**
 
@@ -169,6 +177,7 @@ Each source is a named entry under `sources:`.
 | `webhook` | `POST /webhooks/{source}` | External webhooks with signature verification |
 | `event` | `POST /events/{event_type}` | Internal events with optional bearer token auth |
 | `sns` | `POST /sns/{source}` | AWS SNS with auto-confirmation and envelope unwrapping |
+| `cron` | *(internal)* | Time-based trigger. Fires `cron.tick` events on schedule |
 
 ### handlers
 
@@ -180,6 +189,7 @@ Each handler is a named entry under `handlers:`.
 | `events` | list | `[]` (all) | Event types to match. Empty = all events from this source |
 | `url` | string | required | Delivery target URL |
 | `type` | string | `http` | Delivery protocol: `http` or `grpc` |
+| `method` | string | `POST` | HTTP method: `GET`, `POST`, `PUT`, `PATCH`, `DELETE` |
 | `retry` | object | - | Override `default_retry` for this handler |
 | `timeout` | duration | - | Override delivery timeout for this handler |
 | `idempotency_key` | string | - | JSONPath to dedup key in payload (e.g., `$.id`) |
@@ -223,6 +233,7 @@ Each workflow is a named entry under `workflows:`.
 | `name` | string | required | Unique step name (used for `goto` references) |
 | `type` | string | `http` | Step type: `http`, `choice`, `parallel`, `map`, `wait`, `callback` |
 | `url` | string | - | Delivery target URL (required for `http` steps). For `callback` steps, URL to notify with the callback token |
+| `method` | string | `POST` | HTTP method: `GET`, `POST`, `PUT`, `PATCH`, `DELETE` |
 | `headers` | map | `{}` | Custom HTTP headers to send with this step's request |
 | `retry` | object | - | Override retry config. Supports `errors` field for error type matching (`5xx`, `4xx`, `timeout`, `network`, `all`) |
 | `catch` | list | - | Error routing rules. Each entry has `errors` (list) and `goto` (step name) |
@@ -267,10 +278,12 @@ qhook validate -c /path/to/qhook.yaml
 
 Checks performed:
 - YAML syntax
-- Source type is valid (`webhook`, `event`, `sns`)
+- Source type is valid (`webhook`, `event`, `sns`, `cron`)
 - Handler type is valid (`http`, `grpc`)
+- HTTP method is valid (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`)
 - Handler references an existing source
 - `verify` requires `secret` to be set (non-empty)
+- Cron sources have a valid `schedule` and `timezone`
 - Handler URLs use http/https scheme (private IPs trigger warnings)
 - Alert config has valid `on` events
 - Workflow references an existing source

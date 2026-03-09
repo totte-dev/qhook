@@ -223,6 +223,20 @@ mod tests {
     }
 
     #[test]
+    fn test_format_payload_unknown_type_falls_back_to_generic() {
+        let event = AlertEvent::Dlq {
+            job_id: "j1".into(),
+            handler: "h1".into(),
+            attempts: 3,
+        };
+        let payload = format_payload("unknown_type", &event);
+        // Should produce generic JSON (not Slack/Discord format)
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["alert"], "dlq");
+        assert_eq!(parsed["handler"], "h1");
+    }
+
+    #[test]
     fn test_event_kind() {
         let dlq = AlertEvent::Dlq {
             job_id: "j".into(),

@@ -67,6 +67,9 @@ pub struct StepConfig {
     /// Handler type: "http" (default), "grpc", "choice", "parallel", "map", "wait", "callback".
     #[serde(rename = "type", default = "default_handler_type")]
     pub handler_type: String,
+    /// HTTP method: GET, POST (default), PUT, PATCH, DELETE.
+    #[serde(default = "default_http_method")]
+    pub method: String,
     /// Custom HTTP headers to send with this step's request. Supports env var expansion.
     #[serde(default)]
     pub headers: HashMap<String, String>,
@@ -124,6 +127,9 @@ pub struct ChoiceRule {
 pub struct BranchConfig {
     pub name: String,
     pub url: String,
+    /// HTTP method: GET, POST (default), PUT, PATCH, DELETE.
+    #[serde(default = "default_http_method")]
+    pub method: String,
     #[serde(default)]
     pub headers: HashMap<String, String>,
 }
@@ -368,6 +374,10 @@ pub struct SourceConfig {
     pub secret: Option<String>,
     #[serde(default)]
     pub skip_verify: bool,
+    /// Cron schedule expression (5-field standard cron). Required for `cron` sources.
+    pub schedule: Option<String>,
+    /// Timezone for cron evaluation (e.g., "America/New_York"). Defaults to UTC.
+    pub timezone: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -380,6 +390,9 @@ pub struct HandlerConfig {
     /// Handler type: "http" (default) or "grpc".
     #[serde(rename = "type", default = "default_handler_type")]
     pub handler_type: String,
+    /// HTTP method: GET, POST (default), PUT, PATCH, DELETE.
+    #[serde(default = "default_http_method")]
+    pub method: String,
     pub retry: Option<RetryConfig>,
     pub timeout: Option<String>,
     pub idempotency_key: Option<String>,
@@ -398,6 +411,10 @@ pub struct HandlerConfig {
 
 fn default_handler_type() -> String {
     "http".into()
+}
+
+fn default_http_method() -> String {
+    "POST".into()
 }
 
 impl Config {
@@ -420,6 +437,7 @@ impl Config {
                 other => anyhow::bail!("handler '{}' has invalid type '{}'", name, other),
             }
             validate_handler_url(name, &handler.url, self.server.allow_private_urls)?;
+            validate_http_method(&format!("handler '{}'", name), &handler.method)?;
 
             // Check that handler.source references an existing source
             if !self.sources.contains_key(&handler.source) {
@@ -435,6 +453,27 @@ impl Config {
         for (name, source) in &self.sources {
             match source.source_type.as_str() {
                 "webhook" | "event" | "sns" => {}
+                "cron" => {
+                    // Cron sources require a schedule
+                    let schedule = source.schedule.as_deref().unwrap_or("");
+                    if schedule.is_empty() {
+                        anyhow::bail!("source '{}' is type 'cron' but has no schedule", name);
+                    }
+                    // Validate the cron expression
+                    if schedule.parse::<croner::Cron>().is_err() {
+                        anyhow::bail!("source '{}' has invalid cron schedule '{}'", name, schedule);
+                    }
+                    // Validate timezone if specified
+                    if let Some(ref tz) = source.timezone {
+                        if !parse_timezone(tz) {
+                            anyhow::bail!(
+                                "source '{}' has invalid timezone '{}'. Use UTC (default) or a fixed offset like +09:00",
+                                name,
+                                tz
+                            );
+                        }
+                    }
+                }
                 other => anyhow::bail!("source '{}' has invalid type '{}'", name, other),
             }
             // Require secret when signature verification is enabled
@@ -494,6 +533,10 @@ impl Config {
                         self.server.allow_private_urls,
                     )?;
                 }
+                validate_http_method(
+                    &format!("workflow '{}' step '{}'", name, step.name),
+                    &step.method,
+                )?;
                 if let Some(ref catches) = step.catch {
                     for c in catches {
                         if !step_names.contains(c.goto.as_str()) {
@@ -565,6 +608,13 @@ impl Config {
                                 &format!("{}/{}:{}", name, step.name, b.name),
                                 &b.url,
                                 self.server.allow_private_urls,
+                            )?;
+                            validate_http_method(
+                                &format!(
+                                    "workflow '{}' step '{}' branch '{}'",
+                                    name, step.name, b.name
+                                ),
+                                &b.method,
                             )?;
                         }
                     }
@@ -691,6 +741,23 @@ handlers: {}
 
 /// Validate that a handler URL is safe (HTTP(S) scheme, no private IPs).
 /// When `allow_private` is false (production default), private/loopback URLs are rejected.
+/// Parse a timezone string. Returns true if valid.
+/// Supports "UTC" and fixed offsets like "+09:00", "-05:00".
+fn parse_timezone(tz: &str) -> bool {
+    if tz == "UTC" {
+        return true;
+    }
+    // Try parsing as fixed offset: +HH:MM or -HH:MM
+    tz.parse::<chrono::FixedOffset>().is_ok()
+}
+
+fn validate_http_method(context: &str, method: &str) -> Result<()> {
+    match method {
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" => Ok(()),
+        other => anyhow::bail!("{} has invalid HTTP method '{}'", context, other),
+    }
+}
+
 fn validate_handler_url(handler_name: &str, url: &str, allow_private: bool) -> Result<()> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         anyhow::bail!(
@@ -820,6 +887,8 @@ mod tests {
                 verify: None,
                 secret: None,
                 skip_verify: false,
+                schedule: None,
+                timezone: None,
             },
         );
         let mut handlers = HashMap::new();
@@ -836,6 +905,7 @@ mod tests {
                 filter: None,
                 transform: None,
                 handler_type: "http".into(),
+                method: "POST".into(),
                 headers: HashMap::new(),
             },
         );
@@ -853,6 +923,8 @@ mod tests {
                 verify: None,
                 secret: None,
                 skip_verify: false,
+                schedule: None,
+                timezone: None,
             },
         );
         let mut handlers = HashMap::new();
@@ -869,6 +941,7 @@ mod tests {
                 filter: None,
                 transform: None,
                 handler_type: "http".into(),
+                method: "POST".into(),
                 headers: HashMap::new(),
             },
         );
@@ -893,6 +966,7 @@ mod tests {
                 filter: None,
                 transform: None,
                 handler_type: "http".into(),
+                method: "POST".into(),
                 headers: HashMap::new(),
             },
         );
@@ -911,6 +985,8 @@ mod tests {
                 verify: None,
                 secret: None,
                 skip_verify: false,
+                schedule: None,
+                timezone: None,
             },
         );
         let config = make_config(HashMap::new(), sources);
@@ -927,6 +1003,8 @@ mod tests {
                 verify: None,
                 secret: None,
                 skip_verify: false,
+                schedule: None,
+                timezone: None,
             },
         );
         let mut handlers = HashMap::new();
@@ -943,6 +1021,7 @@ mod tests {
                 filter: None,
                 transform: None,
                 handler_type: "http".into(),
+                method: "POST".into(),
                 headers: HashMap::new(),
             },
         );
@@ -962,6 +1041,8 @@ mod tests {
                 verify: None,
                 secret: None,
                 skip_verify: false,
+                schedule: None,
+                timezone: None,
             },
         );
         let mut handlers = HashMap::new();
@@ -978,6 +1059,7 @@ mod tests {
                 filter: None,
                 transform: None,
                 handler_type: "http".into(),
+                method: "POST".into(),
                 headers: HashMap::new(),
             },
         );
@@ -996,6 +1078,8 @@ mod tests {
                 verify: None,
                 secret: None,
                 skip_verify: false,
+                schedule: None,
+                timezone: None,
             },
         );
         let mut handlers = HashMap::new();
@@ -1012,6 +1096,7 @@ mod tests {
                 filter: None,
                 transform: None,
                 handler_type: "http".into(),
+                method: "POST".into(),
                 headers: HashMap::new(),
             },
         );
@@ -1030,6 +1115,8 @@ mod tests {
                 verify: None,
                 secret: None,
                 skip_verify: false,
+                schedule: None,
+                timezone: None,
             },
         );
         let mut handlers = HashMap::new();
@@ -1046,6 +1133,7 @@ mod tests {
                 filter: None,
                 transform: None,
                 handler_type: "http".into(),
+                method: "POST".into(),
                 headers: HashMap::new(),
             },
         );
@@ -1075,6 +1163,8 @@ mod tests {
                 verify: Some("github".into()),
                 secret: None, // missing!
                 skip_verify: false,
+                schedule: None,
+                timezone: None,
             },
         );
         let config = make_config(HashMap::new(), sources);
@@ -1092,6 +1182,8 @@ mod tests {
                 verify: Some("stripe".into()),
                 secret: Some("".into()), // empty!
                 skip_verify: false,
+                schedule: None,
+                timezone: None,
             },
         );
         let config = make_config(HashMap::new(), sources);
@@ -1108,6 +1200,8 @@ mod tests {
                 verify: None,
                 secret: None,
                 skip_verify: false,
+                schedule: None,
+                timezone: None,
             },
         );
         let mut handlers = HashMap::new();
@@ -1118,6 +1212,7 @@ mod tests {
                 events: vec![],
                 url: "http://example.com".into(),
                 handler_type: "websocket".into(),
+                method: "POST".into(),
                 retry: None,
                 timeout: None,
                 idempotency_key: None,
@@ -1907,5 +2002,317 @@ workflows:
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("invalid type 'integer'"));
+    }
+
+    // --- HTTP Method Tests ---
+
+    #[test]
+    fn test_handler_method_defaults_to_post() {
+        let yaml = r#"
+sources:
+  app:
+    type: event
+handlers:
+  my-handler:
+    source: app
+    url: https://example.com/hook
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(config.handlers["my-handler"].method, "POST");
+    }
+
+    #[test]
+    fn test_handler_method_parsed() {
+        let yaml = r#"
+sources:
+  app:
+    type: event
+handlers:
+  get-handler:
+    source: app
+    url: https://example.com/hook
+    method: GET
+  put-handler:
+    source: app
+    url: https://example.com/hook
+    method: PUT
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.handlers["get-handler"].method, "GET");
+        assert_eq!(config.handlers["put-handler"].method, "PUT");
+    }
+
+    #[test]
+    fn test_handler_invalid_method_rejected() {
+        let yaml = r#"
+sources:
+  app:
+    type: event
+handlers:
+  bad:
+    source: app
+    url: https://example.com/hook
+    method: TRACE
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("invalid HTTP method 'TRACE'"));
+    }
+
+    #[test]
+    fn test_step_method_defaults_to_post() {
+        let yaml = r#"
+sources:
+  app:
+    type: event
+handlers: {}
+workflows:
+  flow:
+    source: app
+    steps:
+      - name: step1
+        url: https://example.com/api
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(config.workflows["flow"].steps[0].method, "POST");
+    }
+
+    #[test]
+    fn test_step_method_parsed() {
+        let yaml = r#"
+sources:
+  app:
+    type: event
+handlers: {}
+workflows:
+  flow:
+    source: app
+    steps:
+      - name: check
+        url: https://example.com/status
+        method: GET
+      - name: update
+        url: https://example.com/resource
+        method: PATCH
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.workflows["flow"].steps[0].method, "GET");
+        assert_eq!(config.workflows["flow"].steps[1].method, "PATCH");
+    }
+
+    #[test]
+    fn test_step_invalid_method_rejected() {
+        let yaml = r#"
+sources:
+  app:
+    type: event
+handlers: {}
+workflows:
+  flow:
+    source: app
+    steps:
+      - name: bad
+        url: https://example.com
+        method: OPTIONS
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("invalid HTTP method 'OPTIONS'"));
+    }
+
+    #[test]
+    fn test_branch_method_parsed() {
+        let yaml = r#"
+sources:
+  app:
+    type: event
+handlers: {}
+workflows:
+  flow:
+    source: app
+    steps:
+      - name: fan-out
+        type: parallel
+        branches:
+          - name: notify
+            url: https://example.com/notify
+            method: PUT
+          - name: log
+            url: https://example.com/log
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok());
+        let step = &config.workflows["flow"].steps[0];
+        let branches = step.branches.as_ref().unwrap();
+        assert_eq!(branches[0].method, "PUT");
+        assert_eq!(branches[1].method, "POST"); // default
+    }
+
+    // --- Cron Source Tests ---
+
+    #[test]
+    fn test_parse_cron_source() {
+        let yaml = r#"
+sources:
+  heartbeat:
+    type: cron
+    schedule: "*/5 * * * *"
+handlers:
+  on-heartbeat:
+    source: heartbeat
+    url: https://example.com/check
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok());
+        let source = &config.sources["heartbeat"];
+        assert_eq!(source.source_type, "cron");
+        assert_eq!(source.schedule.as_deref(), Some("*/5 * * * *"));
+        assert!(source.timezone.is_none());
+    }
+
+    #[test]
+    fn test_cron_source_with_timezone() {
+        let yaml = r#"
+sources:
+  daily:
+    type: cron
+    schedule: "0 9 * * MON-FRI"
+    timezone: "+09:00"
+handlers:
+  morning-report:
+    source: daily
+    url: https://example.com/report
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok());
+        let source = &config.sources["daily"];
+        assert_eq!(source.timezone.as_deref(), Some("+09:00"));
+    }
+
+    #[test]
+    fn test_cron_source_utc_timezone() {
+        let yaml = r#"
+sources:
+  tick:
+    type: cron
+    schedule: "0 * * * *"
+    timezone: UTC
+handlers:
+  on-tick:
+    source: tick
+    url: https://example.com/tick
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_cron_source_missing_schedule() {
+        let yaml = r#"
+sources:
+  bad:
+    type: cron
+handlers: {}
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("no schedule"));
+    }
+
+    #[test]
+    fn test_cron_source_invalid_schedule() {
+        let yaml = r#"
+sources:
+  bad:
+    type: cron
+    schedule: "not a cron"
+handlers: {}
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("invalid cron schedule"));
+    }
+
+    #[test]
+    fn test_validate_invalid_alert_type() {
+        let yaml = r#"
+sources: {}
+handlers: {}
+alerts:
+  type: email
+  url: https://hooks.slack.com/xxx
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("not supported"));
+    }
+
+    #[test]
+    fn test_validate_invalid_alert_url() {
+        let yaml = r#"
+sources: {}
+handlers: {}
+alerts:
+  type: slack
+  url: ftp://example.com/hook
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("http://"));
+    }
+
+    #[test]
+    fn test_validate_invalid_database_driver() {
+        let yaml = r#"
+database:
+  driver: mysql
+sources: {}
+handlers: {}
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("unsupported database driver"));
+    }
+
+    #[test]
+    fn test_validate_choice_default_nonexistent_step() {
+        let yaml = r#"
+sources:
+  app:
+    type: event
+handlers: {}
+workflows:
+  flow:
+    source: app
+    steps:
+      - name: route
+        type: choice
+        choices:
+          - when: "$.status == active"
+            goto: step-a
+        default: nonexistent
+      - name: step-a
+        url: https://example.com
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_cron_source_invalid_timezone() {
+        let yaml = r#"
+sources:
+  bad:
+    type: cron
+    schedule: "0 * * * *"
+    timezone: "Mars/Olympus"
+handlers: {}
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("invalid timezone"));
     }
 }
