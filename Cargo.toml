@@ -1,15 +1,15 @@
 [package]
 name = "qhook"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.85"
-description = "Lightweight event-driven workflow engine with queue and retry."
+description = "Lightweight webhook gateway and workflow engine with queue, retry, and signature verification."
 license = "Apache-2.0"
 repository = "https://github.com/totte-dev/qhook"
 homepage = "https://totte-dev.github.io/qhook/"
 documentation = "https://totte-dev.github.io/qhook/"
 readme = "README.md"
-keywords = ["webhook", "workflow", "event-driven", "retry", "cloudevents"]
+keywords = ["webhook", "workflow", "event-driven", "queue", "orchestration"]
 categories = ["web-programming", "asynchronous", "network-programming"]
 exclude = [
     "tests/",
