@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0] - 2026-03-09
+
+### Added
+- **Workflow engine**: Event-driven multi-step pipelines defined in YAML.
+  - Sequential workflows with response chaining (step N's response → step N+1's input).
+  - Data flow control: `input` (transform before call), `result_path` (merge response), `output` (transform after).
+  - Per-step retry with error type matching (`timeout`, `5xx`, `4xx`, `network`, `all`).
+  - `catch` blocks for error routing to named fallback steps after retries exhausted.
+  - `on_failure: continue` to proceed to next step with error info on failure.
+  - `end: true` to terminate workflow early.
+  - **Choice step** (`type: choice`): conditional routing with `when` conditions and `default` fallback. Reuses filter syntax (`==`, `!=`, `>=`, `>`, `<=`, `<`, `in`).
+  - **Parallel step** (`type: parallel`): concurrent branch execution. Results merged as object keyed by branch name.
+  - **Map step** (`type: map`): iterate over array items in payload. Results collected as array.
+  - **Wait step** (`type: wait`): pause workflow for a fixed `seconds` delay or until a dynamic `timestamp_path` from the payload. No HTTP call — next step's job is scheduled with a future `scheduled_at`.
+  - **Callback step** (`type: callback`): pause workflow and wait for an external system to call `POST /callback/:token` with a JSON body to resume. Optional `callback_timeout` to expire waiting callbacks.
+  - **Workflow timeout**: `timeout` field on workflow config sets an overall time limit. If exceeded, subsequent steps are skipped and the workflow is marked as failed.
+  - Workflows and handlers coexist — same event can trigger both.
+- **Workflow metrics**: `qhook_workflow_runs_total` (by workflow + status), `qhook_workflow_steps_completed_total` (by workflow), `qhook_callbacks_received_total`, `qhook_callbacks_expired_total`.
+- **Filter operators**: Added `>=`, `>`, `<=`, `<` numeric comparisons (handler filters + choice conditions).
+- **CLI**: `workflow-runs list` and `workflow-runs redrive` commands.
+- **DB**: `workflow_runs` table with parallel tracking (`parallel_count`, `parallel_completed`).
+- **Config**: `workflows` section in YAML with full validation (step name uniqueness, catch goto targets, branch names, source references).
+- **Example**: `examples/workflow/` — order processing pipeline with catch routing.
+- **Docs**: Workflow guide at `docs/guides/workflows.md`.
+- **Custom headers**: `headers` field on handlers, workflow steps, and parallel branches for authenticated API calls (e.g., `Authorization: Bearer ${TOKEN}`).
+- **Callback URL notification**: Callback steps with a `url` field POST the callback token to the external service before waiting.
+- **Workflow input parameters**: `params` field on workflows for runtime payload validation (type checking: string/number/boolean/object/array, required/optional).
+- **Signature verification**: PagerDuty (`X-PagerDuty-Signature`, HMAC-SHA256), Grafana (`X-Grafana-Alerting-Signature`, HMAC-SHA256), Terraform Cloud (`X-TFE-Notification-Signature`, HMAC-SHA512), GitLab (`X-Gitlab-Token`, constant-time comparison).
+- **Examples**: `examples/tenant-provision/` (params + headers + rollback), `examples/alert-remediation/` (PagerDuty + choice + wait + escalation).
+
+### Security
+- **SSRF protection**: Handler/workflow URLs pointing to private/loopback IPs are now rejected by default. Set `server.allow_private_urls: true` for local development.
+- **Metrics endpoint authentication**: Optional `api.metrics_auth_token` to protect the `/metrics` endpoint with a bearer token.
+- **DB credential redaction**: Database connection URLs are redacted (credentials removed) before logging on connection errors.
+- **Proxy-aware rate limiting**: `server.trust_proxy` enables extraction of client IP from `X-Forwarded-For` / `X-Real-IP` headers when behind a reverse proxy. Requests with no determinable IP are now denied instead of bypassing the rate limiter.
+- **Parallel branch race condition**: Fixed potential double-execution of the next workflow step when parallel branches complete concurrently, by using atomic `UPDATE ... RETURNING` on Postgres.
+
 ## [0.1.0] - 2025-03-08
 
 Initial release.

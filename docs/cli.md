@@ -72,6 +72,29 @@ qhook events list                  # recent events
 qhook events list --limit 50      # limit results
 ```
 
+### qhook workflow-runs list
+
+List workflow runs.
+
+```bash
+qhook workflow-runs list                    # all workflow runs
+qhook workflow-runs list --status completed # filter by status
+qhook workflow-runs list --status failed    # failed workflows
+qhook workflow-runs list --limit 50         # limit results
+```
+
+**Workflow run statuses:** `pending`, `running`, `completed`, `failed`
+
+### qhook workflow-runs redrive
+
+Redrive a failed workflow run from the beginning.
+
+```bash
+qhook workflow-runs redrive <RUN_ID>       # redrive a specific workflow run
+```
+
+Resets the workflow run to `pending` and creates a new job for the first step.
+
 ## Environment Variables
 
 | Variable | Description |

@@ -5,172 +5,57 @@ title: Why qhook?
 
 # Why qhook?
 
-Receiving a webhook is trivial -- a few lines of code. But running webhooks **safely in production** is a different story. This document shows the concrete difference in code volume and operational burden between a DIY implementation and qhook.
+qhook is a **lightweight event-to-action engine**. It receives events (webhooks, SNS, API calls) and executes HTTP actions reliably — from a single call to a multi-step pipeline with error routing and rollback. Single binary, no Redis, no Kubernetes.
 
 ---
 
-## 1. The Problem with Webhooks
+## The Problem
 
-When you receive webhooks directly from external services (Stripe, GitHub, Shopify, etc.), you have to handle all of the following:
+When an event arrives — a GitHub push, a Stripe payment, a monitoring alert, a tenant signup — you need to reliably call one or more HTTP endpoints in response.
 
-- **Signature verification per provider** -- Stripe uses `t=...` HMAC-SHA256, GitHub uses `sha256=...`, Shopify uses Base64 HMAC. Each is different.
-- **Retry with backoff** -- When your downstream service is down, you need exponential backoff and eventually a Dead Letter Queue (DLQ).
-- **Idempotency** -- Providers retry, so the same event arrives multiple times. Without dedup, you get double charges or duplicate processing.
-- **Event loss during outages** -- Webhooks that arrive while your app is down are gone forever unless you persist them to a queue.
-- **Fan-out to multiple services** -- Routing one webhook to multiple microservices requires dispatch logic.
+| Current approach | Limitation |
+|-----------------|-----------|
+| Custom scripts | No retry, no error routing, no monitoring |
+| CI/CD tools (GitHub Actions, etc.) | Weak at orchestrating external HTTP services with retry and rollback |
+| Kubernetes-native tools (Argo Events, etc.) | Requires Kubernetes |
+| Managed workflow services (Step Functions, etc.) | Vendor lock-in, per-transition costs |
+| Heavyweight orchestrators (Conductor, etc.) | JVM + DB + Elasticsearch, complex setup |
 
-All of these are **not your business logic**, yet they cost real engineering time to implement, test, and maintain.
+qhook fills the gap: **lightweight, reliable event-to-action execution without infrastructure overhead**.
 
 ---
 
-## 2. Before: Without qhook
+## How It Works
 
-Handling Stripe webhooks directly in Python/Flask, with signature verification, idempotency, and async retry:
+```
+Event source               qhook                           Your services
 
-```python
-import hashlib
-import hmac
-import json
-import time
-from functools import wraps
-
-from flask import Flask, request, abort, jsonify
-from celery import Celery
-from sqlalchemy import create_engine, Column, String, DateTime
-from sqlalchemy.orm import sessionmaker, declarative_base
-
-app = Flask(__name__)
-engine = create_engine("postgresql://localhost/myapp")
-Session = sessionmaker(bind=engine)
-Base = declarative_base()
-celery = Celery("tasks", broker="redis://localhost:6379/0")
-
-STRIPE_WEBHOOK_SECRET = "whsec_..."
-GITHUB_WEBHOOK_SECRET = "gh_secret_..."
-
-
-# --- Idempotency table ---
-class ProcessedEvent(Base):
-    __tablename__ = "processed_events"
-    idempotency_key = Column(String, primary_key=True)
-    source = Column(String, nullable=False)
-    created_at = Column(DateTime, server_default="now()")
-
-
-# --- Signature verification (Stripe) ---
-def verify_stripe_signature(payload: bytes, sig_header: str, secret: str) -> bool:
-    pairs = dict(p.split("=", 1) for p in sig_header.split(",") if "=" in p)
-    timestamp = pairs.get("t", "")
-    signature = pairs.get("v1", "")
-    if not timestamp or not signature:
-        return False
-    signed = f"{timestamp}.{payload.decode()}".encode()
-    expected = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, signature)
-
-
-# --- Signature verification (GitHub) ---
-def verify_github_signature(payload: bytes, sig_header: str, secret: str) -> bool:
-    if not sig_header.startswith("sha256="):
-        return False
-    expected = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, sig_header[7:])
-
-
-# --- Async task with retry ---
-@celery.task(bind=True, max_retries=5, default_retry_delay=30)
-def process_stripe_event(self, event_data: dict):
-    try:
-        event_type = event_data.get("type", "")
-        if event_type == "invoice.paid":
-            handle_invoice_paid(event_data)
-        elif event_type == "checkout.session.completed":
-            handle_checkout_completed(event_data)
-        # ... more event type branches ...
-    except Exception as exc:
-        raise self.retry(exc=exc, countdown=30 * (2 ** self.request.retries))
-
-
-@celery.task(bind=True, max_retries=5, default_retry_delay=30)
-def process_github_event(self, event_data: dict):
-    try:
-        handle_github_push(event_data)
-    except Exception as exc:
-        raise self.retry(exc=exc, countdown=30 * (2 ** self.request.retries))
-
-
-# --- Endpoint (Stripe) ---
-@app.route("/webhooks/stripe", methods=["POST"])
-def stripe_webhook():
-    payload = request.get_data()
-    sig = request.headers.get("Stripe-Signature", "")
-
-    if not verify_stripe_signature(payload, sig, STRIPE_WEBHOOK_SECRET):
-        abort(401)
-
-    data = json.loads(payload)
-    idempotency_key = data.get("id", "")
-
-    session = Session()
-    if session.query(ProcessedEvent).get(idempotency_key):
-        return jsonify({"status": "duplicate"}), 200
-
-    session.add(ProcessedEvent(
-        idempotency_key=idempotency_key, source="stripe"
-    ))
-    session.commit()
-
-    process_stripe_event.delay(data)
-    return jsonify({"status": "accepted"}), 200
-
-
-# --- Endpoint (GitHub) --- nearly identical boilerplate
-@app.route("/webhooks/github", methods=["POST"])
-def github_webhook():
-    payload = request.get_data()
-    sig = request.headers.get("X-Hub-Signature-256", "")
-
-    if not verify_github_signature(payload, sig, GITHUB_WEBHOOK_SECRET):
-        abort(401)
-
-    data = json.loads(payload)
-
-    session = Session()
-    delivery_id = request.headers.get("X-GitHub-Delivery", "")
-    if session.query(ProcessedEvent).get(delivery_id):
-        return jsonify({"status": "duplicate"}), 200
-
-    session.add(ProcessedEvent(
-        idempotency_key=delivery_id, source="github"
-    ))
-    session.commit()
-
-    process_github_event.delay(data)
-    return jsonify({"status": "accepted"}), 200
-
-
-def handle_invoice_paid(event):
-    ...  # business logic
-
-def handle_checkout_completed(event):
-    ...  # business logic
-
-def handle_github_push(event):
-    ...  # business logic
+  Webhook (verified) ---->|                              |
+  SNS message ----------->| Route + execute              |
+  API call --------------->|                              |
+                           |  Simple (handler):           |
+                           |    event → POST /billing --->|  one HTTP call
+                           |    (retry, DLQ, fan-out)     |
+                           |                              |
+                           |  Multi-step (workflow):      |
+                           |    event → build → deploy -->|  chained HTTP calls
+                           |              ↓ fail          |  with error routing
+                           |          rollback → alert -->|
 ```
 
-**~90 lines.** The only business logic is the `handle_*` functions at the bottom -- everything else is infrastructure boilerplate. On top of that:
+**Handlers** execute a single HTTP action per event — with retry, DLQ, filtering, transformation, and fan-out to multiple services.
 
-- Celery + Redis (or RabbitMQ) infrastructure required separately
-- PostgreSQL migration for the events table
-- DLQ monitoring / retry UI needs Flower or custom tooling
-- Every new provider means another endpoint + signature verification
+**Workflows** chain multiple HTTP actions — with branching, parallelism, wait, callback, and error routing (catch → rollback). Each step can send custom headers for authentication.
+
+Both are defined in the same YAML config. Both share the same retry, DLQ, and monitoring infrastructure.
 
 ---
 
-## 3. After: With qhook
+## Use Cases
 
-### qhook.yaml (config)
+### Simple: Webhook Fan-out
+
+Receive Stripe webhooks, verify the signature, and deliver to multiple services with independent retry.
 
 ```yaml
 sources:
@@ -178,209 +63,347 @@ sources:
     type: webhook
     verify: stripe
     secret: ${STRIPE_WEBHOOK_SECRET}
-  github:
-    type: webhook
-    verify: github
-    secret: ${GITHUB_WEBHOOK_SECRET}
 
-delivery:
-  default_retry:
-    max: 5
-    backoff: exponential
-    interval: 30s
-
-handlers:
-  payment:
-    source: stripe
-    events: [invoice.paid, checkout.session.completed]
-    url: http://localhost:3000/jobs/payment
-    idempotency_key: "$.id"
-  repo-push:
-    source: github
-    events: ["*"]
-    url: http://localhost:3000/jobs/github
-    idempotency_key: "$.head_commit.id"
-```
-
-### Application code (receiver)
-
-```python
-from flask import Flask, request, jsonify
-
-app = Flask(__name__)
-
-
-@app.route("/jobs/payment", methods=["POST"])
-def handle_payment():
-    event = request.get_json()
-    # Just write your business logic
-    if event["type"] == "invoice.paid":
-        activate_subscription(event["data"]["object"])
-    elif event["type"] == "checkout.session.completed":
-        send_receipt(event["data"]["object"])
-    return jsonify({"ok": True})
-
-
-@app.route("/jobs/github", methods=["POST"])
-def handle_github():
-    event = request.get_json()
-    trigger_ci_pipeline(event)
-    return jsonify({"ok": True})
-```
-
-**20 lines of config + 20 lines of code.** The app side is pure business logic.
-
-Signature verification, idempotency, retry, DLQ -- all handled by qhook. Return HTTP 200 and it's done; return 5xx and qhook retries with exponential backoff.
-
----
-
-## 4. Comparison
-
-| | DIY | qhook |
-|---|---|---|
-| **Code** | ~90 lines (infra only) | 20 lines config + 20 lines logic |
-| **Signature verification** | Implement per provider | `verify: stripe` -- one line |
-| **Idempotency** | DB table + dedup code | `idempotency_key: "$.id"` |
-| **Retry** | Celery + Redis required | Built-in (exponential backoff) |
-| **DLQ** | Design & build yourself | Built-in (`qhook jobs list --status dead`) |
-| **Event persistence** | Design your own DB schema | Auto-saved to SQLite/Postgres |
-| **Fan-out** | Manual dispatch logic | Define multiple handlers |
-| **Adding providers** | New endpoint + verification | Add a few lines to sources |
-| **AWS SNS** | Parse envelope, verify X.509, confirm subscription | `type: sns` -- one line |
-| **CloudEvents** | Parse headers/envelope, forward metadata | Automatic detection |
-| **External deps** | Redis/RabbitMQ, Celery, etc. | Single qhook binary |
-| **Monitoring** | Flower or custom UI | `qhook jobs` / `qhook events` CLI |
-| **Recovery** | Custom recovery procedures | `qhook jobs retry` |
-
----
-
-## 5. Where qhook Shines
-
-### Multiple providers at once
-
-When receiving Stripe + GitHub + Shopify in one service, a DIY approach requires three different signature verification implementations. With qhook:
-
-```yaml
-sources:
-  stripe:
-    type: webhook
-    verify: stripe
-    secret: ${STRIPE_WEBHOOK_SECRET}
-  github:
-    type: webhook
-    verify: github
-    secret: ${GITHUB_WEBHOOK_SECRET}
-  shopify:
-    type: webhook
-    verify: shopify
-    secret: ${SHOPIFY_WEBHOOK_SECRET}
-```
-
-qhook absorbs the algorithm differences (Stripe's `t=...` format, GitHub's `sha256=...` format, Shopify's Base64 HMAC). Your app only receives verified payloads.
-
-### AWS SNS as an event source
-
-Receiving events from SNS requires handling subscription confirmation, envelope unwrapping, and X.509 certificate verification. With qhook, it's one line:
-
-```yaml
-sources:
-  notifications:
-    type: sns
-```
-
-qhook automatically confirms subscriptions, verifies message signatures, unwraps the SNS envelope, and delivers the actual message payload to your handlers.
-
-### Fan-out to multiple services
-
-Deliver a single Stripe event to billing, notification, and analytics services simultaneously:
-
-```yaml
 handlers:
   billing:
     source: stripe
     events: [invoice.paid]
-    url: http://billing-service:3000/webhook
+    url: http://billing:3000/webhook
     idempotency_key: "$.id"
-  notification:
-    source: stripe
-    events: [invoice.paid, invoice.payment_failed]
-    url: http://notification-service:3000/webhook
-    idempotency_key: "$.id"
+    retry: { max: 8 }
   analytics:
     source: stripe
     events: ["*"]
-    url: http://analytics-service:3000/ingest
+    url: http://analytics:3000/ingest
 ```
 
-With DIY, you'd dispatch async tasks per destination inside your endpoint, each with its own retry logic. qhook creates independent jobs per handler with individual retry and DLQ management.
+### Multi-step: Tenant Provisioning
 
-### Production retry & DLQ
+API event triggers infra creation → DB setup → service configuration, with rollback on failure. Input parameters are validated, and each step can authenticate to external APIs.
 
-During development, receiving and processing webhooks seems simple enough. But in production:
+```yaml
+sources:
+  platform:
+    type: event
 
-- Webhooks arrive during deployments
-- Transient DB failures cause processing errors
-- External API rate limits trigger failures
+workflows:
+  tenant-provision:
+    source: platform
+    events: [tenant.create]
+    timeout: 300
+    params:
+      - name: tenant_id
+        type: string
+      - name: region
+        type: string
+      - name: plan
+        type: string
+        required: false
+    steps:
+      - name: create-infra
+        url: https://api.terraform.io/v2/runs
+        headers:
+          Authorization: "Bearer ${TF_API_TOKEN}"
+        result_path: "$.infra"
+        retry: { max: 3, errors: [5xx, timeout] }
+        catch:
+          - errors: [all]
+            goto: notify-failure
 
-Without a persistent queue + retry, these transient failures mean lost events. qhook provides this near-zero-config:
+      - name: wait-infra
+        type: callback
+        url: https://api.terraform.io/v2/notification-configs
+        headers:
+          Authorization: "Bearer ${TF_API_TOKEN}"
+        callback_timeout: 600
 
-```bash
-# Check dead jobs
-qhook jobs list --status dead
+      - name: create-db
+        url: http://db-service:3000/tenant
+        result_path: "$.db"
+        catch:
+          - errors: [all]
+            goto: rollback-infra
 
-# Retry a specific job
-qhook jobs retry <job-id>
+      - name: configure-services
+        url: http://integration:3000/setup
+        catch:
+          - errors: [all]
+            goto: rollback-db
 
-# Retry all dead jobs
-qhook jobs retry
+      - name: activate
+        url: http://platform:3000/tenant/activate
+        end: true
+
+      # --- rollback (reverse order) ---
+      - name: rollback-db
+        url: http://db-service:3000/tenant/delete
+        on_failure: continue
+        goto: rollback-infra
+
+      - name: rollback-infra
+        url: https://api.terraform.io/v2/runs
+        headers:
+          Authorization: "Bearer ${TF_API_TOKEN}"
+        on_failure: continue
+        goto: notify-failure
+
+      - name: notify-failure
+        url: http://slack:3000/notify
+        end: true
+```
+
+### Multi-step: Deploy with Post-deploy Checks
+
+GitHub push triggers build → deploy → smoke test → notify. Failure routes to rollback. Works as a post-deploy pipeline triggered by CI/CD or ArgoCD.
+
+```yaml
+sources:
+  github:
+    type: webhook
+    verify: github
+    secret: ${GITHUB_WEBHOOK_SECRET}
+
+workflows:
+  deploy:
+    source: github
+    events: [push]
+    timeout: 600
+    steps:
+      - name: build
+        url: http://ci:3000/build
+        retry: { max: 2, errors: [5xx, timeout] }
+        result_path: "$.build"
+
+      - name: deploy-staging
+        url: http://deployer:3000/deploy
+        input: |
+          {"env": "staging", "image": "{{$.build.image}}"}
+        catch:
+          - errors: [all]
+            goto: rollback
+
+      - name: smoke-test
+        url: http://tester:3000/smoke
+        catch:
+          - errors: [all]
+            goto: rollback
+
+      - name: deploy-prod
+        url: http://deployer:3000/deploy
+        input: |
+          {"env": "production", "image": "{{$.build.image}}"}
+        end: true
+
+      - name: rollback
+        url: http://deployer:3000/rollback
+        end: true
+```
+
+### Multi-step: Alert Remediation
+
+PagerDuty alert triggers severity-based action with verification. Signature-verified webhook, authenticated API calls for escalation.
+
+```yaml
+sources:
+  pagerduty:
+    type: webhook
+    verify: pagerduty
+    secret: ${PAGERDUTY_WEBHOOK_SECRET}
+
+workflows:
+  remediate:
+    source: pagerduty
+    events: [incident.triggered]
+    timeout: 300
+    steps:
+      - name: triage
+        type: choice
+        choices:
+          - condition: "$.severity == critical"
+            goto: restart
+          - condition: "$.severity == warning"
+            goto: scale-up
+        default: notify
+
+      - name: restart
+        url: http://orchestrator:3000/restart
+        goto: verify
+
+      - name: scale-up
+        url: http://orchestrator:3000/scale
+        goto: verify
+
+      - name: verify
+        type: wait
+        seconds: 30
+        goto: health-check
+
+      - name: health-check
+        url: http://orchestrator:3000/health
+        catch:
+          - errors: [all]
+            goto: escalate
+        end: true
+
+      - name: escalate
+        url: https://api.pagerduty.com/incidents
+        headers:
+          Authorization: "Token token=${PAGERDUTY_API_KEY}"
+          Content-Type: "application/json"
+        end: true
+
+      - name: notify
+        url: http://slack:3000/notify
+        end: true
+```
+
+### Multi-step: Terraform Post-apply
+
+Terraform Cloud run completion triggers application-layer configuration and verification.
+
+```yaml
+sources:
+  terraform:
+    type: webhook
+    verify: terraform
+    secret: ${TF_NOTIFICATION_SECRET}
+
+workflows:
+  post-apply:
+    source: terraform
+    events: [run:completed]
+    timeout: 300
+    steps:
+      - name: update-config
+        url: http://config-service:3000/apply
+        retry: { max: 3, errors: [5xx, timeout] }
+        catch:
+          - errors: [all]
+            goto: rollback-config
+
+      - name: health-check
+        url: http://health-service:3000/check
+        catch:
+          - errors: [all]
+            goto: rollback-config
+
+      - name: notify-success
+        url: http://slack:3000/notify
+        input: |
+          {"text": "Terraform apply succeeded, config updated."}
+        end: true
+
+      - name: rollback-config
+        url: http://config-service:3000/rollback
+        on_failure: continue
+        goto: notify-failure
+
+      - name: notify-failure
+        url: http://slack:3000/notify
+        input: |
+          {"text": "Terraform post-apply failed. Manual intervention required."}
+        end: true
 ```
 
 ---
 
-## 6. How qhook Compares
+## Supported Webhook Providers
 
-### vs. Cloud messaging services (SQS + SNS, Pub/Sub, Event Grid)
+| Provider | Verification | Header |
+|----------|-------------|--------|
+| GitHub | HMAC-SHA256 | `X-Hub-Signature-256` |
+| Stripe | HMAC-SHA256 + timestamp | `Stripe-Signature` |
+| Shopify | HMAC-SHA256 (base64) | `X-Shopify-Hmac-SHA256` |
+| PagerDuty | HMAC-SHA256 | `X-PagerDuty-Signature` |
+| Grafana | HMAC-SHA256 | `X-Grafana-Alerting-Signature` |
+| Terraform Cloud | HMAC-SHA512 | `X-TFE-Notification-Signature` |
+| GitLab | Token comparison | `X-Gitlab-Token` |
+| AWS SNS | X.509 certificate | (in body) |
+| Custom HMAC | HMAC-SHA256 | `X-Webhook-Signature` |
 
-Cloud-managed event services are the standard approach for event-driven architectures. They handle queuing, retry, and fan-out at scale.
+---
 
-| | AWS SQS + SNS | GCP Pub/Sub | Azure Event Grid | qhook |
-|---|---|---|---|---|
-| **Queuing + retry** | Yes | Yes | Yes | Yes |
-| **Fan-out** | SNS → multiple SQS | Topic → multiple subscriptions | Topic → multiple subscribers | Multiple handlers in YAML |
-| **Webhook verification** | No (DIY) | No (DIY) | No (DIY) | Stripe, GitHub, Shopify, HMAC, SNS X.509 |
-| **Local development** | LocalStack / emulators | Emulator | No emulator | SQLite, works anywhere |
-| **Vendor lock-in** | AWS only | GCP only | Azure only | None |
-| **Cost** | Pay per message | Pay per message | Pay per event | Free (self-hosted) |
-| **Setup** | IAM + Topic + Queue + DLQ + permissions | Topic + Subscription + IAM | Topic + Subscription | One YAML file |
+## How qhook Compares
 
-Cloud services are the right choice for large-scale production systems. But for small teams, side projects, or multi-cloud setups, the overhead of IAM policies, queue configuration, and vendor-specific SDKs adds up. qhook gives you the same receive → queue → fan-out → retry pattern in a single config file, running locally with SQLite or in production with Postgres.
+### vs Custom Scripts / Cron
 
-### vs. DIY queue setups (Redis + Celery, BullMQ, Sidekiq)
+| | Scripts | qhook |
+|---|---|---|
+| **Retry on failure** | DIY (if at all) | Built-in (exponential backoff) |
+| **Error routing** | DIY | `catch` → rollback steps |
+| **Dead Letter Queue** | None | Built-in |
+| **Monitoring** | DIY | Prometheus metrics, alerts |
+| **Webhook verification** | DIY | Built-in (9 providers) |
 
-A common pattern: use Redis as a message broker with a worker framework.
+### vs CI/CD Tools (GitHub Actions, etc.)
 
-| | Redis + Celery | Redis + BullMQ | Redis + Sidekiq | qhook |
-|---|---|---|---|---|
-| **Language** | Python | Node.js | Ruby | Any (HTTP/gRPC delivery) |
-| **External deps** | Redis | Redis | Redis | None |
-| **Webhook verification** | DIY | DIY | DIY | Built-in (5 providers) |
-| **Retry + DLQ** | Built-in | Built-in | Built-in | Built-in |
-| **Fan-out** | Manual dispatch | Manual dispatch | Manual dispatch | YAML config |
-| **Idempotency** | DIY (DB table + code) | DIY | DIY | `idempotency_key: "$.id"` |
-| **Monitoring** | Flower / Bull Board | Bull Board | Sidekiq Web | Prometheus + CLI |
+| | CI/CD tools | qhook |
+|---|---|---|
+| **Trigger** | Git events, schedules | Webhooks (verified), SNS, API |
+| **HTTP orchestration** | Weak (shell scripts with curl) | Native (YAML-defined HTTP chains) |
+| **Retry with error routing** | Limited | Built-in (catch → rollback) |
+| **Auth to external APIs** | Per-step secrets | `headers` field with env var expansion |
+| **DLQ** | None | Built-in |
 
-These work well as general-purpose job queues. But for webhook handling specifically, you still need to write signature verification, idempotency checks, and routing logic yourself. And you need to run and maintain Redis. qhook bundles all of this into a single binary with zero infrastructure dependencies.
+### vs Kubernetes-native Tools
 
-### Where qhook fits
+| | K8s tools (Argo Events, etc.) | qhook |
+|---|---|---|
+| **Requires Kubernetes** | Yes | No |
+| **Webhook verification** | Limited | Built-in (9 providers) |
+| **Setup** | K8s cluster + CRDs | Single binary |
+| **Post-deploy hooks** | K8s Jobs only | Any HTTP service |
 
-qhook is not a replacement for SQS or Celery in general-purpose queuing. It's purpose-built for a specific pattern: **receive events (webhooks or internal) → verify → queue → deliver reliably to HTTP/gRPC endpoints**.
+### vs Managed Workflow Services (Step Functions, etc.)
 
-If you need complex workflows, priority queues, or scheduled jobs, use a general-purpose job queue. If you need to fan out events to multiple services with retry and verification, qhook handles that with minimal setup.
+| | Managed services | qhook |
+|---|---|---|
+| **Infrastructure** | Vendor-specific | Any cloud or on-prem |
+| **Pricing** | Per-transition / per-run | Free (self-hosted) |
+| **Webhook verification** | Not included | Built-in |
+| **Local dev** | Emulators (partial) | SQLite |
+| **Vendor lock-in** | Yes | None |
+
+### vs Heavyweight Orchestrators (Conductor, etc.)
+
+| | Heavy orchestrators | qhook |
+|---|---|---|
+| **Runtime** | JVM + DB + Elasticsearch | Single Rust binary |
+| **Setup time** | 30+ minutes | 2 minutes |
+| **Definition** | JSON DSL or Code SDK | YAML |
+| **Web UI** | Yes | No (CLI only) |
+| **Operational burden** | High | Low |
+
+---
+
+## Where qhook Fits
+
+qhook is purpose-built for one pattern: **event arrives → execute HTTP actions reliably**.
+
+It is **not** a replacement for:
+- Kubernetes-native tools if you already run K8s
+- Managed workflow services at massive scale
+- Heavyweight orchestrators with Web UI and plugin ecosystems
+
+It **is** the right choice when:
+- You need to turn events into reliable HTTP actions (one or many)
+- You want retry, error routing, and DLQ without writing infrastructure code
+- You need to call authenticated external APIs as part of a pipeline
+- You don't run Kubernetes and don't want vendor lock-in
+- You want a single binary with zero dependencies
 
 ---
 
 ## Summary
 
-qhook solves the **webhook infrastructure layer**. Signature verification, persistence, idempotency, retry, DLQ, fan-out routing -- all separated from your application code and managed declaratively via config.
-
-Your app receives verified, deduplicated, reliably-delivered payloads and focuses on business logic alone.
+| Capability | qhook |
+|---|---|
+| **Deployment** | Single binary, zero external deps |
+| **Database** | SQLite (dev) / Postgres (prod) |
+| **Input** | Webhooks (9 providers verified), SNS, internal API |
+| **Actions** | HTTP + gRPC, with custom headers for authentication |
+| **Reliability** | Retry (exponential backoff), error routing, DLQ |
+| **Workflows** | Sequential, choice, parallel, map, wait, callback |
+| **Input validation** | Workflow params with type checking |
+| **Monitoring** | Prometheus metrics, health checks, Slack/Discord alerts |
+| **Config** | Single YAML file, env var expansion, validation CLI |

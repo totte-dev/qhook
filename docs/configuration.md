@@ -20,9 +20,12 @@ server:
   max_body_size: 1048576            # max request body in bytes (default: 1MB)
   max_inbound: 100                  # max concurrent inbound requests (default: 100)
   ip_rate_limit: 100                # per-IP requests/sec limit (default: 0 = disabled)
+  # allow_private_urls: true        # allow localhost/private IPs in handler URLs (dev only)
+  # trust_proxy: true               # trust X-Forwarded-For for rate limiting
 
 api:
   auth_token: ${QHOOK_API_TOKEN}    # bearer token for /events endpoint (optional)
+  # metrics_auth_token: ${METRICS_TOKEN}  # bearer token for /metrics endpoint (optional)
 
 delivery:
   signing_secret: ${QHOOK_SIGNING_SECRET}  # sign outgoing deliveries (optional)
@@ -63,11 +66,43 @@ handlers:
     filter: "$.data.object.status == paid"
     transform: |
       {"order_id": "{{$.data.object.id}}", "amount": {{$.data.object.amount}}}
+    headers:                            # custom HTTP headers (optional)
+      Authorization: "Bearer ${API_TOKEN}"
 
 alerts:
   url: ${SLACK_WEBHOOK_URL}
   type: slack                       # slack / discord / generic
   on: [dlq, verification_failure]
+
+workflows:
+  order-pipeline:
+    source: app
+    events: [order.created]
+    timeout: 3600                     # workflow timeout in seconds (optional)
+    params:                           # input parameter validation (optional)
+      - name: id
+        type: string
+      - name: amount
+        type: number
+    steps:
+      - name: validate
+        url: http://backend:3000/validate
+        retry: { max: 3, errors: [5xx, timeout] }
+        catch:
+          - errors: [4xx]
+            goto: handle-error
+      - name: fulfill
+        url: http://backend:3000/fulfill
+        result_path: "$.fulfillment"
+      - name: wait-for-shipping
+        type: wait
+        seconds: 300                  # fixed delay
+      - name: notify
+        url: http://backend:3000/notify
+        end: true
+      - name: handle-error
+        url: http://backend:3000/error-handler
+        end: true
 ```
 
 ## Sections
@@ -88,12 +123,15 @@ alerts:
 | `max_body_size` | integer | `1048576` | Max request body size in bytes (1MB) |
 | `max_inbound` | integer | `100` | Max concurrent inbound requests. Returns 503 when exceeded |
 | `ip_rate_limit` | integer | `0` | Per-IP requests/sec limit. 0 = disabled. Returns 429 when exceeded |
+| `allow_private_urls` | boolean | `false` | Allow handler URLs pointing to private/loopback IPs. Enable for local development |
+| `trust_proxy` | boolean | `false` | Trust `X-Forwarded-For` / `X-Real-IP` headers for IP rate limiting. Enable when behind a reverse proxy |
 
 ### api
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `auth_token` | string | - | Bearer token for the `/events` endpoint. If not set, the endpoint is open (with a startup warning) |
+| `metrics_auth_token` | string | - | Bearer token for the `/metrics` endpoint. If not set, the endpoint is open |
 
 ### delivery
 
@@ -148,6 +186,7 @@ Each handler is a named entry under `handlers:`.
 | `rate_limit` | integer | - | Max deliveries/sec to this handler |
 | `filter` | string | - | JSONPath filter expression. Job created only if filter matches |
 | `transform` | string | - | Payload transformation template with `{{$.path}}` placeholders |
+| `headers` | map | `{}` | Custom HTTP headers to send with delivery (e.g., `Authorization`) |
 
 ### alerts
 
@@ -156,6 +195,53 @@ Each handler is a named entry under `handlers:`.
 | `url` | string | required | Alert webhook URL |
 | `type` | string | `generic` | `generic`, `slack`, or `discord` |
 | `on` | list | required | Events to alert on: `dlq`, `verification_failure` |
+
+### workflows
+
+Each workflow is a named entry under `workflows:`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `source` | string | required | Source name to subscribe to |
+| `events` | list | `[]` (all) | Event types to trigger this workflow |
+| `timeout` | integer | - | Workflow timeout in seconds. Steps are skipped after expiry |
+| `params` | list | `[]` | Input parameters for validation (see below) |
+| `steps` | list | required | Ordered list of steps |
+
+**Param fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | required | Parameter name (top-level key in event payload) |
+| `type` | string | `string` | Expected type: `string`, `number`, `boolean`, `object`, `array` |
+| `required` | boolean | `true` | Whether this parameter must be present |
+
+**Step fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | required | Unique step name (used for `goto` references) |
+| `type` | string | `http` | Step type: `http`, `choice`, `parallel`, `map`, `wait`, `callback` |
+| `url` | string | - | Delivery target URL (required for `http` steps). For `callback` steps, URL to notify with the callback token |
+| `headers` | map | `{}` | Custom HTTP headers to send with this step's request |
+| `retry` | object | - | Override retry config. Supports `errors` field for error type matching (`5xx`, `4xx`, `timeout`, `network`, `all`) |
+| `catch` | list | - | Error routing rules. Each entry has `errors` (list) and `goto` (step name) |
+| `on_failure` | string | - | Set to `continue` to proceed to next step on failure |
+| `input` | string | - | JSONPath transformation applied before the step |
+| `result_path` | string | - | JSONPath to merge step output into (e.g., `$.fulfillment`) |
+| `output` | string | - | JSONPath transformation applied after the step |
+| `end` | boolean | `false` | Mark this step as a terminal step |
+| `goto` | string | - | Jump to a named step instead of the next sequential step |
+| `seconds` | integer | - | Fixed delay in seconds (for `wait` steps) |
+| `timestamp_path` | string | - | JSONPath to a timestamp in the payload (for `wait` steps). Supports ISO 8601, RFC 3339, and Unix timestamps |
+| `callback_timeout` | integer | - | Timeout in seconds for callback steps (optional) |
+| `choices` | list | - | Conditions for `choice` steps. Each entry has `condition`, `goto` |
+| `default` | string | - | Default `goto` for `choice` steps when no condition matches |
+| `branches` | list | - | Branch definitions for `parallel` steps |
+| `items_path` | string | - | JSONPath to array for `map` steps |
+| `iterator` | object | - | Step definition applied to each item in `map` steps |
+
+> See the [Workflows guide](https://totte-dev.github.io/qhook/guides/workflows) for detailed examples of each step type.
 
 ## Environment Variables
 
@@ -187,3 +273,8 @@ Checks performed:
 - `verify` requires `secret` to be set (non-empty)
 - Handler URLs use http/https scheme (private IPs trigger warnings)
 - Alert config has valid `on` events
+- Workflow references an existing source
+- Workflow steps have valid types and required fields
+- Wait steps have `seconds` or `timestamp_path`
+- Choice steps have at least one condition
+- Step `goto` and `catch` targets reference existing step names

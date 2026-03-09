@@ -41,6 +41,15 @@ curl http://localhost:8888/metrics
 | `qhook_alerts_sent_total` | - | Alerts sent successfully |
 | `qhook_alerts_failed_total` | - | Failed alert sends |
 
+**Workflow Counters:**
+
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| `qhook_workflow_runs_total` | `workflow`, `status` | Workflow runs by workflow name and result (started/completed/failed) |
+| `qhook_workflow_steps_completed_total` | `workflow` | Steps completed per workflow |
+| `qhook_callbacks_received_total` | - | Callback tokens received via `POST /callback/:token` |
+| `qhook_callbacks_expired_total` | - | Expired callback tokens rejected |
+
 **Gauges:**
 
 | Metric | Description |
@@ -71,6 +80,9 @@ Key panels to set up:
 - **Queue depth**: `qhook_queue_depth`
 - **DLQ growth**: `rate(qhook_dlq_total[5m])`
 - **P99 delivery latency**: `qhook_delivery_duration_seconds_max`
+- **Workflow completion rate**: `rate(qhook_workflow_runs_total{status="completed"}[5m])`
+- **Workflow failure rate**: `rate(qhook_workflow_runs_total{status="failed"}[5m])`
+- **Callbacks received**: `rate(qhook_callbacks_received_total[5m])`
 
 ## Alerts
 

@@ -5,13 +5,12 @@ title: Home
 
 # qhook
 
-**SQS for webhooks and events** -- a lightweight event gateway with built-in queue and retry.
+**Lightweight event-to-action engine.** Turn webhooks and API events into reliable HTTP actions — single binary, no Redis, no Kubernetes.
 
-- **No infrastructure tax.** Single binary, no Redis, no RabbitMQ, no SQS.
-- **Webhook verification built in.** GitHub, Stripe, Shopify, and generic HMAC.
-- **Reliable delivery.** Exponential backoff retry with DLQ.
-- **CloudEvents native.** Binary and structured mode detection.
-- **AWS SNS ready.** Subscription confirmation, envelope unwrapping, X.509 verification.
+- **Zero infrastructure.** Single binary, SQLite for dev, Postgres for production.
+- **Webhook verification built in.** GitHub, Stripe, Shopify, PagerDuty, Grafana, Terraform Cloud, GitLab, HMAC, AWS SNS X.509.
+- **From one action to a pipeline.** Single HTTP call or multi-step workflow with branching, parallelism, and rollback.
+- **Production ready.** Prometheus metrics, health checks, alerts, CloudEvents, gRPC output.
 
 ## Quick Start
 
@@ -23,33 +22,55 @@ cargo install qhook
 docker run -p 8888:8888 -v $(pwd)/qhook.yaml:/data/qhook.yaml ghcr.io/totte-dev/qhook
 ```
 
-Create `qhook.yaml`:
+### Simple: one event, one action
 
 ```yaml
+# qhook.yaml
 database:
   driver: sqlite
 
-server:
-  port: 8888
-
 sources:
-  app:
-    type: event
+  github:
+    type: webhook
+    verify: github
+    secret: ${GITHUB_WEBHOOK_SECRET}
 
 handlers:
-  process-order:
-    source: app
-    events: [order.created]
-    url: http://localhost:3000/jobs/order
+  deploy:
+    source: github
+    events: [push]
+    url: http://deployer:3000/deploy
+    filter: "$.ref == refs/heads/main"
     retry: { max: 5 }
 ```
 
-Send a test event:
+### Multi-step: event triggers a pipeline
+
+```yaml
+workflows:
+  deploy-pipeline:
+    source: github
+    events: [push]
+    timeout: 600
+    steps:
+      - name: build
+        url: http://ci:3000/build
+        retry: { max: 2, errors: [5xx, timeout] }
+      - name: deploy
+        url: http://deployer:3000/deploy
+        catch:
+          - errors: [all]
+            goto: rollback
+      - name: notify
+        url: http://slack:3000/notify
+        end: true
+      - name: rollback
+        url: http://deployer:3000/rollback
+        end: true
+```
 
 ```bash
-curl -X POST http://localhost:8888/events/order.created \
-  -H "Content-Type: application/json" \
-  -d '{"id": "ord_123", "amount": 4999}'
+qhook start
 ```
 
 [Full Getting Started guide](getting-started.md)
@@ -63,9 +84,10 @@ curl -X POST http://localhost:8888/events/order.created \
 | [Getting Started](getting-started.md) | Installation, first config, first event |
 | [Configuration](configuration.md) | Full YAML config reference |
 | [CLI Reference](cli.md) | All CLI commands and options |
-| [Webhook Verification](guides/webhook-verification.md) | GitHub, Stripe, Shopify, HMAC signature checks |
+| [Webhook Verification](guides/webhook-verification.md) | GitHub, Stripe, Shopify, PagerDuty, Grafana, Terraform Cloud, GitLab, HMAC |
 | [CloudEvents](guides/cloudevents.md) | Binary and structured mode support |
 | [AWS SNS](guides/sns.md) | Receive events from SNS topics |
+| [Workflows](guides/workflows.md) | Multi-step pipelines with error routing |
 | [Filtering & Transformation](guides/filtering.md) | Event filtering and payload reshaping |
 | [gRPC Output](guides/grpc.md) | Deliver events via gRPC |
 | [Monitoring](guides/monitoring.md) | Prometheus metrics, health checks, alerts |
@@ -90,10 +112,13 @@ curl -X POST http://localhost:8888/events/order.created \
 | [github-webhook](https://github.com/totte-dev/qhook/tree/main/examples/github-webhook) | GitHub push/PR with signature verification |
 | [filter-transform](https://github.com/totte-dev/qhook/tree/main/examples/filter-transform) | Event filtering and payload transformation |
 | [stripe-checkout](https://github.com/totte-dev/qhook/tree/main/examples/stripe-checkout) | Stripe checkout with dual handlers |
+| [workflow](https://github.com/totte-dev/qhook/tree/main/examples/workflow) | Multi-step pipeline with catch routing |
+| [tenant-provision](https://github.com/totte-dev/qhook/tree/main/examples/tenant-provision) | Tenant provisioning with rollback and auth headers |
+| [alert-remediation](https://github.com/totte-dev/qhook/tree/main/examples/alert-remediation) | PagerDuty alert → triage → remediate → escalate |
 
 ### Other
 
 | Page | Description |
 |------|-------------|
-| [Why qhook?](why-qhook.md) | Before/after comparison, DIY vs qhook |
+| [Why qhook?](why-qhook.md) | Use cases, comparisons, and positioning |
 | [Examples](examples.md) | All example projects with descriptions |

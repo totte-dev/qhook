@@ -74,6 +74,13 @@ pub struct Metrics {
     db_errors: AtomicU64,
     /// Track max delivery duration (ms) for lightweight latency insight.
     delivery_duration_ms_max: AtomicU64,
+    // Workflow metrics
+    workflow_runs_started: LabeledCounter,
+    workflow_runs_completed: LabeledCounter,
+    workflow_runs_failed: LabeledCounter,
+    workflow_steps_completed: LabeledCounter,
+    callbacks_received: AtomicU64,
+    callbacks_expired: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -101,6 +108,12 @@ impl Metrics {
             alerts_failed: AtomicU64::new(0),
             db_errors: AtomicU64::new(0),
             delivery_duration_ms_max: AtomicU64::new(0),
+            workflow_runs_started: LabeledCounter::new(),
+            workflow_runs_completed: LabeledCounter::new(),
+            workflow_runs_failed: LabeledCounter::new(),
+            workflow_steps_completed: LabeledCounter::new(),
+            callbacks_received: AtomicU64::new(0),
+            callbacks_expired: AtomicU64::new(0),
         }
     }
 
@@ -178,6 +191,30 @@ impl Metrics {
 
     pub fn inc_db_errors(&self) {
         self.db_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_workflow_started(&self, workflow: &str) {
+        self.workflow_runs_started.inc(workflow);
+    }
+
+    pub fn inc_workflow_completed(&self, workflow: &str) {
+        self.workflow_runs_completed.inc(workflow);
+    }
+
+    pub fn inc_workflow_failed(&self, workflow: &str) {
+        self.workflow_runs_failed.inc(workflow);
+    }
+
+    pub fn inc_workflow_step_completed(&self, workflow: &str) {
+        self.workflow_steps_completed.inc(workflow);
+    }
+
+    pub fn inc_callbacks_received(&self) {
+        self.callbacks_received.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_callbacks_expired(&self) {
+        self.callbacks_expired.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn dlq_total(&self) -> u64 {
@@ -363,13 +400,81 @@ impl Metrics {
         out.push_str("# TYPE qhook_dead_jobs gauge\n");
         push_fmt(&mut out, &format!("qhook_dead_jobs {dead_jobs}\n"));
 
+        // Workflow metrics
+        let wf_started = self.workflow_runs_started.snapshot();
+        let wf_completed = self.workflow_runs_completed.snapshot();
+        let wf_failed = self.workflow_runs_failed.snapshot();
+        if !wf_started.is_empty() || !wf_completed.is_empty() || !wf_failed.is_empty() {
+            out.push_str("# HELP qhook_workflow_runs_total Workflow runs by workflow and status\n");
+            out.push_str("# TYPE qhook_workflow_runs_total counter\n");
+            for (wf, count) in &wf_started {
+                push_fmt(
+                    &mut out,
+                    &format!(
+                        "qhook_workflow_runs_total{{workflow=\"{wf}\",status=\"started\"}} {count}\n"
+                    ),
+                );
+            }
+            for (wf, count) in &wf_completed {
+                push_fmt(
+                    &mut out,
+                    &format!(
+                        "qhook_workflow_runs_total{{workflow=\"{wf}\",status=\"completed\"}} {count}\n"
+                    ),
+                );
+            }
+            for (wf, count) in &wf_failed {
+                push_fmt(
+                    &mut out,
+                    &format!(
+                        "qhook_workflow_runs_total{{workflow=\"{wf}\",status=\"failed\"}} {count}\n"
+                    ),
+                );
+            }
+        }
+
+        let wf_steps = self.workflow_steps_completed.snapshot();
+        if !wf_steps.is_empty() {
+            out.push_str(
+                "# HELP qhook_workflow_steps_completed_total Workflow steps completed per workflow\n",
+            );
+            out.push_str("# TYPE qhook_workflow_steps_completed_total counter\n");
+            for (wf, count) in &wf_steps {
+                push_fmt(
+                    &mut out,
+                    &format!("qhook_workflow_steps_completed_total{{workflow=\"{wf}\"}} {count}\n"),
+                );
+            }
+        }
+
+        let cb_recv = self.callbacks_received.load(Ordering::Relaxed);
+        let cb_exp = self.callbacks_expired.load(Ordering::Relaxed);
+        if cb_recv > 0 || cb_exp > 0 {
+            out.push_str("# HELP qhook_callbacks_received_total Callback webhook invocations\n");
+            out.push_str("# TYPE qhook_callbacks_received_total counter\n");
+            push_fmt(
+                &mut out,
+                &format!("qhook_callbacks_received_total {cb_recv}\n"),
+            );
+            out.push_str("# HELP qhook_callbacks_expired_total Callback jobs expired by timeout\n");
+            out.push_str("# TYPE qhook_callbacks_expired_total counter\n");
+            push_fmt(
+                &mut out,
+                &format!("qhook_callbacks_expired_total {cb_exp}\n"),
+            );
+        }
+
         // Label cardinality (monitor for unbounded growth)
         let label_count = self.events_by_source.label_count()
             + self.deliveries_by_handler_ok.label_count()
             + self.deliveries_by_handler_fail.label_count()
             + self.dlq_by_handler.label_count()
             + self.verification_failures.label_count()
-            + self.delivery_errors_by_type.label_count();
+            + self.delivery_errors_by_type.label_count()
+            + self.workflow_runs_started.label_count()
+            + self.workflow_runs_completed.label_count()
+            + self.workflow_runs_failed.label_count()
+            + self.workflow_steps_completed.label_count();
         out.push_str(
             "# HELP qhook_metric_label_count Total unique label values across all labeled counters\n",
         );
@@ -466,6 +571,36 @@ mod tests {
         assert!(output.contains("qhook_delivery_duration_seconds_max 0.5"));
         // Label count: handler-a(ok) + handler-b(fail) = 2
         assert!(output.contains("qhook_metric_label_count 2"));
+    }
+
+    #[test]
+    fn test_workflow_metrics() {
+        let m = Metrics::new();
+        m.inc_workflow_started("order-pipeline");
+        m.inc_workflow_started("order-pipeline");
+        m.inc_workflow_completed("order-pipeline");
+        m.inc_workflow_failed("order-pipeline");
+        m.inc_workflow_step_completed("order-pipeline");
+        m.inc_workflow_step_completed("order-pipeline");
+        m.inc_workflow_step_completed("order-pipeline");
+        m.inc_callbacks_received();
+        m.inc_callbacks_expired();
+
+        let output = m.to_prometheus(0, 0);
+        assert!(output.contains(
+            "qhook_workflow_runs_total{workflow=\"order-pipeline\",status=\"started\"} 2"
+        ));
+        assert!(output.contains(
+            "qhook_workflow_runs_total{workflow=\"order-pipeline\",status=\"completed\"} 1"
+        ));
+        assert!(output.contains(
+            "qhook_workflow_runs_total{workflow=\"order-pipeline\",status=\"failed\"} 1"
+        ));
+        assert!(
+            output.contains("qhook_workflow_steps_completed_total{workflow=\"order-pipeline\"} 3")
+        );
+        assert!(output.contains("qhook_callbacks_received_total 1"));
+        assert!(output.contains("qhook_callbacks_expired_total 1"));
     }
 
     #[test]

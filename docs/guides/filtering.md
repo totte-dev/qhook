@@ -24,6 +24,10 @@ handlers:
 |--------|---------|-------------|
 | `$.path == value` | `$.status == active` | Equality (strings, numbers, booleans) |
 | `$.path != value` | `$.env != test` | Inequality |
+| `$.path >= value` | `$.amount >= 1000` | Greater than or equal (numeric) |
+| `$.path > value` | `$.retries > 0` | Greater than (numeric) |
+| `$.path <= value` | `$.priority <= 5` | Less than or equal (numeric) |
+| `$.path < value` | `$.age < 18` | Less than (numeric) |
 | `$.path in [a, b]` | `$.type in [created, updated]` | Set membership |
 | `$.path` | `$.data.verified` | Truthy (exists, not null/false/0/"") |
 

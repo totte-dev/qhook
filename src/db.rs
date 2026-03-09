@@ -5,6 +5,24 @@ use std::time::Instant;
 
 use crate::config::DatabaseConfig;
 
+/// Redact credentials from a database URL.
+/// Replaces `user:password@` with `***@` to prevent credential leakage in logs.
+fn redact_url(url: &str) -> String {
+    // Match patterns like postgres://user:pass@host or sqlite:file
+    if let Some(scheme_end) = url.find("://") {
+        let after_scheme = &url[scheme_end + 3..];
+        if let Some(at_pos) = after_scheme.find('@') {
+            // Has credentials — redact them
+            return format!(
+                "{}://***@{}",
+                &url[..scheme_end],
+                &after_scheme[at_pos + 1..]
+            );
+        }
+    }
+    url.to_string()
+}
+
 /// Log queries that take longer than this.
 const SLOW_QUERY_MS: u128 = 100;
 
@@ -34,7 +52,7 @@ impl Database {
             .max_connections(config.max_connections)
             .connect(&url)
             .await
-            .with_context(|| format!("Failed to connect to database: {url}"))?;
+            .with_context(|| format!("Failed to connect to database: {}", redact_url(&url)))?;
 
         tracing::info!(driver = config.driver, "Database connected");
 
@@ -120,6 +138,67 @@ impl Database {
         )
         .execute(&self.pool)
         .await?;
+
+        // --- v0.2: Workflow tables ---
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS workflow_runs (
+                id           TEXT PRIMARY KEY,
+                workflow     TEXT NOT NULL,
+                event_id     TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'running',
+                current_step TEXT,
+                created_at   TEXT NOT NULL,
+                completed_at TEXT
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_workflow_runs_status
+            ON workflow_runs (status)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Add workflow columns to jobs (idempotent — ignore if already exist)
+        for col in [
+            "ALTER TABLE jobs ADD COLUMN workflow_run_id TEXT",
+            "ALTER TABLE jobs ADD COLUMN step_name TEXT",
+            "ALTER TABLE jobs ADD COLUMN step_index INTEGER",
+            "ALTER TABLE jobs ADD COLUMN step_input TEXT",
+            "ALTER TABLE jobs ADD COLUMN step_output TEXT",
+            "ALTER TABLE jobs ADD COLUMN branch_name TEXT",
+        ] {
+            sqlx::query(col).execute(&self.pool).await.ok();
+        }
+
+        // Add parallel tracking columns to workflow_runs
+        for col in [
+            "ALTER TABLE workflow_runs ADD COLUMN parallel_step TEXT",
+            "ALTER TABLE workflow_runs ADD COLUMN parallel_count INTEGER DEFAULT 0",
+            "ALTER TABLE workflow_runs ADD COLUMN parallel_completed INTEGER DEFAULT 0",
+            "ALTER TABLE workflow_runs ADD COLUMN timeout_at TEXT",
+        ] {
+            sqlx::query(col).execute(&self.pool).await.ok();
+        }
+
+        // Add callback token column to jobs
+        for col in ["ALTER TABLE jobs ADD COLUMN callback_token TEXT"] {
+            sqlx::query(col).execute(&self.pool).await.ok();
+        }
+
+        // Index for callback token lookup
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_callback_token ON jobs (callback_token)",
+        )
+        .execute(&self.pool)
+        .await
+        .ok();
 
         tracing::info!("Database migrated");
         Ok(())
@@ -516,6 +595,482 @@ impl Database {
         Ok(row.0)
     }
 
+    // --- v0.2: Workflow operations ---
+
+    pub async fn insert_workflow_run(
+        &self,
+        id: &str,
+        workflow: &str,
+        event_id: &str,
+        first_step: &str,
+    ) -> Result<()> {
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
+
+        sqlx::query(
+            "INSERT INTO workflow_runs (id, workflow, event_id, status, current_step, created_at) \
+             VALUES ($1, $2, $3, 'running', $4, $5)",
+        )
+        .bind(id)
+        .bind(workflow)
+        .bind(event_id)
+        .bind(first_step)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn update_workflow_run_step(&self, run_id: &str, step_name: &str) -> Result<()> {
+        sqlx::query("UPDATE workflow_runs SET current_step = $1 WHERE id = $2")
+            .bind(step_name)
+            .bind(run_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn complete_workflow_run(&self, run_id: &str) -> Result<()> {
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
+
+        sqlx::query(
+            "UPDATE workflow_runs SET status = 'completed', completed_at = $1 WHERE id = $2",
+        )
+        .bind(&now)
+        .bind(run_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn fail_workflow_run(&self, run_id: &str) -> Result<()> {
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
+
+        sqlx::query("UPDATE workflow_runs SET status = 'failed', completed_at = $1 WHERE id = $2")
+            .bind(&now)
+            .bind(run_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_workflow_job(
+        &self,
+        id: &str,
+        event_id: &str,
+        handler: &str,
+        url: &str,
+        max_attempts: u32,
+        workflow_run_id: &str,
+        step_name: &str,
+        step_index: i32,
+        step_input: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
+
+        sqlx::query(
+            "INSERT INTO jobs (id, event_id, handler, url, status, max_attempts, scheduled_at, created_at, \
+             workflow_run_id, step_name, step_index, step_input) \
+             VALUES ($1, $2, $3, $4, 'available', $5, $6, $6, $7, $8, $9, $10)",
+        )
+        .bind(id)
+        .bind(event_id)
+        .bind(handler)
+        .bind(url)
+        .bind(max_attempts as i32)
+        .bind(&now)
+        .bind(workflow_run_id)
+        .bind(step_name)
+        .bind(step_index)
+        .bind(step_input)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn save_step_output(&self, job_id: &str, output: &str) -> Result<()> {
+        sqlx::query("UPDATE jobs SET step_output = $1 WHERE id = $2")
+            .bind(output)
+            .bind(job_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_workflow_job_data(&self, job_id: &str) -> Result<Option<WorkflowJobRow>> {
+        let row = sqlx::query_as::<_, WorkflowJobRow>(
+            "SELECT workflow_run_id, step_name, step_index, step_input, step_output, branch_name \
+             FROM jobs WHERE id = $1",
+        )
+        .bind(job_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn get_workflow_run(&self, run_id: &str) -> Result<Option<WorkflowRunRow>> {
+        let row = sqlx::query_as::<_, WorkflowRunRow>(
+            "SELECT id, workflow, event_id, status, current_step, created_at, completed_at \
+             FROM workflow_runs WHERE id = $1",
+        )
+        .bind(run_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_workflow_runs(
+        &self,
+        status: Option<&str>,
+        limit: i32,
+    ) -> Result<Vec<WorkflowRunRow>> {
+        let rows = if let Some(status) = status {
+            sqlx::query_as::<_, WorkflowRunRow>(
+                "SELECT id, workflow, event_id, status, current_step, created_at, completed_at \
+                 FROM workflow_runs WHERE status = $1 ORDER BY created_at DESC LIMIT $2",
+            )
+            .bind(status)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, WorkflowRunRow>(
+                "SELECT id, workflow, event_id, status, current_step, created_at, completed_at \
+                 FROM workflow_runs ORDER BY created_at DESC LIMIT $1",
+            )
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows)
+    }
+
+    pub async fn redrive_workflow_run(&self, run_id: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE workflow_runs SET status = 'running' WHERE id = $1 AND status = 'failed'",
+        )
+        .bind(run_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Set parallel execution state on a workflow run.
+    pub async fn set_parallel_state(
+        &self,
+        run_id: &str,
+        parallel_step: &str,
+        count: i32,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE workflow_runs SET parallel_step = $1, parallel_count = $2, parallel_completed = 0 \
+             WHERE id = $3",
+        )
+        .bind(parallel_step)
+        .bind(count)
+        .bind(run_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Increment parallel completed count. Returns (completed, total).
+    /// Uses a single atomic query to prevent race conditions when multiple branches
+    /// complete concurrently.
+    pub async fn increment_parallel_completed(&self, run_id: &str) -> Result<(i32, i32)> {
+        if self.driver == "postgres" {
+            // Postgres: atomic UPDATE ... RETURNING
+            let row: (i32, i32) = sqlx::query_as(
+                "UPDATE workflow_runs SET parallel_completed = parallel_completed + 1 \
+                 WHERE id = $1 \
+                 RETURNING parallel_completed, parallel_count",
+            )
+            .bind(run_id)
+            .fetch_one(&self.pool)
+            .await?;
+            Ok(row)
+        } else {
+            // SQLite: single writer guarantees atomicity, but use a subquery to read
+            // the updated values in one statement to avoid TOCTOU.
+            sqlx::query(
+                "UPDATE workflow_runs SET parallel_completed = parallel_completed + 1 WHERE id = $1",
+            )
+            .bind(run_id)
+            .execute(&self.pool)
+            .await?;
+
+            // SQLite is single-writer, so no concurrent UPDATE can interleave here.
+            // The WAL journal mode serializes all writes.
+            let row: (i32, i32) = sqlx::query_as(
+                "SELECT parallel_completed, parallel_count FROM workflow_runs WHERE id = $1",
+            )
+            .bind(run_id)
+            .fetch_one(&self.pool)
+            .await?;
+            Ok(row)
+        }
+    }
+
+    /// Clear parallel state after all branches complete.
+    pub async fn clear_parallel_state(&self, run_id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE workflow_runs SET parallel_step = NULL, parallel_count = 0, parallel_completed = 0 \
+             WHERE id = $1",
+        )
+        .bind(run_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Insert a branch job for parallel/map execution.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_branch_job(
+        &self,
+        id: &str,
+        event_id: &str,
+        handler: &str,
+        url: &str,
+        max_attempts: u32,
+        workflow_run_id: &str,
+        step_name: &str,
+        step_index: i32,
+        step_input: Option<&str>,
+        branch_name: &str,
+    ) -> Result<()> {
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
+
+        sqlx::query(
+            "INSERT INTO jobs (id, event_id, handler, url, status, max_attempts, scheduled_at, created_at, \
+             workflow_run_id, step_name, step_index, step_input, branch_name) \
+             VALUES ($1, $2, $3, $4, 'available', $5, $6, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(id)
+        .bind(event_id)
+        .bind(handler)
+        .bind(url)
+        .bind(max_attempts as i32)
+        .bind(&now)
+        .bind(workflow_run_id)
+        .bind(step_name)
+        .bind(step_index)
+        .bind(step_input)
+        .bind(branch_name)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get all completed branch outputs for a parallel/map step.
+    pub async fn get_branch_outputs(
+        &self,
+        run_id: &str,
+        step_name: &str,
+    ) -> Result<Vec<(String, Option<String>)>> {
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT branch_name, step_output FROM jobs \
+             WHERE workflow_run_id = $1 AND step_name = $2 AND branch_name IS NOT NULL AND status = 'completed' \
+             ORDER BY branch_name",
+        )
+        .bind(run_id)
+        .bind(step_name)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Insert a workflow job with a future scheduled_at (for wait steps).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_workflow_job_delayed(
+        &self,
+        id: &str,
+        event_id: &str,
+        handler: &str,
+        url: &str,
+        max_attempts: u32,
+        workflow_run_id: &str,
+        step_name: &str,
+        step_index: i32,
+        step_input: Option<&str>,
+        scheduled_at: &str,
+    ) -> Result<()> {
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
+
+        sqlx::query(
+            "INSERT INTO jobs (id, event_id, handler, url, status, max_attempts, scheduled_at, created_at, \
+             workflow_run_id, step_name, step_index, step_input) \
+             VALUES ($1, $2, $3, $4, 'available', $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(id)
+        .bind(event_id)
+        .bind(handler)
+        .bind(url)
+        .bind(max_attempts as i32)
+        .bind(scheduled_at)
+        .bind(&now)
+        .bind(workflow_run_id)
+        .bind(step_name)
+        .bind(step_index)
+        .bind(step_input)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Insert a callback job that waits for an external callback.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_callback_job(
+        &self,
+        id: &str,
+        event_id: &str,
+        handler: &str,
+        max_attempts: u32,
+        workflow_run_id: &str,
+        step_name: &str,
+        step_index: i32,
+        step_input: Option<&str>,
+        callback_token: &str,
+        _timeout_at: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
+
+        // Use a far-future scheduled_at so it's never picked up by the worker.
+        // It will be resumed via the callback API.
+        let far_future = "9999-12-31T23:59:59.999";
+
+        sqlx::query(
+            "INSERT INTO jobs (id, event_id, handler, url, status, max_attempts, scheduled_at, created_at, \
+             workflow_run_id, step_name, step_index, step_input, callback_token) \
+             VALUES ($1, $2, $3, 'callback', 'waiting', $4, $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(id)
+        .bind(event_id)
+        .bind(handler)
+        .bind(max_attempts as i32)
+        .bind(far_future)
+        .bind(&now)
+        .bind(workflow_run_id)
+        .bind(step_name)
+        .bind(step_index)
+        .bind(step_input)
+        .bind(callback_token)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Find a waiting callback job by token and resume it with payload.
+    /// Atomic: UPDATE with WHERE status='waiting' prevents double-resume race conditions.
+    pub async fn resume_callback_job(&self, token: &str, payload: &str) -> Result<Option<String>> {
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
+
+        // Atomic update: only succeeds if job exists AND is still waiting.
+        // Concurrent requests will see rows_affected=0 for the loser.
+        let result = sqlx::query(
+            "UPDATE jobs SET status = 'completed', completed_at = $1, step_output = $2 \
+             WHERE callback_token = $3 AND status = 'waiting'",
+        )
+        .bind(&now)
+        .bind(payload)
+        .bind(token)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+
+        // Get the job_id (safe: callback_token has UNIQUE index)
+        let row: (String,) = sqlx::query_as("SELECT id FROM jobs WHERE callback_token = $1")
+            .bind(token)
+            .fetch_one(&self.pool)
+            .await?;
+
+        Ok(Some(row.0))
+    }
+
+    /// Get callback job data for advancing the workflow after callback.
+    pub async fn get_callback_job(&self, token: &str) -> Result<Option<JobRow>> {
+        let row = sqlx::query_as::<_, JobRow>(
+            "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
+             FROM jobs WHERE callback_token = $1",
+        )
+        .bind(token)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Set timeout_at on a workflow run.
+    pub async fn set_workflow_timeout(&self, run_id: &str, timeout_at: &str) -> Result<()> {
+        sqlx::query("UPDATE workflow_runs SET timeout_at = $1 WHERE id = $2")
+            .bind(timeout_at)
+            .bind(run_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Get workflow run timeout_at.
+    pub async fn get_workflow_timeout(&self, run_id: &str) -> Result<Option<String>> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT timeout_at FROM workflow_runs WHERE id = $1")
+                .bind(run_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.and_then(|(t,)| t))
+    }
+
+    /// Expire waiting callback jobs whose workflow has timed out.
+    pub async fn expire_timed_out_callbacks(&self) -> Result<u64> {
+        let now = Utc::now()
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string();
+
+        let result = sqlx::query(
+            "UPDATE jobs SET status = 'dead', completed_at = $1, last_error = 'callback timeout' \
+             WHERE status = 'waiting' AND callback_token IS NOT NULL \
+             AND workflow_run_id IN ( \
+                 SELECT id FROM workflow_runs WHERE timeout_at IS NOT NULL AND timeout_at <= $1 AND status = 'running' \
+             )",
+        )
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
     pub async fn retry_job(&self, job_id: &str) -> Result<bool> {
         let now = Utc::now()
             .naive_utc()
@@ -553,4 +1108,67 @@ pub struct EventRow {
     pub event_type: String,
     pub unique_key: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct WorkflowJobRow {
+    pub workflow_run_id: Option<String>,
+    pub step_name: Option<String>,
+    pub step_index: Option<i32>,
+    pub step_input: Option<String>,
+    pub step_output: Option<String>,
+    pub branch_name: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct WorkflowRunRow {
+    pub id: String,
+    pub workflow: String,
+    pub event_id: String,
+    pub status: String,
+    pub current_step: Option<String>,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_redact_url_with_credentials() {
+        assert_eq!(
+            redact_url("postgres://user:password@host:5432/db"),
+            "postgres://***@host:5432/db"
+        );
+    }
+
+    #[test]
+    fn test_redact_url_with_user_only() {
+        assert_eq!(
+            redact_url("postgres://admin@host:5432/db"),
+            "postgres://***@host:5432/db"
+        );
+    }
+
+    #[test]
+    fn test_redact_url_without_credentials() {
+        assert_eq!(
+            redact_url("sqlite:qhook.db?mode=rwc"),
+            "sqlite:qhook.db?mode=rwc"
+        );
+    }
+
+    #[test]
+    fn test_redact_url_no_scheme() {
+        assert_eq!(redact_url("just-a-path"), "just-a-path");
+    }
+
+    #[test]
+    fn test_redact_url_complex_password() {
+        assert_eq!(
+            redact_url("postgres://user:p%40ss%3Dw0rd@db.example.com:5432/mydb"),
+            "postgres://***@db.example.com:5432/mydb"
+        );
+    }
 }

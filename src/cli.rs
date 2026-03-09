@@ -40,6 +40,12 @@ enum Command {
         #[command(subcommand)]
         action: EventsAction,
     },
+    /// Manage workflow runs
+    #[command(name = "workflow-runs")]
+    WorkflowRuns {
+        #[command(subcommand)]
+        action: WorkflowRunsAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -80,6 +86,31 @@ enum EventsAction {
     },
 }
 
+#[derive(Subcommand)]
+enum WorkflowRunsAction {
+    /// List workflow runs
+    List {
+        /// Filter by status (running, completed, failed)
+        #[arg(short, long)]
+        status: Option<String>,
+        /// Max number of runs to show
+        #[arg(short, long, default_value = "20")]
+        limit: i32,
+        /// Path to config file
+        #[arg(short, long, default_value = "qhook.yaml")]
+        config: PathBuf,
+    },
+    /// Redrive a failed workflow run (restart from failed step)
+    Redrive {
+        /// Workflow run ID
+        #[arg()]
+        run_id: String,
+        /// Path to config file
+        #[arg(short, long, default_value = "qhook.yaml")]
+        config: PathBuf,
+    },
+}
+
 impl Args {
     pub async fn run(self) -> Result<()> {
         match self.command {
@@ -112,6 +143,15 @@ impl Args {
                 println!("Handlers: {}", cfg.handlers.len());
                 for (name, handler) in &cfg.handlers {
                     println!("  {} -> {} (source: {})", name, handler.url, handler.source);
+                }
+                println!("Workflows: {}", cfg.workflows.len());
+                for (name, workflow) in &cfg.workflows {
+                    println!(
+                        "  {} -> {} steps (source: {})",
+                        name,
+                        workflow.steps.len(),
+                        workflow.source
+                    );
                 }
                 if cfg.alerts.is_some() {
                     println!("Alerts: configured");
@@ -173,6 +213,68 @@ impl Args {
                     } else {
                         let count = db.retry_dead_jobs().await?;
                         println!("{} dead job(s) queued for retry.", count);
+                    }
+                    Ok(())
+                }
+            },
+            Command::WorkflowRuns { action } => match action {
+                WorkflowRunsAction::List {
+                    status,
+                    limit,
+                    config,
+                } => {
+                    let cfg = Config::load(&config)?;
+                    let db = crate::db::Database::connect(&cfg.database).await?;
+                    db.migrate().await?;
+                    let runs = db.list_workflow_runs(status.as_deref(), limit).await?;
+
+                    if runs.is_empty() {
+                        println!("No workflow runs found.");
+                        return Ok(());
+                    }
+
+                    println!(
+                        "{:<28} {:<12} {:<16} {:<16} {:<20}",
+                        "ID", "STATUS", "WORKFLOW", "STEP", "CREATED"
+                    );
+                    println!("{}", "-".repeat(92));
+                    for run in &runs {
+                        let step = run.current_step.as_deref().unwrap_or("-");
+                        println!(
+                            "{:<28} {:<12} {:<16} {:<16} {}",
+                            &run.id[..run.id.len().min(26)],
+                            run.status,
+                            &run.workflow[..run.workflow.len().min(14)],
+                            &step[..step.len().min(14)],
+                            &run.created_at[..run.created_at.len().min(19)],
+                        );
+                    }
+                    Ok(())
+                }
+                WorkflowRunsAction::Redrive { run_id, config } => {
+                    let cfg = Config::load(&config)?;
+                    let db = crate::db::Database::connect(&cfg.database).await?;
+                    db.migrate().await?;
+
+                    if db.redrive_workflow_run(&run_id).await? {
+                        // Find the failed job for this run and retry it
+                        let jobs = db.list_jobs(Some("dead"), 100).await?;
+                        let mut redriven = 0;
+                        for job in &jobs {
+                            // Check if this job belongs to the workflow run
+                            if let Ok(Some(wf_data)) = db.get_workflow_job_data(&job.id).await {
+                                if wf_data.workflow_run_id.as_deref() == Some(&run_id) {
+                                    db.retry_job(&job.id).await?;
+                                    redriven += 1;
+                                }
+                            }
+                        }
+                        println!(
+                            "Workflow run {} redriven ({} job(s) retried).",
+                            run_id, redriven
+                        );
+                    } else {
+                        println!("Workflow run {} not found or not in failed state.", run_id);
                     }
                     Ok(())
                 }
