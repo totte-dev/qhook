@@ -16,6 +16,10 @@ pub fn verify_signature(
         "github" => verify_github(secret, payload, headers),
         "shopify" => verify_shopify(secret, payload, headers),
         "hmac" => verify_custom_hmac(secret, payload, headers),
+        "pagerduty" => verify_pagerduty(secret, payload, headers),
+        "grafana" => verify_grafana(secret, payload, headers),
+        "terraform" => verify_terraform(secret, payload, headers),
+        "gitlab" => verify_gitlab(secret, payload, headers),
         _ => anyhow::bail!("Unknown verification provider: {provider}"),
     }
 }
@@ -113,8 +117,72 @@ fn verify_custom_hmac(
     Ok(constant_time_eq(&expected, sig_header))
 }
 
+fn verify_pagerduty(secret: &str, payload: &[u8], headers: &axum::http::HeaderMap) -> Result<bool> {
+    let sig_header = headers
+        .get("X-PagerDuty-Signature")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let signature = sig_header.strip_prefix("v1=").unwrap_or("");
+    if signature.is_empty() {
+        return Ok(false);
+    }
+
+    let expected = compute_hmac_sha256_hex(secret.as_bytes(), payload);
+    Ok(constant_time_eq(&expected, signature))
+}
+
+fn verify_grafana(secret: &str, payload: &[u8], headers: &axum::http::HeaderMap) -> Result<bool> {
+    let sig_header = headers
+        .get("X-Grafana-Alerting-Signature")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if sig_header.is_empty() {
+        return Ok(false);
+    }
+
+    let expected = compute_hmac_sha256_hex(secret.as_bytes(), payload);
+    Ok(constant_time_eq(&expected, sig_header))
+}
+
+fn verify_terraform(secret: &str, payload: &[u8], headers: &axum::http::HeaderMap) -> Result<bool> {
+    let sig_header = headers
+        .get("X-TFE-Notification-Signature")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if sig_header.is_empty() {
+        return Ok(false);
+    }
+
+    let expected = compute_hmac_sha512_hex(secret.as_bytes(), payload);
+    Ok(constant_time_eq(&expected, sig_header))
+}
+
+fn verify_gitlab(secret: &str, _payload: &[u8], headers: &axum::http::HeaderMap) -> Result<bool> {
+    let token = headers
+        .get("X-Gitlab-Token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if token.is_empty() {
+        return Ok(false);
+    }
+
+    Ok(constant_time_eq(secret, token))
+}
+
 fn compute_hmac_sha256_hex(key: &[u8], data: &[u8]) -> String {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key length");
+    mac.update(data);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn compute_hmac_sha512_hex(key: &[u8], data: &[u8]) -> String {
+    use hmac::Mac;
+    type HmacSha512 = Hmac<sha2::Sha512>;
+    let mut mac = HmacSha512::new_from_slice(key).expect("HMAC key length");
     mac.update(data);
     hex::encode(mac.finalize().into_bytes())
 }
@@ -612,6 +680,194 @@ mod tests {
         assert!(!is_valid_sns_url(
             "http://sns.us-east-1.amazonaws.com/?Action=Confirm"
         ));
+    }
+
+    // --- PagerDuty verification ---
+
+    #[test]
+    fn test_pagerduty_signature_valid() {
+        let secret = "pd_secret_key";
+        let payload = b"{\"event\":{\"event_type\":\"incident.triggered\"}}";
+        let expected = compute_hmac_sha256_hex(secret.as_bytes(), payload);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-PagerDuty-Signature",
+            format!("v1={expected}").parse().unwrap(),
+        );
+
+        assert!(verify_pagerduty(secret, payload, &headers).unwrap());
+    }
+
+    #[test]
+    fn test_pagerduty_signature_invalid() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-PagerDuty-Signature",
+            "v1=0000000000000000000000000000000000000000000000000000000000000000"
+                .parse()
+                .unwrap(),
+        );
+        assert!(!verify_pagerduty("secret", b"payload", &headers).unwrap());
+    }
+
+    #[test]
+    fn test_pagerduty_signature_missing() {
+        let headers = HeaderMap::new();
+        assert!(!verify_pagerduty("secret", b"payload", &headers).unwrap());
+    }
+
+    #[test]
+    fn test_pagerduty_signature_no_prefix() {
+        let secret = "pd_secret";
+        let payload = b"data";
+        let sig = compute_hmac_sha256_hex(secret.as_bytes(), payload);
+
+        let mut headers = HeaderMap::new();
+        // Missing v1= prefix — should fail
+        headers.insert("X-PagerDuty-Signature", sig.parse().unwrap());
+        assert!(!verify_pagerduty(secret, payload, &headers).unwrap());
+    }
+
+    // --- Grafana verification ---
+
+    #[test]
+    fn test_grafana_signature_valid() {
+        let secret = "grafana_secret";
+        let payload = b"{\"status\":\"firing\",\"alerts\":[]}";
+        let expected = compute_hmac_sha256_hex(secret.as_bytes(), payload);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Grafana-Alerting-Signature", expected.parse().unwrap());
+
+        assert!(verify_grafana(secret, payload, &headers).unwrap());
+    }
+
+    #[test]
+    fn test_grafana_signature_invalid() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Grafana-Alerting-Signature",
+            "0000000000000000000000000000000000000000000000000000000000000000"
+                .parse()
+                .unwrap(),
+        );
+        assert!(!verify_grafana("secret", b"payload", &headers).unwrap());
+    }
+
+    #[test]
+    fn test_grafana_signature_missing() {
+        let headers = HeaderMap::new();
+        assert!(!verify_grafana("secret", b"payload", &headers).unwrap());
+    }
+
+    // --- Terraform Cloud verification ---
+
+    #[test]
+    fn test_terraform_signature_valid() {
+        let secret = "tf_secret";
+        let payload = b"{\"payload_version\":1,\"notifications\":[]}";
+        let expected = compute_hmac_sha512_hex(secret.as_bytes(), payload);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-TFE-Notification-Signature", expected.parse().unwrap());
+
+        assert!(verify_terraform(secret, payload, &headers).unwrap());
+    }
+
+    #[test]
+    fn test_terraform_signature_invalid() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-TFE-Notification-Signature",
+            "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+                .parse()
+                .unwrap(),
+        );
+        assert!(!verify_terraform("secret", b"payload", &headers).unwrap());
+    }
+
+    #[test]
+    fn test_terraform_signature_missing() {
+        let headers = HeaderMap::new();
+        assert!(!verify_terraform("secret", b"payload", &headers).unwrap());
+    }
+
+    // --- GitLab verification ---
+
+    #[test]
+    fn test_gitlab_token_valid() {
+        let secret = "my_gitlab_token";
+        let payload = b"{\"object_kind\":\"push\"}";
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Gitlab-Token", secret.parse().unwrap());
+
+        assert!(verify_gitlab(secret, payload, &headers).unwrap());
+    }
+
+    #[test]
+    fn test_gitlab_token_invalid() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Gitlab-Token", "wrong_token".parse().unwrap());
+        assert!(!verify_gitlab("correct_token", b"payload", &headers).unwrap());
+    }
+
+    #[test]
+    fn test_gitlab_token_missing() {
+        let headers = HeaderMap::new();
+        assert!(!verify_gitlab("secret", b"payload", &headers).unwrap());
+    }
+
+    // --- verify_signature dispatches new providers ---
+
+    #[test]
+    fn test_verify_signature_pagerduty() {
+        let secret = "pd_key";
+        let payload = b"test";
+        let sig = compute_hmac_sha256_hex(secret.as_bytes(), payload);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-PagerDuty-Signature",
+            format!("v1={sig}").parse().unwrap(),
+        );
+
+        assert!(verify_signature("pagerduty", secret, payload, &headers).unwrap());
+    }
+
+    #[test]
+    fn test_verify_signature_grafana() {
+        let secret = "gf_key";
+        let payload = b"test";
+        let sig = compute_hmac_sha256_hex(secret.as_bytes(), payload);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Grafana-Alerting-Signature", sig.parse().unwrap());
+
+        assert!(verify_signature("grafana", secret, payload, &headers).unwrap());
+    }
+
+    #[test]
+    fn test_verify_signature_terraform() {
+        let secret = "tf_key";
+        let payload = b"test";
+        let sig = compute_hmac_sha512_hex(secret.as_bytes(), payload);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-TFE-Notification-Signature", sig.parse().unwrap());
+
+        assert!(verify_signature("terraform", secret, payload, &headers).unwrap());
+    }
+
+    #[test]
+    fn test_verify_signature_gitlab() {
+        let secret = "gl_token";
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Gitlab-Token", secret.parse().unwrap());
+
+        assert!(verify_signature("gitlab", secret, b"any", &headers).unwrap());
     }
 
     // --- SNS cert cache ---

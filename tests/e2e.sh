@@ -54,6 +54,7 @@ database:
   url: "sqlite:/tmp/e2e_qhook_1.db?mode=rwc"
 server:
   port: 19101
+  allow_private_urls: true
 sources:
   app:
     type: event
@@ -112,6 +113,7 @@ database:
   url: "sqlite:/tmp/e2e_qhook_3.db?mode=rwc"
 server:
   port: 19103
+  allow_private_urls: true
 sources:
   app:
     type: event
@@ -154,6 +156,7 @@ database:
   url: "sqlite:/tmp/e2e_qhook_4.db?mode=rwc"
 server:
   port: 19104
+  allow_private_urls: true
 sources:
   github:
     type: webhook
@@ -211,6 +214,7 @@ database:
   url: "sqlite:/tmp/e2e_qhook_5.db?mode=rwc"
 server:
   port: 19105
+  allow_private_urls: true
 sources:
   app:
     type: event
@@ -247,6 +251,7 @@ database:
   url: "sqlite:/tmp/e2e_qhook_6.db?mode=rwc"
 server:
   port: 19106
+  allow_private_urls: true
 sources:
   app:
     type: event
@@ -304,6 +309,7 @@ database:
   url: "sqlite:/tmp/e2e_qhook_7.db?mode=rwc"
 server:
   port: 19107
+  allow_private_urls: true
 sources:
   app:
     type: event
@@ -347,6 +353,7 @@ database:
   url: "sqlite:/tmp/e2e_qhook_8.db?mode=rwc"
 server:
   port: 19108
+  allow_private_urls: true
 sources:
   app:
     type: event
@@ -396,6 +403,7 @@ database:
 server:
   port: 19109
   ip_rate_limit: 3
+  allow_private_urls: true
 sources:
   app:
     type: event
@@ -432,6 +440,7 @@ database:
   url: "sqlite:/tmp/e2e_qhook_10.db?mode=rwc"
 server:
   port: 19110
+  allow_private_urls: true
 api:
   auth_token: secret-token-123
 sources:

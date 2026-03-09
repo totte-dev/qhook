@@ -1,0 +1,94 @@
+# Tenant Provisioning example
+#
+# API event triggers a multi-step provisioning pipeline:
+#   1. create-infra — provision infrastructure (with auth header)
+#   2. create-db    — create tenant database
+#   3. configure    — configure integrations
+#   4. activate     — activate the tenant
+#
+# On failure, rollback runs in reverse order.
+# Input params validate the event payload before starting.
+#
+# Trigger:
+#   curl -X POST http://localhost:8888/events/tenant.create \
+#     -H "Authorization: Bearer test-token" \
+#     -H "Content-Type: application/json" \
+#     -d '{"tenant_id": "t-123", "region": "us-east-1", "plan": "pro"}'
+
+database:
+  driver: sqlite
+
+server:
+  port: 8888
+  allow_private_urls: true
+
+api:
+  auth_token: test-token
+
+sources:
+  platform:
+    type: event
+
+handlers: {}
+
+workflows:
+  tenant-provision:
+    source: platform
+    events: [tenant.create]
+    timeout: 300
+    params:
+      - name: tenant_id
+        type: string
+      - name: region
+        type: string
+      - name: plan
+        type: string
+        required: false
+    steps:
+      - name: create-infra
+        url: http://localhost:3000/provision
+        headers:
+          Authorization: "Bearer ${INFRA_API_TOKEN:-demo-token}"
+        result_path: "$.infra"
+        retry: { max: 3, errors: [5xx, timeout] }
+        catch:
+          - errors: [all]
+            goto: notify-failure
+
+      - name: create-db
+        url: http://localhost:3000/create-db
+        input: |
+          {"tenant_id": "{{$.tenant_id}}", "region": "{{$.region}}"}
+        result_path: "$.db"
+        catch:
+          - errors: [all]
+            goto: rollback-infra
+
+      - name: configure
+        url: http://localhost:3000/configure
+        catch:
+          - errors: [all]
+            goto: rollback-db
+
+      - name: activate
+        url: http://localhost:3000/activate
+        end: true
+
+      # --- rollback (reverse order) ---
+      - name: rollback-db
+        url: http://localhost:3000/delete-db
+        on_failure: continue
+        goto: rollback-infra
+
+      - name: rollback-infra
+        url: http://localhost:3000/deprovision
+        headers:
+          Authorization: "Bearer ${INFRA_API_TOKEN:-demo-token}"
+        on_failure: continue
+        goto: notify-failure
+
+      - name: notify-failure
+        url: http://localhost:3000/notify
+        input: |
+          {"message": "Tenant provisioning failed for {{$.tenant_id}}"}
+        end: true
