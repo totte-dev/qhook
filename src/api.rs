@@ -107,17 +107,21 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
     let port = state.config.server.port;
     let shared = Arc::new(state);
 
-    // SIGHUP: validate config without restart (dry-run reload)
+    // SIGHUP: validate config and log changes (restart to apply)
     #[cfg(unix)]
     {
         let path = config_path.clone();
+        let current_cfg = shared.config.clone();
         tokio::spawn(async move {
             let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
                 .expect("failed to listen for SIGHUP");
             loop {
                 sig.recv().await;
                 match crate::config::Config::load(&path) {
-                    Ok(_) => tracing::info!("SIGHUP: config is valid (restart to apply)"),
+                    Ok(new_cfg) => {
+                        log_config_diff(&current_cfg, &new_cfg);
+                        tracing::info!("SIGHUP: config is valid (restart to apply)");
+                    }
                     Err(e) => tracing::error!(error = %e, "SIGHUP: config validation failed"),
                 }
             }
@@ -1030,6 +1034,67 @@ fn extract_sns_event_type(message: &str, subject: Option<&str>) -> String {
     }
 
     "sns.notification".to_string()
+}
+
+/// Log differences between current and new config on SIGHUP.
+fn log_config_diff(current: &Config, new: &Config) {
+    // Sources
+    for name in new.sources.keys() {
+        if !current.sources.contains_key(name) {
+            tracing::info!(source = name.as_str(), "SIGHUP: source added");
+        }
+    }
+    for name in current.sources.keys() {
+        if !new.sources.contains_key(name) {
+            tracing::info!(source = name.as_str(), "SIGHUP: source removed");
+        }
+    }
+
+    // Handlers
+    for (name, h) in &new.handlers {
+        if let Some(old_h) = current.handlers.get(name) {
+            if old_h.url != h.url {
+                tracing::info!(handler = name.as_str(), old = old_h.url.as_str(), new = h.url.as_str(), "SIGHUP: handler URL changed");
+            }
+        } else {
+            tracing::info!(handler = name.as_str(), "SIGHUP: handler added");
+        }
+    }
+    for name in current.handlers.keys() {
+        if !new.handlers.contains_key(name) {
+            tracing::info!(handler = name.as_str(), "SIGHUP: handler removed");
+        }
+    }
+
+    // Workflows
+    for name in new.workflows.keys() {
+        if !current.workflows.contains_key(name) {
+            tracing::info!(workflow = name.as_str(), "SIGHUP: workflow added");
+        }
+    }
+    for name in current.workflows.keys() {
+        if !new.workflows.contains_key(name) {
+            tracing::info!(workflow = name.as_str(), "SIGHUP: workflow removed");
+        }
+    }
+
+    // Server port change
+    if current.server.port != new.server.port {
+        tracing::warn!(
+            old = current.server.port,
+            new = new.server.port,
+            "SIGHUP: server.port changed (requires restart)"
+        );
+    }
+
+    // Database change
+    if current.database.driver != new.database.driver {
+        tracing::warn!(
+            old = current.database.driver.as_str(),
+            new = new.database.driver.as_str(),
+            "SIGHUP: database.driver changed (requires restart)"
+        );
+    }
 }
 
 pub fn event_matches(pattern: &str, event_type: &str) -> bool {
