@@ -8,13 +8,10 @@ qhook is a lightweight event gateway with built-in queue and retry. Rust (axum +
 
 ### 1. Task Management
 
-- **Tasks live in `KANBAN.md`** at the project root.
-- Before starting work, read KANBAN.md to pick the next task from "In Progress" or "Todo".
-- Move the task to "In Progress" when starting.
-- Move to "Done" when complete, then pick the next task.
-- Add new tasks as they emerge during development.
+- **Tasks live in `docs/private/TASKS.md`** (gitignored, local only).
 - **Update `CHANGELOG.md`** when completing features (Keep a Changelog format).
 - **Update `README.md` and docs** when adding features — new config options, endpoints, sections as needed.
+- **Update `docs/openapi.yaml`** when adding or changing HTTP endpoints — keep the OpenAPI spec in sync with the implementation.
 
 ### 2. Test-Driven Development (MANDATORY)
 
@@ -72,6 +69,7 @@ tests/
   bench.sh      — Benchmark script (receive RPS + delivery throughput)
 .github/workflows/
   ci.yml        — GitHub Actions CI (fmt, clippy, test, E2E)
+  release.yml   — Release automation (workflow_dispatch: GitHub Release + crates.io + Docker)
   pages.yml     — GitHub Pages deploy (docs/ on push to main)
 examples/
   quickstart/       — Minimal setup, no Docker (qhook binary + curl)
@@ -79,6 +77,7 @@ examples/
   filter-transform/ — Event filtering + payload transformation
   stripe-checkout/  — Stripe checkout with dual handlers
 docs/               — GitHub Pages user guide (Jekyll, Cayman theme)
+  openapi.yaml      — OpenAPI 3.1 spec (keep in sync with api.rs)
   index.md          — Top page with navigation
   getting-started.md, configuration.md, cli.md, examples.md
   guides/           — Feature guides (webhook-verification, cloudevents, sns, filtering, grpc, monitoring, security)
@@ -96,7 +95,7 @@ docs/               — GitHub Pages user guide (Jekyll, Cayman theme)
 - **Timestamps**: UTC, format `%Y-%m-%dT%H:%M:%S%.3f` stored as TEXT.
 - **Config env vars**: `${VAR}` or `${VAR:-default}` syntax.
 - **Rust version**: 1.85+ (edition 2024). Use latest stable features (e.g., let chains).
-- **Version**: Currently v0.1.0. Update in Cargo.toml for releases.
+- **Version**: Currently v0.2.2. Update in Cargo.toml for releases.
 - **Docker image**: `ghcr.io/totte-dev/qhook`. Multi-stage build, ~119MB.
 
 ## Key Design Decisions
