@@ -246,6 +246,7 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
         headers.insert("x-content-type-options", "nosniff".parse().unwrap());
         headers.insert("x-frame-options", "DENY".parse().unwrap());
         headers.insert("cache-control", "no-store".parse().unwrap());
+        headers.insert("x-api-version", "1".parse().unwrap());
         resp
     });
 
