@@ -15,10 +15,110 @@ use crate::metrics::Metrics;
 
 /// Max concurrent deliveries per worker.
 const MAX_CONCURRENCY: usize = 10;
+/// Default circuit breaker threshold (consecutive failures to open).
+const DEFAULT_CB_THRESHOLD: u32 = 5;
+/// Default circuit breaker cooldown (seconds before half-open).
+const DEFAULT_CB_COOLDOWN_SECS: u64 = 60;
 /// Batch size for job fetching.
 const BATCH_SIZE: i32 = 10;
 /// How often to run maintenance (stale recovery + cleanup).
 const MAINTENANCE_INTERVAL_SECS: u64 = 3600;
+
+/// Per-handler circuit breaker state.
+/// Tracks consecutive failures and transitions between Closed → Open → HalfOpen → Closed.
+#[derive(Debug)]
+pub struct CircuitBreaker {
+    /// Consecutive failure count.
+    failures: std::sync::atomic::AtomicU32,
+    /// Threshold to trip the circuit.
+    threshold: u32,
+    /// When the circuit was opened (None = closed).
+    opened_at: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Cooldown duration before transitioning to half-open.
+    cooldown: Duration,
+    /// Whether a half-open test is in progress.
+    half_open_in_progress: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CircuitState {
+    Closed,
+    Open,
+    HalfOpen,
+}
+
+impl CircuitBreaker {
+    pub fn new(threshold: u32, cooldown: Duration) -> Self {
+        Self {
+            failures: std::sync::atomic::AtomicU32::new(0),
+            threshold,
+            opened_at: std::sync::Mutex::new(None),
+            cooldown,
+            half_open_in_progress: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Get the current state of the circuit.
+    pub fn state(&self) -> CircuitState {
+        let opened = self.opened_at.lock().unwrap_or_else(|e| e.into_inner());
+        match *opened {
+            None => CircuitState::Closed,
+            Some(at) => {
+                if at.elapsed() >= self.cooldown {
+                    CircuitState::HalfOpen
+                } else {
+                    CircuitState::Open
+                }
+            }
+        }
+    }
+
+    /// Check if delivery should proceed. Returns true if allowed.
+    /// In HalfOpen state, only one test request is allowed at a time.
+    pub fn allow_request(&self) -> bool {
+        match self.state() {
+            CircuitState::Closed => true,
+            CircuitState::Open => false,
+            CircuitState::HalfOpen => {
+                // Only allow one test request via CAS
+                !self
+                    .half_open_in_progress
+                    .swap(true, std::sync::atomic::Ordering::AcqRel)
+            }
+        }
+    }
+
+    /// Record a successful delivery. Resets the circuit to Closed.
+    pub fn record_success(&self) {
+        self.failures.store(0, std::sync::atomic::Ordering::Release);
+        *self.opened_at.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.half_open_in_progress
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Record a failed delivery. Opens the circuit if threshold is reached.
+    /// Returns true if the circuit was just opened (transitioned to Open).
+    pub fn record_failure(&self) -> bool {
+        self.half_open_in_progress
+            .store(false, std::sync::atomic::Ordering::Release);
+        let prev = self
+            .failures
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let count = prev + 1;
+        if count >= self.threshold {
+            let mut opened = self.opened_at.lock().unwrap_or_else(|e| e.into_inner());
+            let was_half_open = match *opened {
+                Some(at) => at.elapsed() >= self.cooldown,
+                None => false,
+            };
+            if opened.is_none() || was_half_open {
+                *opened = Some(std::time::Instant::now());
+                return count == self.threshold && !was_half_open;
+            }
+        }
+        false
+    }
+}
 
 pub struct Worker {
     db: Arc<Database>,
@@ -38,6 +138,8 @@ pub struct Worker {
     handler_headers: Arc<HashMap<String, HashMap<String, String>>>,
     /// Per-handler HTTP method overrides (only non-"POST" entries).
     handler_methods: Arc<HashMap<String, String>>,
+    /// Per-handler circuit breakers.
+    circuit_breakers: HashMap<String, Arc<CircuitBreaker>>,
     /// Lazily created gRPC channels keyed by URL.
     grpc_channels: Arc<std::sync::Mutex<HashMap<String, tonic::transport::Channel>>>,
     /// Workflow configs for step progression.
@@ -61,6 +163,7 @@ impl Worker {
         handler_methods: HashMap<String, String>,
         workflows: HashMap<String, config::WorkflowConfig>,
         default_retry_max: u32,
+        handler_names: Vec<String>,
     ) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -72,6 +175,19 @@ impl Worker {
             .map(|(name, rate)| (name, Arc::new(Semaphore::new(rate as usize))))
             .collect();
 
+        let circuit_breakers: HashMap<String, Arc<CircuitBreaker>> = handler_names
+            .into_iter()
+            .map(|name| {
+                (
+                    name,
+                    Arc::new(CircuitBreaker::new(
+                        DEFAULT_CB_THRESHOLD,
+                        Duration::from_secs(DEFAULT_CB_COOLDOWN_SECS),
+                    )),
+                )
+            })
+            .collect();
+
         Self {
             db,
             metrics,
@@ -81,6 +197,7 @@ impl Worker {
             poll_interval: Duration::from_secs(1),
             shutdown,
             rate_limiters,
+            circuit_breakers,
             transforms: Arc::new(handler_transforms),
             handler_types: Arc::new(handler_types),
             handler_headers: Arc::new(handler_headers),
@@ -178,8 +295,25 @@ impl Worker {
                         let workflows = self.workflows.clone();
                         let default_retry_max = self.default_retry_max;
                         let rate_sem = self.rate_limiters.get(&job.handler).cloned();
+                        let cb = self.circuit_breakers.get(&job.handler).cloned();
 
                         in_flight.spawn(async move {
+                            // Circuit breaker check: skip delivery if circuit is open
+                            if let Some(ref cb) = cb {
+                                if !cb.allow_request() {
+                                    tracing::warn!(
+                                        handler = job.handler,
+                                        job_id = job.id,
+                                        "Circuit open, rescheduling job"
+                                    );
+                                    let next_at = (Utc::now() + chrono::Duration::seconds(10)).naive_utc();
+                                    let _ = db.mark_job_retryable(&job.id, next_at, "circuit breaker open").await;
+                                    metrics.inc_circuit_rejected(&job.handler);
+                                    drop(permit);
+                                    return;
+                                }
+                            }
+
                             // Acquire rate limit permit (blocks if at limit)
                             let rate_permit = if let Some(ref sem) = rate_sem {
                                 sem.clone().acquire_owned().await.ok()
@@ -187,7 +321,7 @@ impl Worker {
                                 None
                             };
 
-                            deliver_job(&db, &http, &metrics, &alerter, &transforms, &handler_types, &handler_headers, &handler_methods, &grpc_channels, &workflows, default_retry_max, &job).await;
+                            deliver_job(&db, &http, &metrics, &alerter, &transforms, &handler_types, &handler_headers, &handler_methods, &grpc_channels, &workflows, default_retry_max, &job, cb.as_deref()).await;
                             drop(permit);
 
                             // Hold rate permit for 1s to enforce per-second limit
@@ -277,6 +411,7 @@ async fn deliver_job(
     workflows: &HashMap<String, config::WorkflowConfig>,
     default_retry_max: u32,
     job: &crate::db::JobRow,
+    circuit_breaker: Option<&CircuitBreaker>,
 ) {
     let start = std::time::Instant::now();
     let is_workflow = job.handler.contains('/');
@@ -501,6 +636,9 @@ async fn deliver_job(
 
             if (200..300).contains(&status_code) {
                 metrics.inc_delivery_success_for(&job.handler, duration_ms as u64);
+                if let Some(cb) = circuit_breaker {
+                    cb.record_success();
+                }
                 if let Err(e) = db.mark_job_completed(&job.id).await {
                     metrics.inc_db_errors();
                     tracing::error!(job_id = job.id, error = %e, "Failed to mark completed");
@@ -552,6 +690,12 @@ async fn deliver_job(
                     )
                     .await;
                 } else {
+                    if let Some(cb) = circuit_breaker {
+                        if cb.record_failure() {
+                            tracing::warn!(handler = job.handler, "Circuit breaker opened");
+                            metrics.inc_circuit_opened(&job.handler);
+                        }
+                    }
                     match handle_failure(db, job, &error).await {
                         Ok(true) => {
                             metrics.inc_dlq(&job.handler);
@@ -609,6 +753,12 @@ async fn deliver_job(
                 )
                 .await;
             } else {
+                if let Some(cb) = circuit_breaker {
+                    if cb.record_failure() {
+                        tracing::warn!(handler = job.handler, "Circuit breaker opened");
+                        metrics.inc_circuit_opened(&job.handler);
+                    }
+                }
                 match handle_failure(db, job, &error).await {
                     Ok(true) => metrics.inc_dlq(&job.handler),
                     Ok(false) => {}
@@ -2114,5 +2264,78 @@ mod tests {
     #[test]
     fn test_error_type_matches_empty() {
         assert!(!error_type_matches(&[], "timeout"));
+    }
+
+    #[test]
+    fn test_circuit_breaker_starts_closed() {
+        let cb = CircuitBreaker::new(3, Duration::from_secs(60));
+        assert_eq!(cb.state(), CircuitState::Closed);
+        assert!(cb.allow_request());
+    }
+
+    #[test]
+    fn test_circuit_breaker_opens_after_threshold() {
+        let cb = CircuitBreaker::new(3, Duration::from_secs(60));
+        assert!(!cb.record_failure()); // 1
+        assert!(!cb.record_failure()); // 2
+        assert!(cb.record_failure()); // 3 -> opens, returns true
+        assert_eq!(cb.state(), CircuitState::Open);
+        assert!(!cb.allow_request());
+    }
+
+    #[test]
+    fn test_circuit_breaker_success_resets() {
+        let cb = CircuitBreaker::new(3, Duration::from_secs(60));
+        cb.record_failure();
+        cb.record_failure();
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::Closed);
+        // Should need 3 more failures to open
+        assert!(!cb.record_failure());
+        assert!(!cb.record_failure());
+        assert!(cb.record_failure());
+        assert_eq!(cb.state(), CircuitState::Open);
+    }
+
+    #[test]
+    fn test_circuit_breaker_half_open_after_cooldown() {
+        let cb = CircuitBreaker::new(2, Duration::from_millis(1));
+        cb.record_failure();
+        cb.record_failure(); // opens
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // Wait for cooldown
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+
+        // Only one request allowed in half-open
+        assert!(cb.allow_request());
+        assert!(!cb.allow_request()); // second blocked
+    }
+
+    #[test]
+    fn test_circuit_breaker_half_open_success_closes() {
+        let cb = CircuitBreaker::new(2, Duration::from_millis(1));
+        cb.record_failure();
+        cb.record_failure();
+        std::thread::sleep(Duration::from_millis(5));
+
+        assert!(cb.allow_request()); // half-open test
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::Closed);
+        assert!(cb.allow_request());
+    }
+
+    #[test]
+    fn test_circuit_breaker_half_open_failure_reopens() {
+        let cb = CircuitBreaker::new(2, Duration::from_millis(1));
+        cb.record_failure();
+        cb.record_failure();
+        std::thread::sleep(Duration::from_millis(5));
+
+        assert!(cb.allow_request()); // half-open test
+        cb.record_failure(); // fails again -> reopen
+        assert_eq!(cb.state(), CircuitState::Open);
+        assert!(!cb.allow_request());
     }
 }
