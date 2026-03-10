@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.3.0] - 2026-03-10
+
+### Added
+- **Circuit breaker**: Per-handler circuit breaker. Opens after 5 consecutive failures, closes after 60s cooldown with half-open probe. New metrics: `qhook_circuit_breaker_opened_total`, `qhook_circuit_breaker_rejected_total`.
+- **OpenTelemetry tracing**: Optional `otel` feature flag (`cargo build --features otel`). Exports traces via OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Falls back to standard tracing otherwise.
+- **Event replay CLI**: `qhook events replay` re-creates jobs for historical events. Supports `--source`, `--event-type`, `--since`, `--until` filters.
+- **Helm chart**: Kubernetes deployment via `charts/qhook/`. Includes Deployment, Service, ConfigMap, Ingress, PVC, HPA, and ServiceAccount.
+- **SIGHUP config diff**: SIGHUP now logs added/removed/changed sources, handlers, and workflows. Warns about changes requiring restart (port, database driver).
+
 ## [0.2.2] - 2026-03-10
 
 ### Added

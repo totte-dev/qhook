@@ -81,6 +81,9 @@ pub struct Metrics {
     workflow_steps_completed: LabeledCounter,
     callbacks_received: AtomicU64,
     callbacks_expired: AtomicU64,
+    // Circuit breaker metrics
+    circuit_opened: LabeledCounter,
+    circuit_rejected: LabeledCounter,
 }
 
 impl Default for Metrics {
@@ -114,6 +117,8 @@ impl Metrics {
             workflow_steps_completed: LabeledCounter::new(),
             callbacks_received: AtomicU64::new(0),
             callbacks_expired: AtomicU64::new(0),
+            circuit_opened: LabeledCounter::new(),
+            circuit_rejected: LabeledCounter::new(),
         }
     }
 
@@ -215,6 +220,14 @@ impl Metrics {
 
     pub fn inc_callbacks_expired(&self) {
         self.callbacks_expired.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_circuit_opened(&self, handler: &str) {
+        self.circuit_opened.inc(handler);
+    }
+
+    pub fn inc_circuit_rejected(&self, handler: &str) {
+        self.circuit_rejected.inc(handler);
     }
 
     pub fn dlq_total(&self) -> u64 {
@@ -464,6 +477,38 @@ impl Metrics {
             );
         }
 
+        // Circuit breaker metrics
+        let cb_opened = self.circuit_opened.snapshot();
+        if !cb_opened.is_empty() {
+            out.push_str(
+                "# HELP qhook_circuit_breaker_opened_total Times circuit breaker opened by handler\n",
+            );
+            out.push_str("# TYPE qhook_circuit_breaker_opened_total counter\n");
+            for (handler, count) in &cb_opened {
+                push_fmt(
+                    &mut out,
+                    &format!(
+                        "qhook_circuit_breaker_opened_total{{handler=\"{handler}\"}} {count}\n"
+                    ),
+                );
+            }
+        }
+        let cb_rejected = self.circuit_rejected.snapshot();
+        if !cb_rejected.is_empty() {
+            out.push_str(
+                "# HELP qhook_circuit_breaker_rejected_total Deliveries skipped by circuit breaker\n",
+            );
+            out.push_str("# TYPE qhook_circuit_breaker_rejected_total counter\n");
+            for (handler, count) in &cb_rejected {
+                push_fmt(
+                    &mut out,
+                    &format!(
+                        "qhook_circuit_breaker_rejected_total{{handler=\"{handler}\"}} {count}\n"
+                    ),
+                );
+            }
+        }
+
         // Label cardinality (monitor for unbounded growth)
         let label_count = self.events_by_source.label_count()
             + self.deliveries_by_handler_ok.label_count()
@@ -471,6 +516,8 @@ impl Metrics {
             + self.dlq_by_handler.label_count()
             + self.verification_failures.label_count()
             + self.delivery_errors_by_type.label_count()
+            + self.circuit_opened.label_count()
+            + self.circuit_rejected.label_count()
             + self.workflow_runs_started.label_count()
             + self.workflow_runs_completed.label_count()
             + self.workflow_runs_failed.label_count()

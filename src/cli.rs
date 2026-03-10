@@ -84,6 +84,30 @@ enum EventsAction {
         #[arg(short, long, default_value = "qhook.yaml")]
         config: PathBuf,
     },
+    /// Replay events by re-creating jobs for matching handlers
+    Replay {
+        /// Filter by source name
+        #[arg(short, long)]
+        source: Option<String>,
+        /// Filter by event type
+        #[arg(short = 't', long)]
+        event_type: Option<String>,
+        /// Only events created after this timestamp (e.g. 2024-01-01T00:00:00)
+        #[arg(long)]
+        since: Option<String>,
+        /// Only events created before this timestamp
+        #[arg(long)]
+        until: Option<String>,
+        /// Max number of events to replay
+        #[arg(short, long, default_value = "100")]
+        limit: i32,
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Path to config file
+        #[arg(short, long, default_value = "qhook.yaml")]
+        config: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -306,6 +330,120 @@ impl Args {
                             &event.created_at[..event.created_at.len().min(19)],
                         );
                     }
+                    Ok(())
+                }
+                EventsAction::Replay {
+                    source,
+                    event_type,
+                    since,
+                    until,
+                    limit,
+                    yes,
+                    config,
+                } => {
+                    let cfg = Config::load(&config)?;
+                    let db = crate::db::Database::connect(&cfg.database).await?;
+                    db.migrate().await?;
+
+                    let events = db
+                        .list_events_filtered(
+                            source.as_deref(),
+                            event_type.as_deref(),
+                            since.as_deref(),
+                            until.as_deref(),
+                            limit,
+                        )
+                        .await?;
+
+                    if events.is_empty() {
+                        println!("No matching events found.");
+                        return Ok(());
+                    }
+
+                    // Count how many jobs would be created
+                    let mut total_jobs = 0;
+                    for event in &events {
+                        let handler_count = cfg
+                            .handlers
+                            .iter()
+                            .filter(|(_, h)| {
+                                h.source == event.source
+                                    && (h.events.is_empty()
+                                        || h.events.iter().any(|e| {
+                                            crate::api::event_matches(e, &event.event_type)
+                                        }))
+                            })
+                            .filter(|(_, h)| {
+                                h.filter
+                                    .as_ref()
+                                    .is_none_or(|f| crate::api::evaluate_filter(&event.payload, f))
+                            })
+                            .count();
+                        total_jobs += handler_count;
+                    }
+
+                    println!(
+                        "Found {} event(s), will create {} job(s).",
+                        events.len(),
+                        total_jobs
+                    );
+
+                    if !yes {
+                        print!("Proceed? [y/N] ");
+                        use std::io::Write;
+                        std::io::stdout().flush()?;
+                        let mut input = String::new();
+                        std::io::stdin().read_line(&mut input)?;
+                        if !input.trim().eq_ignore_ascii_case("y") {
+                            println!("Aborted.");
+                            return Ok(());
+                        }
+                    }
+
+                    let mut created = 0;
+                    for event in &events {
+                        let matching_handlers: Vec<_> = cfg
+                            .handlers
+                            .iter()
+                            .filter(|(_, h)| {
+                                h.source == event.source
+                                    && (h.events.is_empty()
+                                        || h.events.iter().any(|e| {
+                                            crate::api::event_matches(e, &event.event_type)
+                                        }))
+                            })
+                            .filter(|(_, h)| {
+                                h.filter
+                                    .as_ref()
+                                    .is_none_or(|f| crate::api::evaluate_filter(&event.payload, f))
+                            })
+                            .collect();
+
+                        for (handler_name, handler) in &matching_handlers {
+                            let job_id = ulid::Ulid::new().to_string();
+                            let max_attempts = handler
+                                .retry
+                                .as_ref()
+                                .map(|r| r.max)
+                                .unwrap_or(cfg.delivery.default_retry.max);
+
+                            db.insert_job(
+                                &job_id,
+                                &event.id,
+                                handler_name,
+                                &handler.url,
+                                max_attempts,
+                            )
+                            .await?;
+                            created += 1;
+                        }
+                    }
+
+                    println!(
+                        "Replayed {} event(s), created {} job(s).",
+                        events.len(),
+                        created
+                    );
                     Ok(())
                 }
             },

@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     #[serde(default)]
     pub database: DatabaseConfig,
@@ -229,7 +229,7 @@ fn default_alert_on() -> Vec<String> {
     vec!["dlq".into(), "verification_failure".into()]
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct DatabaseConfig {
     #[serde(default = "default_driver")]
     pub driver: String,
@@ -256,7 +256,7 @@ fn default_driver() -> String {
     "sqlite".into()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
@@ -304,14 +304,14 @@ fn default_port() -> u16 {
     8888
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, Clone)]
 pub struct ApiConfig {
     pub auth_token: Option<String>,
     /// Bearer token for the /metrics endpoint. If not set, the endpoint is open.
     pub metrics_auth_token: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
 pub struct DeliveryConfig {
     pub signing_secret: Option<String>,
@@ -335,7 +335,7 @@ fn default_timeout() -> String {
     "30s".into()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
 pub struct RetryConfig {
     #[serde(default = "default_max_retries")]
@@ -366,7 +366,7 @@ fn default_interval() -> String {
     "30s".into()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct SourceConfig {
     #[serde(rename = "type")]
     pub source_type: String,
@@ -380,7 +380,7 @@ pub struct SourceConfig {
     pub timezone: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
 pub struct HandlerConfig {
     pub source: String,

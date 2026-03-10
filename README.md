@@ -29,7 +29,7 @@ Simple:                           Multi-step:
 - **Zero infrastructure.** Single binary, SQLite for dev, Postgres for production. No Redis, no message broker.
 - **Webhook verification built in.** GitHub, Stripe, Shopify, PagerDuty, Grafana, Terraform Cloud, GitLab, HMAC, AWS SNS X.509.
 - **From one action to a pipeline.** Start with a single HTTP call; grow into multi-step workflows with branching, parallelism, and rollback — same YAML, same engine.
-- **Production ready.** Prometheus metrics, health checks, Slack/Discord alerts, rate limiting, structured logging.
+- **Production ready.** Prometheus metrics, health checks, Slack/Discord alerts, rate limiting, circuit breaker, OpenTelemetry tracing, structured logging.
 
 > See [Why qhook?](https://totte-dev.github.io/qhook/why-qhook) for detailed comparisons and use cases.
 
@@ -125,6 +125,12 @@ git clone https://github.com/totte-dev/qhook.git && cd qhook
 cargo build --release
 ```
 
+Kubernetes is not required, but if you already run a cluster, a Helm chart is also available:
+
+```bash
+helm install qhook ./charts/qhook
+```
+
 ## CLI
 
 ```bash
@@ -134,6 +140,7 @@ qhook validate                     # Validate config
 qhook jobs list --status dead      # List dead-letter jobs
 qhook jobs retry                   # Retry all dead jobs
 qhook events list                  # List received events
+qhook events replay --source stripe # Replay events for matching handlers
 qhook workflow-runs list           # List workflow runs
 qhook workflow-runs redrive <ID>   # Redrive a failed workflow
 ```
