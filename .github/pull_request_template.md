@@ -11,3 +11,13 @@
 - [ ] `cargo test` passes
 - [ ] `bash tests/e2e.sh` passes (if applicable)
 - [ ] New tests added for new functionality
+
+## Documentation (if applicable)
+
+- [ ] `CHANGELOG.md` updated (add to `[Unreleased]` section)
+- [ ] `docs/cli.md` updated (new CLI commands/flags)
+- [ ] `docs/configuration.md` updated (new config fields)
+- [ ] `docs/guides/monitoring.md` updated (new metrics)
+- [ ] `docs/openapi.yaml` updated (new/changed endpoints)
+- [ ] `README.md` updated (significant features only)
+- [ ] `charts/qhook/Chart.yaml` appVersion matches `Cargo.toml` version
