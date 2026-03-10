@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.3.0] - 2026-03-10
 
 ### Added
 - **Circuit breaker**: Per-handler circuit breaker. Opens after 5 consecutive failures, closes after 60s cooldown with half-open probe. New metrics: `qhook_circuit_breaker_opened_total`, `qhook_circuit_breaker_rejected_total`.
