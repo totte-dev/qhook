@@ -378,6 +378,9 @@ pub struct SourceConfig {
     pub schedule: Option<String>,
     /// Timezone for cron evaluation (e.g., "America/New_York"). Defaults to UTC.
     pub timezone: Option<String>,
+    /// JSON Schema for validating incoming event payloads.
+    /// Events that fail validation are rejected with 400.
+    pub schema: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -889,6 +892,7 @@ mod tests {
                 skip_verify: false,
                 schedule: None,
                 timezone: None,
+                schema: None,
             },
         );
         let mut handlers = HashMap::new();
@@ -925,6 +929,7 @@ mod tests {
                 skip_verify: false,
                 schedule: None,
                 timezone: None,
+                schema: None,
             },
         );
         let mut handlers = HashMap::new();
@@ -987,6 +992,7 @@ mod tests {
                 skip_verify: false,
                 schedule: None,
                 timezone: None,
+                schema: None,
             },
         );
         let config = make_config(HashMap::new(), sources);
@@ -1005,6 +1011,7 @@ mod tests {
                 skip_verify: false,
                 schedule: None,
                 timezone: None,
+                schema: None,
             },
         );
         let mut handlers = HashMap::new();
@@ -1043,6 +1050,7 @@ mod tests {
                 skip_verify: false,
                 schedule: None,
                 timezone: None,
+                schema: None,
             },
         );
         let mut handlers = HashMap::new();
@@ -1080,6 +1088,7 @@ mod tests {
                 skip_verify: false,
                 schedule: None,
                 timezone: None,
+                schema: None,
             },
         );
         let mut handlers = HashMap::new();
@@ -1117,6 +1126,7 @@ mod tests {
                 skip_verify: false,
                 schedule: None,
                 timezone: None,
+                schema: None,
             },
         );
         let mut handlers = HashMap::new();
@@ -1165,6 +1175,7 @@ mod tests {
                 skip_verify: false,
                 schedule: None,
                 timezone: None,
+                schema: None,
             },
         );
         let config = make_config(HashMap::new(), sources);
@@ -1184,6 +1195,7 @@ mod tests {
                 skip_verify: false,
                 schedule: None,
                 timezone: None,
+                schema: None,
             },
         );
         let config = make_config(HashMap::new(), sources);
@@ -1202,6 +1214,7 @@ mod tests {
                 skip_verify: false,
                 schedule: None,
                 timezone: None,
+                schema: None,
             },
         );
         let mut handlers = HashMap::new();

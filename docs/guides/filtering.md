@@ -29,6 +29,12 @@ handlers:
 | `$.path <= value` | `$.priority <= 5` | Less than or equal (numeric) |
 | `$.path < value` | `$.age < 18` | Less than (numeric) |
 | `$.path in [a, b]` | `$.type in [created, updated]` | Set membership |
+| `$.path contains value` | `$.name contains admin` | Substring match (strings) or array membership |
+| `$.path starts_with value` | `$.email starts_with admin` | String prefix match |
+| `$.path ends_with value` | `$.file ends_with .json` | String suffix match |
+| `$.path matches <regex>` | `$.id matches ^ord_[0-9]+$` | Regex match |
+| `$.path exists` | `$.metadata.tag exists` | Field existence (non-null) |
+| `not <expr>` | `not $.status == draft` | Logical negation of any expression |
 | `$.path` | `$.data.verified` | Truthy (exists, not null/false/0/"") |
 
 ### Examples
@@ -48,6 +54,26 @@ filter: "$.data.customer.verified"
 
 # Nested paths
 filter: "$.data.object.customer.email == user@example.com"
+
+# Substring match
+filter: "$.message contains error"
+
+# Array membership (value exists in an array field)
+filter: "$.tags contains urgent"
+
+# String prefix/suffix
+filter: "$.email starts_with admin"
+filter: "$.filename ends_with .csv"
+
+# Regex match
+filter: "$.order_id matches ^ORD-[0-9]{6}$"
+
+# Field existence
+filter: "$.metadata.trace_id exists"
+
+# Negation (works with any expression)
+filter: "not $.status == draft"
+filter: "not $.env in [staging, dev]"
 ```
 
 ## Payload Transformation
