@@ -9,19 +9,20 @@ qhook runs as a long-running process. Choose a platform that supports persistent
 
 ## Platform Comparison
 
-| | AWS ECS | Fly.io | Railway | Render |
-|---|---|---|---|---|
-| **Best for** | Production at scale | Simple deployment | Quick prototyping | Easy setup |
-| **Database** | RDS Postgres | Fly Postgres | Railway Postgres | Render Postgres |
-| **SQLite support** | EFS volume | Fly Volume | Limited | Disk (Standard+) |
-| **TLS** | ALB (auto) | Built-in | Built-in | Built-in |
-| **Multi-instance** | Yes (Fargate) | Yes | No | No |
-| **Cost** | Pay-per-use | From $0 | From $0 | From $0 |
-| **Custom domain** | Route 53 / ALB | `fly certs` | Dashboard | Dashboard |
+| | AWS ECS | Kubernetes | Fly.io | Railway | Render |
+|---|---|---|---|---|---|
+| **Best for** | Production at scale | K8s-native infra | Simple deployment | Quick prototyping | Easy setup |
+| **Database** | RDS Postgres | Any Postgres | Fly Postgres | Railway Postgres | Render Postgres |
+| **SQLite support** | EFS volume | PVC | Fly Volume | Limited | Disk (Standard+) |
+| **TLS** | ALB (auto) | Ingress controller | Built-in | Built-in | Built-in |
+| **Multi-instance** | Yes (Fargate) | Yes (HPA) | Yes | No | No |
+| **Cost** | Pay-per-use | Cluster-dependent | From $0 | From $0 | From $0 |
+| **Custom domain** | Route 53 / ALB | Ingress | `fly certs` | Dashboard | Dashboard |
 
 ## Guides
 
 - [AWS (ECS Fargate / EC2)](aws.md) -- production-grade with ALB, RDS, and optional nginx
+- [Kubernetes (Helm)](kubernetes.md) -- Helm chart with ConfigMap, Ingress, PVC, and HPA
 - [Fly.io](flyio.md) -- simple deployment with Fly Postgres or SQLite volumes
 - [Railway](railway.md) -- quick prototyping with auto-detected Dockerfile
 - [Render](render.md) -- easy dashboard setup with auto-deploy from GitHub

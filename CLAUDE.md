@@ -9,9 +9,28 @@ qhook is a lightweight event gateway with built-in queue and retry. Rust (axum +
 ### 1. Task Management
 
 - **Tasks live in `docs/private/TASKS.md`** (gitignored, local only).
-- **Update `CHANGELOG.md`** when completing features (Keep a Changelog format).
-- **Update `README.md` and docs** when adding features — new config options, endpoints, sections as needed.
-- **Update `docs/openapi.yaml`** when adding or changing HTTP endpoints — keep the OpenAPI spec in sync with the implementation.
+- **After implementing a feature, run through the doc checklist below.**
+- CI runs `scripts/check-docs.sh` to verify doc sync — fix any errors before merging.
+
+### Doc Update Checklist (per feature)
+
+After implementing any feature, update **all applicable** items:
+
+- [ ] `CHANGELOG.md` — add entry to `[Unreleased]` section
+- [ ] `docs/cli.md` — new CLI commands, flags, env vars
+- [ ] `docs/configuration.md` — new config fields or behaviors
+- [ ] `docs/guides/monitoring.md` — new Prometheus metrics
+- [ ] `docs/openapi.yaml` — new or changed HTTP endpoints
+- [ ] `README.md` — significant features only (feature list, CLI table, install section)
+- [ ] `charts/qhook/Chart.yaml` — `appVersion` matches `Cargo.toml` version
+- [ ] `CLAUDE.md` — project structure, conventions, build commands if changed
+
+### Release Checklist
+
+- [ ] `Cargo.toml` version bumped
+- [ ] `charts/qhook/Chart.yaml` `appVersion` updated
+- [ ] `CHANGELOG.md` — rename `[Unreleased]` to `[x.y.z] - date`
+- [ ] Run `workflow_dispatch` on `release.yml` (handles: tag, GitHub Release, crates.io, Docker image)
 
 ### 2. Test-Driven Development (MANDATORY)
 
@@ -45,6 +64,7 @@ docker rm -f localstack-qhook
 ```bash
 cargo build            # debug
 cargo build --release  # release
+cargo build --release --features otel  # with OpenTelemetry tracing
 ```
 
 ## Project Structure
@@ -61,7 +81,10 @@ src/
   queue.rs      — Job worker (poll, deliver, retry, DLQ)
   grpc.rs       — gRPC output (prost types, tonic client, no codegen)
   verify.rs     — Signature verification (GitHub, Stripe, Shopify, HMAC, SNS X.509)
-  cli.rs        — CLI commands (start, init, validate, jobs, events)
+  cli.rs        — CLI commands (start, init, validate, jobs, events, replay)
+  alert.rs      — Alert system (Slack, Discord, generic webhook)
+charts/
+  qhook/        — Helm chart (Deployment, Service, ConfigMap, Ingress, PVC, HPA)
 tests/
   e2e.sh        — E2E tests (26 tests)
   e2e_sns.sh    — SNS E2E tests with LocalStack (8 tests)
