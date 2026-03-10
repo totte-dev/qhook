@@ -711,10 +711,10 @@ impl Args {
                         .await?;
                     for job in &jobs {
                         let status_color = match job.status.as_str() {
-                            "completed" => "\x1b[32m",  // green
-                            "dead" => "\x1b[31m",       // red
-                            "retryable" => "\x1b[33m",  // yellow
-                            _ => "\x1b[37m",            // white
+                            "completed" => "\x1b[32m", // green
+                            "dead" => "\x1b[31m",      // red
+                            "retryable" => "\x1b[33m", // yellow
+                            _ => "\x1b[37m",           // white
                         };
                         let error_info = job
                             .last_error
