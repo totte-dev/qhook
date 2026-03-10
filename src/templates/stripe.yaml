@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://totte-dev.github.io/qhook/schema.json
+# qhook.yaml — Stripe webhook template
+
+database:
+  driver: sqlite
+
+server:
+  port: 8888
+  allow_private_urls: true  # remove in production
+
+sources:
+  stripe:
+    type: webhook
+    verify: stripe
+    secret: ${STRIPE_WEBHOOK_SECRET}
+
+handlers:
+  checkout-completed:
+    source: stripe
+    events: [checkout.session.completed]
+    url: http://localhost:3000/fulfill
+    retry:
+      max: 5
+
+  payment-failed:
+    source: stripe
+    events: [invoice.payment_failed]
+    url: http://localhost:3000/handle-failure

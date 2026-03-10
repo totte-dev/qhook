@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://totte-dev.github.io/qhook/schema.json
+# qhook.yaml — GitHub webhook template
+
+database:
+  driver: sqlite
+
+server:
+  port: 8888
+  allow_private_urls: true  # remove in production
+
+sources:
+  github:
+    type: webhook
+    verify: github
+    secret: ${GITHUB_WEBHOOK_SECRET}
+
+handlers:
+  on-push:
+    source: github
+    events: [push]
+    url: http://localhost:3000/deploy
+    filter: "$.ref == refs/heads/main"
+    retry:
+      max: 3
+
+  on-pr:
+    source: github
+    events: [pull_request]
+    url: http://localhost:3000/pr-review

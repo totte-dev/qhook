@@ -10,7 +10,7 @@ title: Home
 - **Zero infrastructure.** Single binary, SQLite for dev, Postgres for production.
 - **Webhook verification built in.** GitHub, Stripe, Shopify, PagerDuty, Grafana, Terraform Cloud, GitLab, HMAC, AWS SNS X.509.
 - **From one action to a pipeline.** Single HTTP call or multi-step workflow with branching, parallelism, and rollback.
-- **Production ready.** Prometheus metrics, health checks, alerts, CloudEvents, gRPC output.
+- **Production ready.** Prometheus metrics, health checks, alerts, CloudEvents.
 
 ## Quick Start
 
@@ -89,9 +89,10 @@ qhook start
 | [AWS SNS](guides/sns.md) | Receive events from SNS topics |
 | [Workflows](guides/workflows.md) | Multi-step pipelines with error routing |
 | [Filtering & Transformation](guides/filtering.md) | Event filtering and payload reshaping |
-| [gRPC Output](guides/grpc.md) | Deliver events via gRPC |
 | [Monitoring](guides/monitoring.md) | Prometheus metrics, health checks, alerts |
 | [Security](guides/security.md) | Security features and best practices |
+| [Local Development](guides/local-development.md) | Dev mode, echo endpoint, test events, tunnels |
+| [Database Schema](guides/database-schema.md) | Tables, columns, indexes, and conventions |
 | [Error Reference](guides/error-reference.md) | HTTP status codes and error messages |
 | [API Spec](openapi.yaml) | OpenAPI 3.1 specification |
 
@@ -102,7 +103,6 @@ qhook start
 | Platform | Guide |
 |----------|-------|
 | AWS (ECS / EC2) | [deploy/aws.md](deploy/aws.md) |
-| Kubernetes (Helm) | [deploy/kubernetes.md](deploy/kubernetes.md) |
 | Fly.io | [deploy/flyio.md](deploy/flyio.md) |
 | Railway | [deploy/railway.md](deploy/railway.md) |
 | Render | [deploy/render.md](deploy/render.md) |

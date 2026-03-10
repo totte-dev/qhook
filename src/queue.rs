@@ -132,16 +132,12 @@ pub struct Worker {
     rate_limiters: HashMap<String, Arc<Semaphore>>,
     /// Per-handler payload transform templates.
     transforms: Arc<HashMap<String, String>>,
-    /// Per-handler type overrides (only non-"http" entries).
-    handler_types: Arc<HashMap<String, String>>,
     /// Per-handler custom HTTP headers.
     handler_headers: Arc<HashMap<String, HashMap<String, String>>>,
     /// Per-handler HTTP method overrides (only non-"POST" entries).
     handler_methods: Arc<HashMap<String, String>>,
     /// Per-handler circuit breakers.
     circuit_breakers: HashMap<String, Arc<CircuitBreaker>>,
-    /// Lazily created gRPC channels keyed by URL.
-    grpc_channels: Arc<std::sync::Mutex<HashMap<String, tonic::transport::Channel>>>,
     /// Workflow configs for step progression.
     workflows: Arc<HashMap<String, config::WorkflowConfig>>,
     /// Default retry config.
@@ -158,7 +154,6 @@ impl Worker {
         shutdown: tokio::sync::watch::Receiver<bool>,
         handler_rate_limits: HashMap<String, u32>,
         handler_transforms: HashMap<String, String>,
-        handler_types: HashMap<String, String>,
         handler_headers: HashMap<String, HashMap<String, String>>,
         handler_methods: HashMap<String, String>,
         workflows: HashMap<String, config::WorkflowConfig>,
@@ -199,10 +194,8 @@ impl Worker {
             rate_limiters,
             circuit_breakers,
             transforms: Arc::new(handler_transforms),
-            handler_types: Arc::new(handler_types),
             handler_headers: Arc::new(handler_headers),
             handler_methods: Arc::new(handler_methods),
-            grpc_channels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             workflows: Arc::new(workflows),
             default_retry_max,
         }
@@ -288,10 +281,8 @@ impl Worker {
                         let metrics = self.metrics.clone();
                         let alerter = self.alerter.clone();
                         let transforms = self.transforms.clone();
-                        let handler_types = self.handler_types.clone();
                         let handler_headers = self.handler_headers.clone();
                         let handler_methods = self.handler_methods.clone();
-                        let grpc_channels = self.grpc_channels.clone();
                         let workflows = self.workflows.clone();
                         let default_retry_max = self.default_retry_max;
                         let rate_sem = self.rate_limiters.get(&job.handler).cloned();
@@ -321,7 +312,7 @@ impl Worker {
                                 None
                             };
 
-                            deliver_job(&db, &http, &metrics, &alerter, &transforms, &handler_types, &handler_headers, &handler_methods, &grpc_channels, &workflows, default_retry_max, &job, cb.as_deref()).await;
+                            deliver_job(&db, &http, &metrics, &alerter, &transforms, &handler_headers, &handler_methods, &workflows, default_retry_max, &job, cb.as_deref()).await;
                             drop(permit);
 
                             // Hold rate permit for 1s to enforce per-second limit
@@ -404,10 +395,8 @@ async fn deliver_job(
     metrics: &Metrics,
     alerter: &SharedAlerter,
     transforms: &HashMap<String, String>,
-    handler_types: &HashMap<String, String>,
     handler_headers: &HashMap<String, HashMap<String, String>>,
     handler_methods: &HashMap<String, String>,
-    grpc_channels: &std::sync::Mutex<HashMap<String, tonic::transport::Channel>>,
     workflows: &HashMap<String, config::WorkflowConfig>,
     default_retry_max: u32,
     job: &crate::db::JobRow,
@@ -571,7 +560,7 @@ async fn deliver_job(
     }
 
     // For workflow jobs, use step_input as payload; for regular jobs, use event payload
-    let (transform, is_grpc, custom_headers, method) = if is_workflow {
+    let (transform, custom_headers, method) = if is_workflow {
         // Get custom headers and method from step/branch config
         let workflow_name = job.handler.split('/').next().unwrap_or("");
         let step_name = job.handler.split('/').nth(1).unwrap_or("");
@@ -596,11 +585,10 @@ async fn deliver_job(
             let m = step.map(|s| s.method.as_str()).unwrap_or("POST");
             (h.cloned(), m.to_string())
         };
-        (None, false, headers, method)
+        (None, headers, method)
     } else {
         (
             transforms.get(&job.handler).map(|s| s.as_str()),
-            handler_types.get(&job.handler).is_some_and(|t| t == "grpc"),
             handler_headers.get(&job.handler).cloned(),
             handler_methods
                 .get(&job.handler)
@@ -615,10 +603,8 @@ async fn deliver_job(
         deliver(
             db,
             http,
-            grpc_channels,
             job,
             transform,
-            is_grpc,
             custom_headers.as_ref(),
             &method,
         )
@@ -2301,14 +2287,11 @@ fn error_type_matches(errors: &[config::ErrorType], error_type: &str) -> bool {
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn deliver(
     db: &Database,
     http: &reqwest::Client,
-    grpc_channels: &std::sync::Mutex<HashMap<String, tonic::transport::Channel>>,
     job: &crate::db::JobRow,
     transform: Option<&str>,
-    is_grpc: bool,
     custom_headers: Option<&HashMap<String, String>>,
     method: &str,
 ) -> Result<u16> {
@@ -2320,11 +2303,7 @@ async fn deliver(
         None => raw_payload,
     };
 
-    if is_grpc {
-        deliver_grpc(grpc_channels, job, &payload, &headers_json).await
-    } else {
-        deliver_http(http, job, &payload, &headers_json, custom_headers, method).await
-    }
+    deliver_http(http, job, &payload, &headers_json, custom_headers, method).await
 }
 
 async fn deliver_http(
@@ -2376,71 +2355,6 @@ async fn deliver_http(
         request.body(payload.to_string()).send().await?
     };
     Ok(response.status().as_u16())
-}
-
-async fn deliver_grpc(
-    grpc_channels: &std::sync::Mutex<HashMap<String, tonic::transport::Channel>>,
-    job: &crate::db::JobRow,
-    payload: &str,
-    headers_json: &Option<String>,
-) -> Result<u16> {
-    // Get or create channel for this URL
-    let channel = {
-        let mut channels = grpc_channels.lock().unwrap_or_else(|e| e.into_inner());
-        match channels.get(&job.url) {
-            Some(ch) => ch.clone(),
-            None => {
-                let ch = crate::grpc::create_channel(&job.url)?;
-                channels.insert(job.url.clone(), ch.clone());
-                ch
-            }
-        }
-    };
-
-    // Build metadata from CloudEvents headers
-    let mut metadata = HashMap::new();
-    metadata.insert("job_id".to_string(), job.id.clone());
-    if let Some(hj) = headers_json
-        && let Ok(headers) = serde_json::from_str::<HashMap<String, String>>(hj)
-    {
-        for (key, value) in headers {
-            if key.starts_with("ce-") {
-                metadata.insert(key, value);
-            }
-        }
-    }
-
-    // Get event_type from the event
-    let event_type = metadata
-        .get("ce-type")
-        .cloned()
-        .unwrap_or_else(|| "event".to_string());
-
-    let request = crate::grpc::DeliverRequest {
-        event_id: job.event_id.clone(),
-        event_type,
-        handler: job.handler.clone(),
-        payload: payload.to_string(),
-        metadata,
-        attempt: job.attempt + 1,
-    };
-
-    match crate::grpc::deliver(&channel, request).await {
-        Ok(response) => {
-            if response.success {
-                Ok(200)
-            } else {
-                tracing::warn!(
-                    job_id = job.id,
-                    handler = job.handler,
-                    message = response.message,
-                    "gRPC handler returned failure"
-                );
-                Ok(500) // Treat as server error for retry logic
-            }
-        }
-        Err(e) => Err(e),
-    }
 }
 
 /// Handle delivery failure. Returns `true` if the job was moved to DLQ.

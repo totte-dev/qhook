@@ -7,6 +7,46 @@ title: Configuration
 
 qhook is configured via a single YAML file. Environment variables are expanded using `${VAR}` or `${VAR:-default}` syntax.
 
+## Environment Overlays
+
+Use `--env` to manage environment-specific config without duplicating the entire file:
+
+```bash
+qhook start --env local        # merges qhook.local.yaml on top of qhook.yaml
+qhook start --env production   # merges qhook.production.yaml
+QHOOK_ENV=staging qhook start  # same via environment variable
+```
+
+**Resolution order:**
+1. Load `.env.<name>` (if exists) — sets environment variables (does not override existing ones)
+2. Read base config (`qhook.yaml`)
+3. Deep merge `qhook.<name>.yaml` on top (if exists) — overlay values override base values, mappings are merged recursively
+4. Expand `${VAR}` references and validate
+
+```yaml
+# qhook.yaml (base)
+database:
+  driver: sqlite
+handlers:
+  payment:
+    source: stripe
+    url: http://localhost:3000/payment
+    retry: { max: 3 }
+```
+
+```yaml
+# qhook.production.yaml (overlay — only differences)
+database:
+  driver: postgres
+  url: ${DATABASE_URL}
+handlers:
+  payment:
+    url: https://api.internal/payment
+    retry: { max: 8 }
+```
+
+`qhook init` generates both `qhook.yaml` and `qhook.local.yaml` automatically.
+
 ## Full Example
 
 ```yaml
@@ -63,7 +103,7 @@ handlers:
     source: stripe
     events: [checkout.session.completed, invoice.paid]
     url: http://backend:3000/jobs/payment
-    type: http                      # http (default) or grpc
+    type: http
     method: POST                    # GET, POST (default), PUT, PATCH, DELETE
     retry: { max: 8 }
     timeout: 60s
@@ -208,7 +248,7 @@ Each handler is a named entry under `handlers:`.
 | `source` | string | required | Source name to subscribe to |
 | `events` | list | `[]` (all) | Event types to match. Empty = all events from this source |
 | `url` | string | required | Delivery target URL |
-| `type` | string | `http` | Delivery protocol: `http` or `grpc` |
+| `type` | string | `http` | Delivery protocol |
 | `method` | string | `POST` | HTTP method: `GET`, `POST`, `PUT`, `PATCH`, `DELETE` |
 | `retry` | object | - | Override `default_retry` for this handler |
 | `timeout` | duration | - | Override delivery timeout for this handler |
@@ -301,7 +341,7 @@ qhook validate -c /path/to/qhook.yaml
 Checks performed:
 - YAML syntax
 - Source type is valid (`webhook`, `event`, `sns`, `cron`)
-- Handler type is valid (`http`, `grpc`)
+- Handler type is valid (`http`)
 - HTTP method is valid (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`)
 - Handler references an existing source
 - `verify` requires `secret` to be set (non-empty)
