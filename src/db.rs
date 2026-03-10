@@ -504,6 +504,66 @@ impl Database {
         Ok(rows)
     }
 
+    /// List events with optional filters for replay.
+    pub async fn list_events_filtered(
+        &self,
+        source: Option<&str>,
+        event_type: Option<&str>,
+        since: Option<&str>,
+        until: Option<&str>,
+        limit: i32,
+    ) -> Result<Vec<EventRowFull>> {
+        // Build query dynamically based on filters
+        let mut conditions = Vec::new();
+        let mut param_idx = 1;
+
+        if source.is_some() {
+            conditions.push(format!("source = ${param_idx}"));
+            param_idx += 1;
+        }
+        if event_type.is_some() {
+            conditions.push(format!("event_type = ${param_idx}"));
+            param_idx += 1;
+        }
+        if since.is_some() {
+            conditions.push(format!("created_at >= ${param_idx}"));
+            param_idx += 1;
+        }
+        if until.is_some() {
+            conditions.push(format!("created_at <= ${param_idx}"));
+            param_idx += 1;
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+
+        let sql = format!(
+            "SELECT id, source, event_type, payload, headers, unique_key, created_at \
+             FROM events{where_clause} ORDER BY created_at ASC LIMIT ${param_idx}"
+        );
+
+        let mut query = sqlx::query_as::<_, EventRowFull>(&sql);
+        if let Some(v) = source {
+            query = query.bind(v.to_string());
+        }
+        if let Some(v) = event_type {
+            query = query.bind(v.to_string());
+        }
+        if let Some(v) = since {
+            query = query.bind(v.to_string());
+        }
+        if let Some(v) = until {
+            query = query.bind(v.to_string());
+        }
+        query = query.bind(limit);
+
+        let rows = query.fetch_all(&self.pool).await?;
+        Ok(rows)
+    }
+
     pub async fn retry_dead_jobs(&self) -> Result<u64> {
         let now = Utc::now()
             .naive_utc()
@@ -1106,6 +1166,17 @@ pub struct EventRow {
     pub id: String,
     pub source: String,
     pub event_type: String,
+    pub unique_key: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct EventRowFull {
+    pub id: String,
+    pub source: String,
+    pub event_type: String,
+    pub payload: String,
+    pub headers: Option<String>,
     pub unique_key: Option<String>,
     pub created_at: String,
 }
