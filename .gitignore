@@ -24,6 +24,11 @@ Thumbs.db
 # Docker
 docker-compose.override.yaml
 
+# Generated SDKs
+sdks/python/
+sdks/go/
+sdks/typescript/
+
 # Private docs
 docs/private/
 .claude/
