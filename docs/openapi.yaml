@@ -1,0 +1,533 @@
+openapi: 3.1.0
+info:
+  title: qhook API
+  description: |
+    Lightweight event gateway with built-in queue, retry, and workflow engine.
+
+    qhook receives webhooks and events via HTTP, queues them, and delivers to
+    configured handlers with retry and dead-letter support.
+  version: 0.2.2
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  contact:
+    url: https://github.com/totte-dev/qhook
+
+servers:
+  - url: "{scheme}://{host}:{port}"
+    description: qhook server
+    variables:
+      scheme:
+        default: http
+        enum: [http, https]
+      host:
+        default: localhost
+      port:
+        default: "8888"
+
+tags:
+  - name: Ingest
+    description: Event ingestion endpoints
+  - name: Callback
+    description: Workflow callback endpoint
+  - name: Operations
+    description: Health check and metrics
+
+paths:
+  /webhooks/{source}:
+    post:
+      tags: [Ingest]
+      summary: Receive a webhook
+      description: |
+        Receives a webhook payload from an external provider (e.g. GitHub, Stripe, Shopify).
+        Signature verification is performed if configured for the source.
+
+        **Event type extraction order:**
+        1. `ce-type` header (CloudEvents binary mode)
+        2. `type` field in JSON body (CloudEvents structured mode)
+        3. Provider-specific logic (Stripe `$.type`, GitHub `$.action`, Shopify `$.topic`)
+        4. Fallback: `"event"`
+      security: []
+      operationId: receiveWebhook
+      parameters:
+        - $ref: "#/components/parameters/source"
+        - name: X-Hub-Signature-256
+          in: header
+          description: GitHub HMAC-SHA256 signature
+          schema:
+            type: string
+            example: sha256=abc123...
+        - name: Stripe-Signature
+          in: header
+          description: Stripe signature with timestamp
+          schema:
+            type: string
+            example: t=1234567890,v1=abc123...
+        - name: X-Shopify-Hmac-SHA256
+          in: header
+          description: Shopify Base64-encoded HMAC-SHA256
+          schema:
+            type: string
+        - name: ce-type
+          in: header
+          description: CloudEvents event type (overrides provider-specific extraction)
+          schema:
+            type: string
+        - name: ce-specversion
+          in: header
+          description: CloudEvents spec version
+          schema:
+            type: string
+            example: "1.0"
+        - name: ce-source
+          in: header
+          description: CloudEvents source URI
+          schema:
+            type: string
+        - name: ce-id
+          in: header
+          description: CloudEvents event ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Event received or duplicate ignored
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum:
+                  - Event received
+                  - Duplicate event ignored
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Signature verification failed
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid signature
+        "404":
+          $ref: "#/components/responses/SourceNotFound"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /events/{event_type}:
+    post:
+      tags: [Ingest]
+      summary: Send an event
+      description: |
+        Sends an event directly to qhook. Used for application-generated events
+        (as opposed to external webhooks).
+
+        If a `ce-type` header is present, it overrides the path parameter.
+        Requires Bearer token authentication if `api.auth_token` is configured.
+      operationId: sendEvent
+      parameters:
+        - name: event_type
+          in: path
+          required: true
+          description: Event type identifier
+          schema:
+            type: string
+          example: order.created
+        - name: ce-type
+          in: header
+          description: CloudEvents event type (overrides path parameter)
+          schema:
+            type: string
+        - name: ce-specversion
+          in: header
+          description: CloudEvents spec version
+          schema:
+            type: string
+        - name: ce-source
+          in: header
+          description: CloudEvents source URI
+          schema:
+            type: string
+        - name: ce-id
+          in: header
+          description: CloudEvents event ID
+          schema:
+            type: string
+      security:
+        - bearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+            example:
+              order_id: "ORD-123"
+              customer: "cust_456"
+              total: 99.99
+          application/cloudevents+json:
+            schema:
+              type: object
+              properties:
+                specversion:
+                  type: string
+                  example: "1.0"
+                type:
+                  type: string
+                  example: order.created
+                source:
+                  type: string
+                data:
+                  type: object
+                  additionalProperties: true
+              required: [specversion, type, source]
+      responses:
+        "202":
+          description: Event accepted
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Event accepted
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Missing or invalid Bearer token
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid token
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /sns/{source}:
+    post:
+      tags: [Ingest]
+      summary: Receive an AWS SNS message
+      description: |
+        Receives AWS SNS messages (Notification, SubscriptionConfirmation, UnsubscribeConfirmation).
+        Subscription confirmations are auto-confirmed. Notification payloads are unwrapped
+        from the SNS envelope and processed as events.
+
+        X.509 signature verification is performed unless `skip_verify: true` is set on the source.
+      security: []
+      operationId: receiveSns
+      parameters:
+        - $ref: "#/components/parameters/source"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SnsMessage"
+      responses:
+        "200":
+          description: Message processed
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum:
+                  - Event received
+                  - Duplicate event ignored
+                  - Subscription confirmed
+                  - Unsubscribe acknowledged
+        "400":
+          description: Invalid SNS message
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum:
+                  - Invalid UTF-8
+                  - Invalid SNS message
+                  - Unknown message type
+                  - Invalid SubscribeURL
+                  - Missing SubscribeURL
+        "401":
+          description: SNS signature verification failed
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid signature
+        "404":
+          $ref: "#/components/responses/SourceNotFound"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /callback/{token}:
+    post:
+      tags: [Callback]
+      summary: Resume a waiting workflow step
+      description: |
+        Resumes a workflow step that is waiting for a callback. The token is a
+        cryptographic identifier generated when the callback step was created.
+
+        The request body becomes the step output, available to subsequent steps
+        via response chaining.
+
+        Returns a uniform 404 for all failure cases (invalid, expired, or
+        already-used tokens) to prevent token enumeration.
+      security: []
+      operationId: callback
+      parameters:
+        - name: token
+          in: path
+          required: true
+          description: Callback token (52-character ULID pair)
+          schema:
+            type: string
+            minLength: 26
+          example: 01JEXAMPLETOKEN00000000000001JEXAMPLETOKEN0000000000000
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+            example:
+              approved: true
+              reviewer: "admin@example.com"
+      responses:
+        "200":
+          description: Callback received
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  message:
+                    type: string
+                    example: callback received
+        "404":
+          description: Token not found, expired, or already used
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: not found
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: internal error
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /health:
+    get:
+      tags: [Operations]
+      summary: Health check
+      description: Returns service health status and current queue depth.
+      security: []
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  queue_depth:
+                    type: integer
+                    example: 42
+                required: [status, queue_depth]
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          description: Database unreachable
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: error
+                  detail:
+                    type: string
+                    example: database unreachable
+                required: [status, detail]
+
+  /metrics:
+    get:
+      tags: [Operations]
+      summary: Prometheus metrics
+      description: |
+        Returns metrics in Prometheus text exposition format.
+        Requires Bearer token authentication if `api.metrics_auth_token` is configured.
+      operationId: metrics
+      security:
+        - metricsAuth: []
+        - {}
+      responses:
+        "200":
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                # HELP qhook_events_received_total Total events received
+                # TYPE qhook_events_received_total counter
+                qhook_events_received_total{source="webhooks"} 150
+                # HELP qhook_queue_depth Current pending jobs
+                # TYPE qhook_queue_depth gauge
+                qhook_queue_depth 3
+        "401":
+          description: Missing or invalid metrics auth token
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid token
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: API auth token (configured via `api.auth_token`)
+    metricsAuth:
+      type: http
+      scheme: bearer
+      description: Metrics auth token (configured via `api.metrics_auth_token`)
+
+  parameters:
+    source:
+      name: source
+      in: path
+      required: true
+      description: Source name as defined in qhook configuration
+      schema:
+        type: string
+      example: github
+
+  schemas:
+    SnsMessage:
+      type: object
+      properties:
+        Type:
+          type: string
+          enum:
+            - Notification
+            - SubscriptionConfirmation
+            - UnsubscribeConfirmation
+        MessageId:
+          type: string
+        TopicArn:
+          type: string
+        Subject:
+          type: string
+        Message:
+          type: string
+          description: The actual payload (JSON string for Notification)
+        Timestamp:
+          type: string
+          format: date-time
+        Signature:
+          type: string
+        SigningCertURL:
+          type: string
+          format: uri
+        SignatureVersion:
+          type: string
+          enum: ["1", "2"]
+        SubscribeURL:
+          type: string
+          format: uri
+          description: Present only for SubscriptionConfirmation
+      required: [Type, MessageId, TopicArn, Message, Timestamp]
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        text/plain:
+          schema:
+            type: string
+            example: Invalid UTF-8
+
+    SourceNotFound:
+      description: Source not found in configuration
+      content:
+        text/plain:
+          schema:
+            type: string
+            example: Unknown source
+
+    PayloadTooLarge:
+      description: Request body exceeds size limit (default 1MB)
+
+    RateLimited:
+      description: Per-IP rate limit exceeded
+
+    InternalError:
+      description: Internal server error
+      content:
+        text/plain:
+          schema:
+            type: string
+            example: Internal error
+
+    ServiceUnavailable:
+      description: Concurrency limit exceeded or service unavailable
