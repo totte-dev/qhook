@@ -5,6 +5,19 @@ use std::time::Instant;
 
 use crate::config::DatabaseConfig;
 
+/// Format current UTC time as TEXT for database storage.
+pub(crate) fn format_now() -> String {
+    Utc::now()
+        .naive_utc()
+        .format("%Y-%m-%dT%H:%M:%S%.3f")
+        .to_string()
+}
+
+/// Format a NaiveDateTime as TEXT for database storage.
+pub(crate) fn format_dt(dt: NaiveDateTime) -> String {
+    dt.format("%Y-%m-%dT%H:%M:%S%.3f").to_string()
+}
+
 /// Redact credentials from a database URL.
 /// Replaces `user:password@` with `***@` to prevent credential leakage in logs.
 fn redact_url(url: &str) -> String {
@@ -177,12 +190,14 @@ impl Database {
             sqlx::query(col).execute(&self.pool).await.ok();
         }
 
-        // Add parallel tracking columns to workflow_runs
+        // Add parallel tracking and sub-workflow columns to workflow_runs
         for col in [
             "ALTER TABLE workflow_runs ADD COLUMN parallel_step TEXT",
             "ALTER TABLE workflow_runs ADD COLUMN parallel_count INTEGER DEFAULT 0",
             "ALTER TABLE workflow_runs ADD COLUMN parallel_completed INTEGER DEFAULT 0",
             "ALTER TABLE workflow_runs ADD COLUMN timeout_at TEXT",
+            "ALTER TABLE workflow_runs ADD COLUMN parent_run_id TEXT",
+            "ALTER TABLE workflow_runs ADD COLUMN parent_step_index INTEGER",
         ] {
             sqlx::query(col).execute(&self.pool).await.ok();
         }
@@ -213,10 +228,7 @@ impl Database {
         headers: Option<&str>,
         unique_key: Option<&str>,
     ) -> Result<bool> {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = format_now();
 
         // Try insert; if unique_key conflicts, return false (duplicate)
         if unique_key.is_some() {
@@ -263,10 +275,7 @@ impl Database {
         url: &str,
         max_attempts: u32,
     ) -> Result<()> {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = format_now();
 
         sqlx::query(
             "INSERT INTO jobs (id, event_id, handler, url, status, max_attempts, scheduled_at, created_at) \
@@ -288,10 +297,7 @@ impl Database {
     /// For Postgres: uses FOR UPDATE SKIP LOCKED + immediate status update in one query.
     /// For SQLite: plain SELECT (use mark_job_running separately).
     pub async fn fetch_available_jobs(&self, limit: i32) -> Result<Vec<JobRow>> {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = format_now();
 
         let start = Instant::now();
         let rows = if self.driver == "postgres" {
@@ -338,10 +344,7 @@ impl Database {
 
     /// Mark a job as running (SQLite only — Postgres does this in fetch_available_jobs).
     pub async fn mark_job_running(&self, job_id: &str) -> Result<bool> {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = format_now();
 
         let result = sqlx::query(
             "UPDATE jobs SET status = 'running', started_at = $1, attempt = attempt + 1 \
@@ -356,10 +359,7 @@ impl Database {
     }
 
     pub async fn mark_job_completed(&self, job_id: &str) -> Result<()> {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = format_now();
 
         sqlx::query("UPDATE jobs SET status = 'completed', completed_at = $1 WHERE id = $2")
             .bind(&now)
@@ -376,7 +376,7 @@ impl Database {
         next_attempt_at: NaiveDateTime,
         error: &str,
     ) -> Result<()> {
-        let scheduled = next_attempt_at.format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
+        let scheduled = format_dt(next_attempt_at);
 
         sqlx::query(
             "UPDATE jobs SET status = 'retryable', scheduled_at = $1, last_error = $2 WHERE id = $3",
@@ -391,10 +391,7 @@ impl Database {
     }
 
     pub async fn mark_job_dead(&self, job_id: &str, error: &str) -> Result<()> {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = format_now();
 
         sqlx::query(
             "UPDATE jobs SET status = 'dead', completed_at = $1, last_error = $2 WHERE id = $3",
@@ -419,10 +416,7 @@ impl Database {
         error: Option<&str>,
         duration_ms: i64,
     ) -> Result<()> {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = format_now();
 
         sqlx::query(
             "INSERT INTO job_attempts (id, job_id, attempt, status_code, response_body, error, duration_ms, created_at) \
@@ -565,10 +559,7 @@ impl Database {
     }
 
     pub async fn retry_dead_jobs(&self) -> Result<u64> {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = format_now();
         let result = sqlx::query(
             "UPDATE jobs SET status = 'available', scheduled_at = $1, last_error = NULL WHERE status = 'dead'",
         )
@@ -581,10 +572,8 @@ impl Database {
     /// Reset jobs stuck in 'running' for longer than `stale_secs` back to 'retryable'.
     pub async fn recover_stale_jobs(&self, stale_secs: i64) -> Result<u64> {
         let now = Utc::now().naive_utc();
-        let cutoff = (now - chrono::Duration::seconds(stale_secs))
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
-        let now_str = now.format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
+        let cutoff = format_dt(now - chrono::Duration::seconds(stale_secs));
+        let now_str = format_dt(now);
 
         let start = Instant::now();
         let result = sqlx::query(
@@ -609,9 +598,7 @@ impl Database {
 
     /// Delete completed/dead jobs (and their attempts) older than `retention_hours`.
     pub async fn cleanup_old_records(&self, retention_hours: i64) -> Result<(u64, u64)> {
-        let cutoff = (Utc::now().naive_utc() - chrono::Duration::hours(retention_hours))
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let cutoff = format_dt(Utc::now().naive_utc() - chrono::Duration::hours(retention_hours));
 
         let start = Instant::now();
         let attempts = sqlx::query(
@@ -664,10 +651,7 @@ impl Database {
         event_id: &str,
         first_step: &str,
     ) -> Result<()> {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = format_now();
 
         sqlx::query(
             "INSERT INTO workflow_runs (id, workflow, event_id, status, current_step, created_at) \
@@ -694,10 +678,7 @@ impl Database {
     }
 
     pub async fn complete_workflow_run(&self, run_id: &str) -> Result<()> {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = format_now();
 
         sqlx::query(
             "UPDATE workflow_runs SET status = 'completed', completed_at = $1 WHERE id = $2",
@@ -710,10 +691,7 @@ impl Database {
     }
 
     pub async fn fail_workflow_run(&self, run_id: &str) -> Result<()> {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = format_now();
 
         sqlx::query("UPDATE workflow_runs SET status = 'failed', completed_at = $1 WHERE id = $2")
             .bind(&now)
@@ -736,10 +714,7 @@ impl Database {
         step_index: i32,
         step_input: Option<&str>,
     ) -> Result<()> {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = format_now();
 
         sqlx::query(
             "INSERT INTO jobs (id, event_id, handler, url, status, max_attempts, scheduled_at, created_at, \
@@ -912,10 +887,7 @@ impl Database {
         step_input: Option<&str>,
         branch_name: &str,
     ) -> Result<()> {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = format_now();
 
         sqlx::query(
             "INSERT INTO jobs (id, event_id, handler, url, status, max_attempts, scheduled_at, created_at, \
@@ -972,10 +944,7 @@ impl Database {
         step_input: Option<&str>,
         scheduled_at: &str,
     ) -> Result<()> {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = format_now();
 
         sqlx::query(
             "INSERT INTO jobs (id, event_id, handler, url, status, max_attempts, scheduled_at, created_at, \
@@ -1014,10 +983,7 @@ impl Database {
         callback_token: &str,
         _timeout_at: Option<&str>,
     ) -> Result<()> {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = format_now();
 
         // Use a far-future scheduled_at so it's never picked up by the worker.
         // It will be resumed via the callback API.
@@ -1048,10 +1014,7 @@ impl Database {
     /// Find a waiting callback job by token and resume it with payload.
     /// Atomic: UPDATE with WHERE status='waiting' prevents double-resume race conditions.
     pub async fn resume_callback_job(&self, token: &str, payload: &str) -> Result<Option<String>> {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = format_now();
 
         // Atomic update: only succeeds if job exists AND is still waiting.
         // Concurrent requests will see rows_affected=0 for the loser.
@@ -1112,10 +1075,7 @@ impl Database {
 
     /// Expire waiting callback jobs whose workflow has timed out.
     pub async fn expire_timed_out_callbacks(&self) -> Result<u64> {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = format_now();
 
         let result = sqlx::query(
             "UPDATE jobs SET status = 'dead', completed_at = $1, last_error = 'callback timeout' \
@@ -1131,11 +1091,49 @@ impl Database {
         Ok(result.rows_affected())
     }
 
+    /// Insert a sub-workflow run with parent reference.
+    pub async fn insert_sub_workflow_run(
+        &self,
+        id: &str,
+        workflow: &str,
+        event_id: &str,
+        first_step: &str,
+        parent_run_id: &str,
+        parent_step_index: i32,
+    ) -> Result<()> {
+        let now = format_now();
+
+        sqlx::query(
+            "INSERT INTO workflow_runs (id, workflow, event_id, status, current_step, created_at, parent_run_id, parent_step_index) \
+             VALUES ($1, $2, $3, 'running', $4, $5, $6, $7)",
+        )
+        .bind(id)
+        .bind(workflow)
+        .bind(event_id)
+        .bind(first_step)
+        .bind(&now)
+        .bind(parent_run_id)
+        .bind(parent_step_index)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get parent workflow info for a sub-workflow run.
+    pub async fn get_parent_workflow_run(&self, run_id: &str) -> Result<Option<(String, i32)>> {
+        let row: Option<(Option<String>, Option<i32>)> = sqlx::query_as(
+            "SELECT parent_run_id, parent_step_index FROM workflow_runs WHERE id = $1",
+        )
+        .bind(run_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.and_then(|(id, idx)| id.zip(idx)))
+    }
+
     pub async fn retry_job(&self, job_id: &str) -> Result<bool> {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = format_now();
         let result = sqlx::query(
             "UPDATE jobs SET status = 'available', scheduled_at = $1, last_error = NULL \
              WHERE id = $2 AND status IN ('dead', 'retryable')",

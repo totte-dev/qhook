@@ -113,6 +113,9 @@ pub struct StepConfig {
     // --- Callback step fields ---
     /// Timeout in seconds for callback step (how long to wait for external callback).
     pub callback_timeout: Option<u64>,
+    // --- Sub-workflow step fields ---
+    /// Name of the workflow to invoke (for type: workflow).
+    pub workflow: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -651,6 +654,33 @@ impl Config {
                     }
                     if step.url.is_none() {
                         anyhow::bail!("workflow '{}' map step '{}' has no url", name, step.name);
+                    }
+                }
+
+                // Validate sub-workflow steps
+                if step.handler_type == "workflow" {
+                    let wf_name = step.workflow.as_deref().unwrap_or("");
+                    if wf_name.is_empty() {
+                        anyhow::bail!(
+                            "workflow '{}' step '{}' is type 'workflow' but has no workflow name",
+                            name,
+                            step.name
+                        );
+                    }
+                    if !self.workflows.contains_key(wf_name) {
+                        anyhow::bail!(
+                            "workflow '{}' step '{}' references unknown workflow '{}'",
+                            name,
+                            step.name,
+                            wf_name
+                        );
+                    }
+                    if wf_name == name {
+                        anyhow::bail!(
+                            "workflow '{}' step '{}' cannot reference itself (recursive)",
+                            name,
+                            step.name
+                        );
                     }
                 }
             }
@@ -2312,6 +2342,100 @@ workflows:
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
+    }
+
+    // --- Sub-workflow step tests ---
+
+    #[test]
+    fn test_parse_subworkflow_step() {
+        let yaml = r#"
+sources:
+  app:
+    type: event
+handlers: {}
+workflows:
+  notify-all:
+    source: app
+    steps:
+      - name: slack
+        url: https://hooks.slack.com/xxx
+      - name: email
+        url: https://email.example.com/send
+
+  order-pipeline:
+    source: app
+    events: [order.created]
+    steps:
+      - name: fulfill
+        url: https://api.example.com/fulfill
+      - name: notify
+        type: workflow
+        workflow: notify-all
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok());
+        let step = &config.workflows["order-pipeline"].steps[1];
+        assert_eq!(step.handler_type, "workflow");
+        assert_eq!(step.workflow.as_deref(), Some("notify-all"));
+    }
+
+    #[test]
+    fn test_validate_subworkflow_missing_name() {
+        let yaml = r#"
+sources:
+  app:
+    type: event
+handlers: {}
+workflows:
+  bad:
+    source: app
+    steps:
+      - name: sub
+        type: workflow
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("no workflow name"));
+    }
+
+    #[test]
+    fn test_validate_subworkflow_unknown_target() {
+        let yaml = r#"
+sources:
+  app:
+    type: event
+handlers: {}
+workflows:
+  bad:
+    source: app
+    steps:
+      - name: sub
+        type: workflow
+        workflow: nonexistent
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("unknown workflow"));
+    }
+
+    #[test]
+    fn test_validate_subworkflow_recursive() {
+        let yaml = r#"
+sources:
+  app:
+    type: event
+handlers: {}
+workflows:
+  bad:
+    source: app
+    steps:
+      - name: loop
+        type: workflow
+        workflow: bad
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("recursive"));
     }
 
     #[test]

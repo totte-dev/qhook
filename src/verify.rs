@@ -62,9 +62,12 @@ fn verify_stripe(secret: &str, payload: &[u8], headers: &axum::http::HeaderMap) 
         return Ok(false);
     }
 
-    // Stripe signs: timestamp.payload
-    let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(payload));
-    let expected = compute_hmac_sha256_hex(secret.as_bytes(), signed_payload.as_bytes());
+    // Stripe signs: timestamp.payload — HMAC directly from bytes to avoid String allocation
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key length");
+    mac.update(timestamp.as_bytes());
+    mac.update(b".");
+    mac.update(payload);
+    let expected = hex::encode(mac.finalize().into_bytes());
 
     Ok(constant_time_eq(&expected, signature))
 }
@@ -347,7 +350,7 @@ pub fn is_valid_sns_url(url: &str) -> bool {
 }
 
 pub fn build_sns_string_to_sign(msg: &SnsMessage) -> String {
-    let mut lines = String::new();
+    let mut lines = String::with_capacity(512);
 
     match msg.message_type.as_str() {
         "Notification" => {

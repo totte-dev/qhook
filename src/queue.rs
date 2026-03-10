@@ -421,10 +421,7 @@ async fn deliver_job(
         if let Ok(Some(wf_data)) = db.get_workflow_job_data(&job.id).await {
             if let Some(ref run_id) = wf_data.workflow_run_id {
                 if let Ok(Some(timeout_at)) = db.get_workflow_timeout(run_id).await {
-                    let now = Utc::now()
-                        .naive_utc()
-                        .format("%Y-%m-%dT%H:%M:%S%.3f")
-                        .to_string();
+                    let now = crate::db::format_now();
                     if now > timeout_at {
                         let workflow_name = job.handler.split('/').next().unwrap_or("");
                         tracing::warn!(
@@ -543,6 +540,26 @@ async fn deliver_job(
                             .await
                             {
                                 tracing::error!(job_id = job.id, error = %e, "Failed to handle callback step");
+                            }
+                            return;
+                        }
+                        "workflow" => {
+                            // Sub-workflow step: launch child workflow
+                            if let Err(e) = db.mark_job_completed(&job.id).await {
+                                tracing::error!(job_id = job.id, error = %e, "Failed to mark sub-workflow job completed");
+                                return;
+                            }
+                            if let Err(e) = handle_subworkflow_step(
+                                db,
+                                metrics,
+                                workflows,
+                                default_retry_max,
+                                job,
+                                step,
+                            )
+                            .await
+                            {
+                                tracing::error!(job_id = job.id, error = %e, "Failed to handle sub-workflow step");
                             }
                             return;
                         }
@@ -908,10 +925,7 @@ async fn handle_workflow_step_success(
 
     // Check workflow timeout
     if let Ok(Some(timeout_at)) = db.get_workflow_timeout(run_id).await {
-        let now = Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string();
+        let now = crate::db::format_now();
         if now > timeout_at {
             db.fail_workflow_run(run_id).await?;
             metrics.inc_workflow_failed(workflow_name);
@@ -929,6 +943,16 @@ async fn handle_workflow_step_success(
             run_id,
             "Workflow completed (end step)"
         );
+        resume_parent_workflow(
+            db,
+            metrics,
+            workflows,
+            default_retry_max,
+            run_id,
+            &job.event_id,
+            &output_payload,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -939,6 +963,16 @@ async fn handle_workflow_step_success(
         db.complete_workflow_run(run_id).await?;
         metrics.inc_workflow_completed(workflow_name);
         tracing::info!(workflow = workflow_name, run_id, "Workflow completed");
+        resume_parent_workflow(
+            db,
+            metrics,
+            workflows,
+            default_retry_max,
+            run_id,
+            &job.event_id,
+            &output_payload,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -1602,6 +1636,16 @@ async fn handle_branch_completion(
             run_id,
             "Workflow completed (parallel/map end step)"
         );
+        resume_parent_workflow(
+            db,
+            metrics,
+            workflows,
+            default_retry_max,
+            run_id,
+            &job.event_id,
+            &output_payload,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -1615,6 +1659,16 @@ async fn handle_branch_completion(
         db.complete_workflow_run(run_id).await?;
         metrics.inc_workflow_completed(workflow_name);
         tracing::info!(workflow = workflow_name, run_id, "Workflow completed");
+        resume_parent_workflow(
+            db,
+            metrics,
+            workflows,
+            default_retry_max,
+            run_id,
+            &job.event_id,
+            &output_payload,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -1736,7 +1790,7 @@ async fn handle_wait_step(
         Utc::now().naive_utc()
     };
 
-    let scheduled_at = wait_until.format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
+    let scheduled_at = crate::db::format_dt(wait_until);
 
     metrics.inc_workflow_step_completed(workflow_name);
     tracing::info!(
@@ -1752,6 +1806,16 @@ async fn handle_wait_step(
     if next_index >= workflow.steps.len() {
         db.complete_workflow_run(run_id).await?;
         metrics.inc_workflow_completed(workflow_name);
+        resume_parent_workflow(
+            db,
+            metrics,
+            workflows,
+            default_retry_max,
+            run_id,
+            &job.event_id,
+            payload,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -1827,9 +1891,7 @@ async fn handle_callback_step(
 
     // Calculate callback timeout_at if configured
     let timeout_at = step.callback_timeout.map(|secs| {
-        (Utc::now().naive_utc() + chrono::Duration::seconds(secs as i64))
-            .format("%Y-%m-%dT%H:%M:%S%.3f")
-            .to_string()
+        crate::db::format_dt(Utc::now().naive_utc() + chrono::Duration::seconds(secs as i64))
     });
 
     db.insert_callback_job(
@@ -1979,6 +2041,16 @@ pub async fn resume_callback(
     if current_step.is_some_and(|s| s.end) {
         db.complete_workflow_run(run_id).await?;
         metrics.inc_workflow_completed(workflow_name);
+        resume_parent_workflow(
+            db,
+            metrics,
+            workflows,
+            default_retry_max,
+            run_id,
+            &job.event_id,
+            &output_payload,
+        )
+        .await?;
         return Ok(true);
     }
 
@@ -1987,6 +2059,16 @@ pub async fn resume_callback(
     if next_index >= workflow.steps.len() {
         db.complete_workflow_run(run_id).await?;
         metrics.inc_workflow_completed(workflow_name);
+        resume_parent_workflow(
+            db,
+            metrics,
+            workflows,
+            default_retry_max,
+            run_id,
+            &job.event_id,
+            &output_payload,
+        )
+        .await?;
         return Ok(true);
     }
 
@@ -2028,6 +2110,184 @@ pub async fn resume_callback(
     );
 
     Ok(true)
+}
+
+/// Handle a sub-workflow step: launch a child workflow.
+async fn handle_subworkflow_step(
+    db: &Database,
+    metrics: &Metrics,
+    workflows: &HashMap<String, config::WorkflowConfig>,
+    default_retry_max: u32,
+    job: &crate::db::JobRow,
+    step: &config::StepConfig,
+) -> Result<()> {
+    let wf_data = db.get_workflow_job_data(&job.id).await?;
+    let wf_data = match wf_data {
+        Some(d) if d.workflow_run_id.is_some() => d,
+        _ => return Ok(()),
+    };
+    let parent_run_id = wf_data.workflow_run_id.as_ref().unwrap();
+    let parent_step_index = wf_data.step_index.unwrap_or(0);
+    let payload = wf_data.step_input.as_deref().unwrap_or("{}");
+    let parent_workflow_name = job.handler.split('/').next().unwrap_or("");
+
+    let sub_workflow_name = step
+        .workflow
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("Sub-workflow step has no workflow name"))?;
+
+    let sub_workflow = workflows
+        .get(sub_workflow_name)
+        .ok_or_else(|| anyhow::anyhow!("Sub-workflow '{}' not found", sub_workflow_name))?;
+
+    if sub_workflow.steps.is_empty() {
+        anyhow::bail!("Sub-workflow '{}' has no steps", sub_workflow_name);
+    }
+
+    // Create a new workflow_run for the sub-workflow with parent reference
+    let sub_run_id = ulid::Ulid::new().to_string();
+    let first_step = &sub_workflow.steps[0];
+    db.insert_sub_workflow_run(
+        &sub_run_id,
+        sub_workflow_name,
+        &job.event_id,
+        &first_step.name,
+        parent_run_id,
+        parent_step_index,
+    )
+    .await?;
+
+    // Apply first step's input transform
+    let first_input = match &first_step.input {
+        Some(template) => crate::api::apply_transform(payload, template),
+        None => payload.to_string(),
+    };
+
+    // Create job for the first step
+    let first_job_id = ulid::Ulid::new().to_string();
+    let first_handler = format!("{}/{}", sub_workflow_name, first_step.name);
+    let max_attempts = first_step
+        .retry
+        .as_ref()
+        .map(|r| r.max)
+        .unwrap_or(default_retry_max);
+
+    db.insert_workflow_job(
+        &first_job_id,
+        &job.event_id,
+        &first_handler,
+        first_step.url.as_deref().unwrap_or(""),
+        max_attempts,
+        &sub_run_id,
+        &first_step.name,
+        0,
+        Some(&first_input),
+    )
+    .await?;
+
+    metrics.inc_jobs_created();
+    tracing::info!(
+        parent_workflow = parent_workflow_name,
+        parent_run_id,
+        sub_workflow = sub_workflow_name,
+        sub_run_id,
+        step = first_step.name,
+        "Sub-workflow launched"
+    );
+
+    Ok(())
+}
+
+/// After completing a workflow run, check if it's a sub-workflow and advance the parent.
+async fn resume_parent_workflow(
+    db: &Database,
+    metrics: &Metrics,
+    workflows: &HashMap<String, config::WorkflowConfig>,
+    default_retry_max: u32,
+    run_id: &str,
+    event_id: &str,
+    output_payload: &str,
+) -> Result<()> {
+    let parent = db.get_parent_workflow_run(run_id).await?;
+    let (parent_run_id, parent_step_index) = match parent {
+        Some(p) => p,
+        None => return Ok(()), // Not a sub-workflow, nothing to do
+    };
+
+    // Get parent workflow info
+    let parent_run = db
+        .get_workflow_run(&parent_run_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Parent workflow run '{}' not found", parent_run_id))?;
+    let parent_workflow_name = &parent_run.workflow;
+    let parent_workflow = match workflows.get(parent_workflow_name.as_str()) {
+        Some(w) => w,
+        None => return Ok(()),
+    };
+
+    // Find next step in parent workflow
+    let next_index = (parent_step_index + 1) as usize;
+    if next_index >= parent_workflow.steps.len() {
+        // Parent workflow also completed
+        db.complete_workflow_run(&parent_run_id).await?;
+        metrics.inc_workflow_completed(parent_workflow_name);
+        tracing::info!(
+            workflow = parent_workflow_name.as_str(),
+            run_id = parent_run_id,
+            "Parent workflow completed (sub-workflow was last step)"
+        );
+        // Recurse: parent may also be a sub-workflow
+        return Box::pin(resume_parent_workflow(
+            db,
+            metrics,
+            workflows,
+            default_retry_max,
+            &parent_run_id,
+            event_id,
+            output_payload,
+        ))
+        .await;
+    }
+
+    let next_step = &parent_workflow.steps[next_index];
+    db.update_workflow_run_step(&parent_run_id, &next_step.name)
+        .await?;
+
+    let next_input = match &next_step.input {
+        Some(template) => crate::api::apply_transform(output_payload, template),
+        None => output_payload.to_string(),
+    };
+
+    let next_job_id = ulid::Ulid::new().to_string();
+    let next_handler = format!("{}/{}", parent_workflow_name, next_step.name);
+    let max_attempts = next_step
+        .retry
+        .as_ref()
+        .map(|r| r.max)
+        .unwrap_or(default_retry_max);
+
+    db.insert_workflow_job(
+        &next_job_id,
+        event_id,
+        &next_handler,
+        next_step.url.as_deref().unwrap_or(""),
+        max_attempts,
+        &parent_run_id,
+        &next_step.name,
+        next_index as i32,
+        Some(&next_input),
+    )
+    .await?;
+
+    metrics.inc_jobs_created();
+    tracing::info!(
+        parent_workflow = parent_workflow_name.as_str(),
+        parent_run_id,
+        step = next_step.name,
+        "Sub-workflow completed, resuming parent workflow"
+    );
+
+    Ok(())
 }
 
 /// Check if an error type matches any of the configured error types.
