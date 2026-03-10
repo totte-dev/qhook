@@ -22,14 +22,12 @@ After implementing any feature, update **all applicable** items:
 - [ ] `docs/guides/monitoring.md` — new Prometheus metrics
 - [ ] `docs/openapi.yaml` — new or changed HTTP endpoints
 - [ ] `README.md` — significant features only (feature list, CLI table, install section)
-- [ ] `charts/qhook/Chart.yaml` — `appVersion` matches `Cargo.toml` version
 - [ ] `CLAUDE.md` — project structure, conventions, build commands if changed
 
 ### Release Checklist
 
 - [ ] Check and merge Renovate PRs/Issues (update dependencies before release)
 - [ ] `Cargo.toml` version bumped
-- [ ] `charts/qhook/Chart.yaml` `appVersion` updated
 - [ ] `CHANGELOG.md` — rename `[Unreleased]` to `[x.y.z] - date`
 - [ ] Run `workflow_dispatch` on `release.yml` (handles: tag, GitHub Release, crates.io, Docker image)
 
@@ -80,12 +78,10 @@ src/
   db.rs         — SQLite/Postgres via sqlx AnyPool
   metrics.rs    — Prometheus metrics (atomic counters, no deps)
   queue.rs      — Job worker (poll, deliver, retry, DLQ)
-  grpc.rs       — gRPC output (prost types, tonic client, no codegen)
   verify.rs     — Signature verification (GitHub, Stripe, Shopify, HMAC, SNS X.509)
-  cli.rs        — CLI commands (start, init, validate, jobs, events, replay)
+  cli.rs        — CLI commands (start, init, validate, send, inspect, doctor, tail, export, jobs, events, replay)
   alert.rs      — Alert system (Slack, Discord, generic webhook)
-charts/
-  qhook/        — Helm chart (Deployment, Service, ConfigMap, Ingress, PVC, HPA)
+  templates/    — Config templates (default, github, stripe, sns, cron, local overlay)
 tests/
   e2e.sh        — E2E tests (26 tests)
   e2e_sns.sh    — SNS E2E tests with LocalStack (8 tests)
@@ -109,7 +105,7 @@ docs/               — GitHub Pages user guide (Jekyll, Cayman theme)
   openapi.yaml      — OpenAPI 3.1 spec (keep in sync with api.rs)
   index.md          — Top page with navigation
   getting-started.md, configuration.md, cli.md, examples.md
-  guides/           — Feature guides (webhook-verification, cloudevents, sns, filtering, grpc, monitoring, security, error-reference)
+  guides/           — Feature guides (webhook-verification, cloudevents, sns, filtering, monitoring, security, error-reference)
   deploy/           — Platform deploy guides (aws, flyio, railway, render)
   why-qhook.md      — DIY vs qhook comparison
 ```

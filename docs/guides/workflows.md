@@ -355,7 +355,7 @@ workflows:
       # Task step (HTTP call)
       - name: step-name          # required, unique within workflow
         url: http://...           # HTTP endpoint to call
-        type: http                # http (default), grpc, choice, parallel, map, wait, callback, workflow
+        type: http                # http (default), choice, parallel, map, wait, callback, workflow
         timeout: 30               # per-step timeout in seconds
         input: '...'              # input transform template
         result_path: "$.field"    # response merge path

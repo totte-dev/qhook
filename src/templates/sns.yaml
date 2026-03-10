@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=https://totte-dev.github.io/qhook/schema.json
+# qhook.yaml — AWS SNS template
+
+database:
+  driver: sqlite
+
+server:
+  port: 8888
+  allow_private_urls: true  # remove in production
+
+sources:
+  notifications:
+    type: sns
+    # skip_verify: true  # uncomment for LocalStack testing
+
+handlers:
+  process-notification:
+    source: notifications
+    events: ["*"]
+    url: http://localhost:3000/process
+    retry:
+      max: 3

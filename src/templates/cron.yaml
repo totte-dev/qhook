@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://totte-dev.github.io/qhook/schema.json
+# qhook.yaml — Cron trigger template
+
+database:
+  driver: sqlite
+
+server:
+  port: 8888
+  allow_private_urls: true  # remove in production
+
+sources:
+  scheduler:
+    type: cron
+    schedule: "*/5 * * * *"  # every 5 minutes
+    # timezone: America/New_York
+
+handlers:
+  periodic-task:
+    source: scheduler
+    events: [cron.tick]
+    url: http://localhost:3000/run-task

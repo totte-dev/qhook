@@ -17,12 +17,19 @@ pub struct Args {
 #[derive(Subcommand)]
 enum Command {
     /// Initialize a new qhook.yaml config file
-    Init,
+    Init {
+        /// Use a template: github, stripe, sns, cron
+        #[arg(short = 't', long)]
+        template: Option<String>,
+    },
     /// Start the qhook server
     Start {
-        /// Path to config file
+        /// Path or URL to config file (local path, s3://bucket/key, or https://...)
         #[arg(short, long, default_value = "qhook.yaml")]
-        config: PathBuf,
+        config: String,
+        /// Environment name (loads qhook.{env}.yaml overlay and .env.{env})
+        #[arg(short, long)]
+        env: Option<String>,
     },
     /// Validate the config file
     Validate {
@@ -39,6 +46,59 @@ enum Command {
     Events {
         #[command(subcommand)]
         action: EventsAction,
+    },
+    /// Send a test event to a running qhook server
+    Send {
+        /// Source name (must match a configured source)
+        #[arg(short, long)]
+        source: String,
+        /// Event type (e.g. order.created)
+        #[arg(short = 't', long = "type")]
+        event_type: String,
+        /// JSON payload (inline string)
+        #[arg()]
+        payload: Option<String>,
+        /// Read payload from file
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+        /// Show which handlers/workflows would match without sending
+        #[arg(long)]
+        dry_run: bool,
+        /// Path to config file
+        #[arg(short, long, default_value = "qhook.yaml")]
+        config: PathBuf,
+    },
+    /// Inspect an event's full lifecycle (jobs, attempts, workflow runs)
+    Inspect {
+        /// Event ID to inspect
+        #[arg()]
+        event_id: String,
+        /// Path to config file
+        #[arg(short, long, default_value = "qhook.yaml")]
+        config: PathBuf,
+    },
+    /// Check server readiness and endpoint reachability
+    Doctor {
+        /// Path to config file
+        #[arg(short, long, default_value = "qhook.yaml")]
+        config: PathBuf,
+    },
+    /// Stream events and job results in real time
+    Tail {
+        /// Filter by source name
+        #[arg(short, long)]
+        source: Option<String>,
+        /// Filter by job status (completed, dead, retryable)
+        #[arg(long)]
+        status: Option<String>,
+        /// Path to config file
+        #[arg(short, long, default_value = "qhook.yaml")]
+        config: PathBuf,
+    },
+    /// Export events as JSONL
+    Export {
+        #[command(subcommand)]
+        action: ExportAction,
     },
     /// Manage workflow runs
     #[command(name = "workflow-runs")]
@@ -111,6 +171,31 @@ enum EventsAction {
 }
 
 #[derive(Subcommand)]
+enum ExportAction {
+    /// Export events as JSONL (one JSON object per line)
+    Events {
+        /// Filter by source name
+        #[arg(short, long)]
+        source: Option<String>,
+        /// Filter by event type
+        #[arg(short = 't', long)]
+        event_type: Option<String>,
+        /// Only events created after this timestamp
+        #[arg(long)]
+        since: Option<String>,
+        /// Only events created before this timestamp
+        #[arg(long)]
+        until: Option<String>,
+        /// Max number of events to export
+        #[arg(short, long, default_value = "1000")]
+        limit: i32,
+        /// Path to config file
+        #[arg(short, long, default_value = "qhook.yaml")]
+        config: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum WorkflowRunsAction {
     /// List workflow runs
     List {
@@ -138,17 +223,39 @@ enum WorkflowRunsAction {
 impl Args {
     pub async fn run(self) -> Result<()> {
         match self.command {
-            Command::Init => {
+            Command::Init { template } => {
                 let path = PathBuf::from("qhook.yaml");
                 if path.exists() {
                     anyhow::bail!("qhook.yaml already exists");
                 }
-                std::fs::write(&path, Config::default_yaml())?;
-                tracing::info!("Created qhook.yaml");
+                let content = match template.as_deref() {
+                    Some("github") => include_str!("templates/github.yaml"),
+                    Some("stripe") => include_str!("templates/stripe.yaml"),
+                    Some("sns") => include_str!("templates/sns.yaml"),
+                    Some("cron") => include_str!("templates/cron.yaml"),
+                    Some(t) => anyhow::bail!(
+                        "Unknown template '{}'. Available: github, stripe, sns, cron",
+                        t
+                    ),
+                    None => Config::default_yaml(),
+                };
+                std::fs::write(&path, content)?;
+                // Also generate qhook.local.yaml if it doesn't exist
+                let local_path = PathBuf::from("qhook.local.yaml");
+                if !local_path.exists() {
+                    let local_content = include_str!("templates/local.yaml");
+                    std::fs::write(&local_path, local_content)?;
+                }
+                if let Some(t) = template.as_deref() {
+                    println!("Created qhook.yaml (template: {})", t);
+                } else {
+                    println!("Created qhook.yaml");
+                }
+                println!("Created qhook.local.yaml (use: qhook start --env local)");
                 Ok(())
             }
-            Command::Start { config } => {
-                let cfg = Config::load(&config)?;
+            Command::Start { config, env } => {
+                let cfg = Config::load_from(&config, env.as_deref()).await?;
                 tracing::info!(
                     driver = cfg.database.driver,
                     port = cfg.server.port,
@@ -183,6 +290,492 @@ impl Args {
                 tracing::info!("Config is valid");
                 Ok(())
             }
+            Command::Send {
+                source,
+                event_type,
+                payload,
+                file,
+                dry_run,
+                config,
+            } => {
+                let cfg = Config::load(&config)?;
+
+                // Validate source exists
+                if !cfg.sources.contains_key(&source) {
+                    let available: Vec<_> = cfg.sources.keys().collect();
+                    anyhow::bail!(
+                        "Unknown source '{}'. Available: {}",
+                        source,
+                        available
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+
+                let body = match (payload, file) {
+                    (Some(p), _) => p,
+                    (None, Some(f)) => std::fs::read_to_string(&f)
+                        .with_context(|| format!("Failed to read {}", f.display()))?,
+                    (None, None) => "{}".to_string(),
+                };
+
+                // Validate JSON
+                let payload_value: serde_json::Value =
+                    serde_json::from_str(&body).context("Payload is not valid JSON")?;
+
+                if dry_run {
+                    let payload_str = payload_value.to_string();
+                    // Show matching handlers
+                    let matching_handlers: Vec<_> = cfg
+                        .handlers
+                        .iter()
+                        .filter(|(_, h)| {
+                            h.source == source
+                                && (h.events.is_empty()
+                                    || h.events
+                                        .iter()
+                                        .any(|e| crate::api::event_matches(e, &event_type)))
+                        })
+                        .filter(|(_, h)| {
+                            h.filter
+                                .as_ref()
+                                .is_none_or(|f| crate::api::evaluate_filter(&payload_str, f))
+                        })
+                        .collect();
+
+                    if matching_handlers.is_empty() {
+                        println!("No matching handlers.");
+                    } else {
+                        println!("Matched handlers:");
+                        for (name, h) in &matching_handlers {
+                            let filter_info = h
+                                .filter
+                                .as_ref()
+                                .map(|f| format!(" (filter: {})", f))
+                                .unwrap_or_default();
+                            println!("  {} -> {}{}", name, h.url, filter_info);
+                        }
+                    }
+
+                    // Show matching workflows
+                    let matching_workflows: Vec<_> = cfg
+                        .workflows
+                        .iter()
+                        .filter(|(_, w)| {
+                            w.source == source
+                                && (w.events.is_empty()
+                                    || w.events
+                                        .iter()
+                                        .any(|e| crate::api::event_matches(e, &event_type)))
+                        })
+                        .collect();
+
+                    if !matching_workflows.is_empty() {
+                        println!("Matched workflows:");
+                        for (name, w) in &matching_workflows {
+                            println!("  {} ({} steps)", name, w.steps.len());
+                        }
+                    }
+
+                    if matching_handlers.is_empty() && matching_workflows.is_empty() {
+                        println!("No handlers or workflows match this event.");
+                    } else {
+                        println!(
+                            "\n{} handler(s), {} workflow(s) would be triggered.",
+                            matching_handlers.len(),
+                            matching_workflows.len()
+                        );
+                    }
+                    println!("No jobs created (dry-run).");
+                    return Ok(());
+                }
+
+                let port = cfg.server.port;
+                let source_cfg = &cfg.sources[&source];
+                let source_type = source_cfg.source_type.as_str();
+
+                let (url, auth_header) = match source_type {
+                    "event" => {
+                        let url = format!("http://localhost:{}/events/{}", port, event_type);
+                        let token = cfg.api.auth_token.as_deref().unwrap_or("");
+                        (url, Some(format!("Bearer {}", token)))
+                    }
+                    "sns" => {
+                        let url = format!("http://localhost:{}/sns/{}", port, source);
+                        (url, None)
+                    }
+                    _ => {
+                        let url = format!("http://localhost:{}/webhooks/{}", port, source);
+                        (url, None)
+                    }
+                };
+
+                let client = reqwest::Client::new();
+                let mut req = client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("ce-type", &event_type)
+                    .body(body.clone());
+
+                if let Some(auth) = &auth_header {
+                    req = req.header("Authorization", auth);
+                }
+
+                println!("Sending {} event to {} source...", event_type, source);
+
+                match req.send().await {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let resp_body = resp.text().await.unwrap_or_default();
+                        if status.is_success() {
+                            println!(
+                                "  {} {}",
+                                status.as_u16(),
+                                status.canonical_reason().unwrap_or("OK")
+                            );
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp_body)
+                            {
+                                if let Some(id) = json.get("event_id") {
+                                    println!("  Event ID: {}", id.as_str().unwrap_or("-"));
+                                }
+                                if let Some(jobs) = json.get("jobs_created") {
+                                    println!("  Jobs created: {}", jobs);
+                                }
+                            }
+                        } else {
+                            println!(
+                                "  {} {}",
+                                status.as_u16(),
+                                status.canonical_reason().unwrap_or("Error")
+                            );
+                            if !resp_body.is_empty() {
+                                println!("  {}", resp_body);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        anyhow::bail!(
+                            "Failed to connect to qhook at localhost:{}. Is the server running?\n  {}",
+                            port,
+                            e
+                        );
+                    }
+                }
+                Ok(())
+            }
+            Command::Inspect { event_id, config } => {
+                let cfg = Config::load(&config)?;
+                let db = crate::db::Database::connect(&cfg.database).await?;
+                db.migrate().await?;
+
+                let event = db.get_event_by_id(&event_id).await?;
+                let Some(event) = event else {
+                    println!("Event {} not found.", event_id);
+                    return Ok(());
+                };
+
+                println!(
+                    "Event: {} ({}, source: {})",
+                    event.id, event.event_type, event.source
+                );
+                println!("  Created: {}", event.created_at);
+                if let Some(ref key) = event.unique_key {
+                    println!("  Dedup key: {}", key);
+                }
+
+                // Truncate payload for display
+                let payload_display = if event.payload.len() > 200 {
+                    format!("{}...", &event.payload[..200])
+                } else {
+                    event.payload.clone()
+                };
+                println!("  Payload: {}", payload_display);
+
+                // Jobs
+                let jobs = db.list_jobs_by_event(&event_id).await?;
+                if jobs.is_empty() {
+                    println!("\nNo jobs.");
+                } else {
+                    println!("\nJobs:");
+                    for job in &jobs {
+                        println!(
+                            "  {} -> {:<16} {:<10} ({}/{} attempts)",
+                            &job.id[..job.id.len().min(12)],
+                            job.handler,
+                            job.status,
+                            job.attempt,
+                            job.max_attempts
+                        );
+                        if let Some(ref err) = job.last_error {
+                            println!("    Last error: {}", err);
+                        }
+                        // Show attempts for non-completed jobs or dead jobs
+                        let attempts = db.list_job_attempts(&job.id).await?;
+                        for att in &attempts {
+                            let status = att
+                                .status_code
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "err".into());
+                            let dur = att
+                                .duration_ms
+                                .map(|d| format!("{}ms", d))
+                                .unwrap_or_else(|| "-".into());
+                            let err = att.error.as_deref().unwrap_or("");
+                            println!("    Attempt {}: {} ({}) {}", att.attempt, status, dur, err);
+                        }
+                    }
+                }
+
+                // Workflow runs
+                let runs = db.list_workflow_runs_by_event(&event_id).await?;
+                if !runs.is_empty() {
+                    println!("\nWorkflows:");
+                    for run in &runs {
+                        let step = run.current_step.as_deref().unwrap_or("-");
+                        println!(
+                            "  {} -> {:<16} {:<10} (step: {})",
+                            &run.id[..run.id.len().min(12)],
+                            run.workflow,
+                            run.status,
+                            step
+                        );
+                    }
+                }
+
+                Ok(())
+            }
+            Command::Doctor { config } => {
+                let cfg = Config::load(&config);
+                let cfg = match cfg {
+                    Ok(c) => {
+                        println!("  Config valid ({})", config.display());
+                        c
+                    }
+                    Err(e) => {
+                        println!("  Config invalid: {}", e);
+                        return Ok(());
+                    }
+                };
+
+                // Check database connection
+                match crate::db::Database::connect(&cfg.database).await {
+                    Ok(_) => println!("  Database connection OK ({})", cfg.database.driver),
+                    Err(e) => println!("  Database connection failed: {}", e),
+                }
+
+                // Check server is running
+                let port = cfg.server.port;
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(3))
+                    .build()
+                    .unwrap();
+
+                match client
+                    .get(format!("http://localhost:{}/health", port))
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        println!("  Server reachable at localhost:{}", port);
+                    }
+                    Ok(resp) => {
+                        println!(
+                            "  Server responded with {} at localhost:{}",
+                            resp.status(),
+                            port
+                        );
+                    }
+                    Err(_) => {
+                        println!(
+                            "  Server not reachable at localhost:{} (not running?)",
+                            port
+                        );
+                    }
+                }
+
+                // Check handler endpoints
+                let mut ok_count = 0;
+                let mut fail_count = 0;
+                for (name, handler) in &cfg.handlers {
+                    match client.get(&handler.url).send().await {
+                        Ok(resp) if resp.status().is_server_error() => {
+                            println!(
+                                "  Handler '{}' endpoint error: {} {}",
+                                name,
+                                handler.url,
+                                resp.status()
+                            );
+                            fail_count += 1;
+                        }
+                        Ok(_) => ok_count += 1,
+                        Err(_) => {
+                            println!("  Handler '{}' endpoint unreachable: {}", name, handler.url);
+                            fail_count += 1;
+                        }
+                    }
+                }
+                if ok_count > 0 {
+                    println!("  {} handler endpoint(s) reachable", ok_count);
+                }
+
+                // Check workflow step endpoints
+                let mut wf_ok = 0;
+                for (wf_name, workflow) in &cfg.workflows {
+                    for step in &workflow.steps {
+                        let Some(url) = &step.url else { continue };
+                        if url.is_empty()
+                            || matches!(
+                                step.handler_type.as_str(),
+                                "choice" | "wait" | "callback" | "workflow"
+                            )
+                        {
+                            continue;
+                        }
+                        match client.get(url).send().await {
+                            Ok(resp) if resp.status().is_server_error() => {
+                                println!(
+                                    "  Workflow '{}' step '{}' error: {} {}",
+                                    wf_name,
+                                    step.name,
+                                    url,
+                                    resp.status()
+                                );
+                                fail_count += 1;
+                            }
+                            Ok(_) => wf_ok += 1,
+                            Err(_) => {
+                                println!(
+                                    "  Workflow '{}' step '{}' unreachable: {}",
+                                    wf_name, step.name, url
+                                );
+                                fail_count += 1;
+                            }
+                        }
+                    }
+                }
+                if wf_ok > 0 {
+                    println!("  {} workflow step endpoint(s) reachable", wf_ok);
+                }
+
+                // Security checks
+                if cfg.server.allow_private_urls {
+                    println!("  SSRF protection disabled (allow_private_urls: true)");
+                }
+                if cfg.api.auth_token.is_none() {
+                    println!("  No API auth token configured");
+                }
+
+                println!();
+                if fail_count == 0 {
+                    println!("All checks passed.");
+                } else {
+                    println!("{} issue(s) found.", fail_count);
+                }
+                Ok(())
+            }
+            Command::Tail {
+                source,
+                status,
+                config,
+            } => {
+                let cfg = Config::load(&config)?;
+                let db = crate::db::Database::connect(&cfg.database).await?;
+                db.migrate().await?;
+
+                println!("Tailing events (Ctrl+C to stop)...\n");
+
+                let mut last_event_id: Option<String> = None;
+                let mut last_job_id: Option<String> = None;
+
+                loop {
+                    // Poll for new events
+                    let events = db
+                        .list_events_after(last_event_id.as_deref(), source.as_deref(), 20)
+                        .await?;
+                    for event in &events {
+                        println!(
+                            "\x1b[36m{}\x1b[0m {} \x1b[33m{}\x1b[0m (source: {})",
+                            &event.created_at[..event.created_at.len().min(19)],
+                            event.event_type,
+                            &event.id[..event.id.len().min(12)],
+                            event.source,
+                        );
+                        last_event_id = Some(event.id.clone());
+                    }
+
+                    // Poll for new job completions
+                    let jobs = db
+                        .list_jobs_after(last_job_id.as_deref(), status.as_deref(), 20)
+                        .await?;
+                    for job in &jobs {
+                        let status_color = match job.status.as_str() {
+                            "completed" => "\x1b[32m",  // green
+                            "dead" => "\x1b[31m",       // red
+                            "retryable" => "\x1b[33m",  // yellow
+                            _ => "\x1b[37m",            // white
+                        };
+                        let error_info = job
+                            .last_error
+                            .as_ref()
+                            .map(|e| format!(" — {}", e))
+                            .unwrap_or_default();
+                        println!(
+                            "  {}{:<10}\x1b[0m {} → {} ({}/{}){error_info}",
+                            status_color,
+                            job.status,
+                            &job.id[..job.id.len().min(12)],
+                            &job.handler[..job.handler.len().min(20)],
+                            job.attempt,
+                            job.max_attempts,
+                        );
+                        last_job_id = Some(job.id.clone());
+                    }
+
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+            Command::Export { action } => match action {
+                ExportAction::Events {
+                    source,
+                    event_type,
+                    since,
+                    until,
+                    limit,
+                    config,
+                } => {
+                    let cfg = Config::load(&config)?;
+                    let db = crate::db::Database::connect(&cfg.database).await?;
+
+                    let events = db
+                        .list_events_filtered(
+                            source.as_deref(),
+                            event_type.as_deref(),
+                            since.as_deref(),
+                            until.as_deref(),
+                            limit,
+                        )
+                        .await?;
+
+                    for event in &events {
+                        let payload: serde_json::Value =
+                            serde_json::from_str(&event.payload).unwrap_or_default();
+                        let line = serde_json::json!({
+                            "id": event.id,
+                            "source": event.source,
+                            "event_type": event.event_type,
+                            "payload": payload,
+                            "created_at": event.created_at,
+                            "unique_key": event.unique_key,
+                        });
+                        println!("{}", line);
+                    }
+
+                    eprintln!("Exported {} event(s).", events.len());
+                    Ok(())
+                }
+            },
             Command::Jobs { action } => match action {
                 JobsAction::List {
                     status,
