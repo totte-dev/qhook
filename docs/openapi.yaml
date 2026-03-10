@@ -6,6 +6,8 @@ info:
 
     qhook receives webhooks and events via HTTP, queues them, and delivers to
     configured handlers with retry and dead-letter support.
+
+    All responses include an `X-API-Version` header indicating the current API version.
   version: 0.2.2
   license:
     name: Apache-2.0
