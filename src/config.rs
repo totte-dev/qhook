@@ -2798,7 +2798,8 @@ handlers: {}
 
     #[test]
     fn test_deep_merge_yaml_nested() {
-        let base_yaml = "database:\n  driver: sqlite\nserver:\n  port: 8888\n  allow_private_urls: true\n";
+        let base_yaml =
+            "database:\n  driver: sqlite\nserver:\n  port: 8888\n  allow_private_urls: true\n";
         let overlay_yaml = "database:\n  driver: postgres\n  url: postgres://localhost/qhook\n";
 
         let base: serde_yaml_ng::Value = serde_yaml_ng::from_str(base_yaml).unwrap();
