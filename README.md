@@ -125,7 +125,7 @@ git clone https://github.com/totte-dev/qhook.git && cd qhook
 cargo build --release
 ```
 
-For Kubernetes, a Helm chart is available at `charts/qhook/`:
+Kubernetes is not required, but if you already run a cluster, a Helm chart is also available:
 
 ```bash
 helm install qhook ./charts/qhook
