@@ -1,0 +1,450 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://totte-dev.github.io/qhook/schema.json",
+  "title": "qhook configuration",
+  "description": "Configuration file for qhook — lightweight event gateway with queue and retry.",
+  "type": "object",
+  "properties": {
+    "database": {
+      "type": "object",
+      "description": "Database connection settings.",
+      "properties": {
+        "driver": {
+          "type": "string",
+          "enum": ["sqlite", "postgres"],
+          "default": "sqlite",
+          "description": "Database driver."
+        },
+        "url": {
+          "type": "string",
+          "description": "Connection URL. SQLite: file path (default: qhook.db). Postgres: postgresql://user:pass@host/db"
+        },
+        "max_connections": {
+          "type": "integer",
+          "default": 10,
+          "minimum": 1,
+          "description": "Maximum connection pool size."
+        }
+      },
+      "additionalProperties": false
+    },
+    "server": {
+      "type": "object",
+      "description": "HTTP server settings.",
+      "properties": {
+        "port": {
+          "type": "integer",
+          "default": 8888,
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Port to listen on."
+        },
+        "max_body_size": {
+          "type": "integer",
+          "default": 1048576,
+          "description": "Maximum request body size in bytes (default: 1MB)."
+        },
+        "max_inbound": {
+          "type": "integer",
+          "default": 100,
+          "description": "Maximum concurrent inbound requests. Excess requests get 503."
+        },
+        "ip_rate_limit": {
+          "type": "integer",
+          "default": 0,
+          "description": "Per-IP rate limit (requests per second). 0 = disabled."
+        },
+        "allow_private_urls": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow handler URLs pointing to private/loopback IPs. Enable for local development."
+        },
+        "trust_proxy": {
+          "type": "boolean",
+          "default": false,
+          "description": "Trust X-Forwarded-For / X-Real-IP headers for IP rate limiting."
+        }
+      },
+      "additionalProperties": false
+    },
+    "api": {
+      "type": "object",
+      "description": "API authentication settings.",
+      "properties": {
+        "auth_token": {
+          "type": "string",
+          "description": "Bearer token for the /events endpoint."
+        },
+        "metrics_auth_token": {
+          "type": "string",
+          "description": "Bearer token for the /metrics endpoint."
+        }
+      },
+      "additionalProperties": false
+    },
+    "delivery": {
+      "type": "object",
+      "description": "Default delivery settings.",
+      "properties": {
+        "signing_secret": {
+          "type": "string",
+          "description": "Secret for signing outbound deliveries."
+        },
+        "timeout": {
+          "type": "string",
+          "default": "30s",
+          "description": "Default HTTP timeout for deliveries."
+        },
+        "default_retry": {
+          "$ref": "#/$defs/retry"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sources": {
+      "type": "object",
+      "description": "Event sources. Keys are source names.",
+      "additionalProperties": {
+        "$ref": "#/$defs/source"
+      }
+    },
+    "handlers": {
+      "type": "object",
+      "description": "Event handlers. Keys are handler names.",
+      "additionalProperties": {
+        "$ref": "#/$defs/handler"
+      }
+    },
+    "workflows": {
+      "type": "object",
+      "description": "Multi-step workflows. Keys are workflow names.",
+      "additionalProperties": {
+        "$ref": "#/$defs/workflow"
+      }
+    },
+    "worker": {
+      "type": "object",
+      "description": "Background worker settings.",
+      "properties": {
+        "stale_threshold_secs": {
+          "type": "integer",
+          "default": 300,
+          "description": "Seconds a job can stay in 'running' before recovery."
+        },
+        "retention_hours": {
+          "type": "integer",
+          "default": 72,
+          "description": "Hours to retain completed/dead records."
+        },
+        "drain_timeout_secs": {
+          "type": "integer",
+          "default": 30,
+          "description": "Seconds to wait for in-flight deliveries during shutdown."
+        }
+      },
+      "additionalProperties": false
+    },
+    "alerts": {
+      "type": "object",
+      "description": "Alert notifications on DLQ or verification failures.",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "Webhook URL for alerts."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["generic", "slack", "discord"],
+          "default": "generic",
+          "description": "Alert format."
+        },
+        "on": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["dlq", "verification_failure"]
+          },
+          "default": ["dlq", "verification_failure"],
+          "description": "Event types that trigger alerts."
+        }
+      },
+      "required": ["url"],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "source": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["webhook", "event", "sns", "cron"],
+          "description": "Source type."
+        },
+        "verify": {
+          "type": "string",
+          "enum": ["github", "stripe", "shopify", "pagerduty", "grafana", "terraform", "gitlab", "hmac"],
+          "description": "Signature verification method."
+        },
+        "secret": {
+          "type": "string",
+          "description": "Shared secret for signature verification. Supports ${ENV_VAR} syntax."
+        },
+        "skip_verify": {
+          "type": "boolean",
+          "default": false,
+          "description": "Skip signature verification (for testing with LocalStack, etc.)."
+        },
+        "schedule": {
+          "type": "string",
+          "description": "Cron expression (5-field). Required for cron sources."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Timezone for cron evaluation (e.g., America/New_York). Default: UTC."
+        },
+        "schema": {
+          "type": "string",
+          "description": "JSON Schema string for validating incoming event payloads."
+        }
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    },
+    "handler": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "Source name this handler listens to."
+        },
+        "events": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Event types to match. Empty = all. Supports wildcards (e.g., order.*)."
+        },
+        "url": {
+          "type": "string",
+          "description": "HTTP endpoint to deliver events to."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["http"],
+          "default": "http",
+          "description": "Handler type."
+        },
+        "method": {
+          "type": "string",
+          "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+          "default": "POST",
+          "description": "HTTP method for delivery."
+        },
+        "retry": {
+          "$ref": "#/$defs/retry"
+        },
+        "timeout": {
+          "type": "string",
+          "description": "HTTP timeout override for this handler."
+        },
+        "idempotency_key": {
+          "type": "string",
+          "description": "JSONPath for deduplication key (e.g., $.id)."
+        },
+        "rate_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Max deliveries per second for this handler."
+        },
+        "filter": {
+          "type": "string",
+          "description": "JSONPath filter condition (e.g., $.status == active)."
+        },
+        "transform": {
+          "type": "string",
+          "description": "JSON template for payload transformation. Use {{$.path}} placeholders."
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Custom HTTP headers. Supports ${ENV_VAR} syntax."
+        }
+      },
+      "required": ["source", "url"],
+      "additionalProperties": false
+    },
+    "retry": {
+      "type": "object",
+      "description": "Retry configuration.",
+      "properties": {
+        "max": {
+          "type": "integer",
+          "default": 5,
+          "minimum": 0,
+          "description": "Maximum retry attempts."
+        },
+        "backoff": {
+          "type": "string",
+          "enum": ["exponential", "fixed"],
+          "default": "exponential",
+          "description": "Backoff strategy."
+        },
+        "interval": {
+          "type": "string",
+          "default": "30s",
+          "description": "Base retry interval."
+        }
+      },
+      "additionalProperties": false
+    },
+    "workflow": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "Source name this workflow listens to."
+        },
+        "events": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Event types to trigger this workflow."
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Overall workflow timeout in seconds."
+        },
+        "params": {
+          "type": "array",
+          "description": "Input parameter validation.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "description": "Parameter name." },
+              "type": {
+                "type": "string",
+                "enum": ["string", "number", "boolean", "object", "array"],
+                "default": "string",
+                "description": "Expected type."
+              },
+              "required": {
+                "type": "boolean",
+                "default": true,
+                "description": "Whether this parameter is required."
+              }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+          }
+        },
+        "steps": {
+          "type": "array",
+          "description": "Workflow steps executed sequentially.",
+          "items": {
+            "$ref": "#/$defs/step"
+          }
+        }
+      },
+      "required": ["source", "steps"],
+      "additionalProperties": false
+    },
+    "step": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Unique step name within the workflow." },
+        "url": { "type": "string", "description": "HTTP endpoint to call." },
+        "type": {
+          "type": "string",
+          "enum": ["http", "choice", "parallel", "map", "wait", "callback", "workflow"],
+          "default": "http",
+          "description": "Step type."
+        },
+        "method": {
+          "type": "string",
+          "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+          "default": "POST"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "input": { "type": "string", "description": "Input transform template." },
+        "result_path": { "type": "string", "description": "Response merge path ($ = replace, $.field = nest, null = discard)." },
+        "output": { "type": "string", "description": "Output transform template." },
+        "retry": {
+          "type": "object",
+          "properties": {
+            "max": { "type": "integer", "default": 5 },
+            "backoff": { "type": "string", "default": "exponential" },
+            "interval": { "type": "string", "default": "30s" },
+            "errors": {
+              "type": "array",
+              "items": { "type": "string", "enum": ["timeout", "5xx", "4xx", "network", "all"] },
+              "description": "Error types to retry on."
+            }
+          },
+          "additionalProperties": false
+        },
+        "catch": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "errors": {
+                "type": "array",
+                "items": { "type": "string", "enum": ["timeout", "5xx", "4xx", "network", "all"] }
+              },
+              "goto": { "type": "string", "description": "Step name to jump to." }
+            },
+            "required": ["errors", "goto"],
+            "additionalProperties": false
+          }
+        },
+        "timeout": { "type": "integer", "description": "Per-step timeout in seconds." },
+        "on_failure": {
+          "type": "string",
+          "enum": ["stop", "continue"],
+          "default": "stop"
+        },
+        "end": { "type": "boolean", "default": false, "description": "Terminate workflow after this step." },
+        "choices": {
+          "type": "array",
+          "description": "Conditions for choice steps.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "when": { "type": "string", "description": "Filter condition." },
+              "goto": { "type": "string", "description": "Target step name." }
+            },
+            "required": ["when", "goto"],
+            "additionalProperties": false
+          }
+        },
+        "default": { "type": "string", "description": "Default goto for choice steps." },
+        "branches": {
+          "type": "array",
+          "description": "Parallel branches.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "url": { "type": "string" },
+              "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "default": "POST" },
+              "headers": { "type": "object", "additionalProperties": { "type": "string" } }
+            },
+            "required": ["name", "url"],
+            "additionalProperties": false
+          }
+        },
+        "items_path": { "type": "string", "description": "JSONPath to array for map steps." },
+        "max_concurrency": { "type": "integer", "description": "Max concurrent map executions." },
+        "seconds": { "type": "integer", "description": "Fixed delay for wait steps." },
+        "timestamp_path": { "type": "string", "description": "JSONPath to timestamp for wait steps." },
+        "callback_timeout": { "type": "integer", "description": "Callback expiry in seconds." },
+        "workflow": { "type": "string", "description": "Sub-workflow name to invoke." }
+      },
+      "required": ["name"],
+      "additionalProperties": false
+    }
+  }
+}

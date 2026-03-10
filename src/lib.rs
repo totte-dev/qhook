@@ -4,7 +4,6 @@ pub mod cli;
 pub mod config;
 pub mod cron;
 pub mod db;
-pub mod grpc;
 pub mod metrics;
 pub mod queue;
 pub mod verify;

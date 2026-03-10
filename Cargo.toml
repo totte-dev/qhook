@@ -1,6 +1,6 @@
 [package]
 name = "qhook"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Lightweight webhook gateway and workflow engine with queue, retry, and signature verification."
@@ -30,7 +30,7 @@ exclude = [
 [dependencies]
 # Web
 axum = "0.8"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "net", "time"] }
 reqwest = { version = "0.13", features = ["json"] }
 tower-http = { version = "0.6", features = ["trace", "limit"] }
 
@@ -56,12 +56,6 @@ x509-parser = "0.18"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
-# gRPC
-tonic = { version = "0.14", default-features = false, features = ["transport", "channel"] }
-tonic-prost = "0.14"
-http = "1"
-prost = "0.14"
-
 # Utilities
 ulid = "1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -69,9 +63,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
 opentelemetry = { version = "0.31", optional = true }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"], optional = true }
+opentelemetry-otlp = { version = "0.31", features = ["http-json"], optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
-regex = "1"
+regex-lite = "0.1"
 anyhow = "1"
 thiserror = "2"
 croner = "3.0.1"

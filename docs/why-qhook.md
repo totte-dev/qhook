@@ -401,7 +401,7 @@ It **is** the right choice when:
 | **Deployment** | Single binary, zero external deps |
 | **Database** | SQLite (dev) / Postgres (prod) |
 | **Input** | Webhooks (9 providers verified), SNS, internal API |
-| **Actions** | HTTP + gRPC, with custom headers for authentication |
+| **Actions** | HTTP with custom headers for authentication |
 | **Reliability** | Retry (exponential backoff), error routing, DLQ |
 | **Workflows** | Sequential, choice, parallel, map, wait, callback |
 | **Input validation** | Workflow params with type checking |

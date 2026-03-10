@@ -125,12 +125,6 @@ git clone https://github.com/totte-dev/qhook.git && cd qhook
 cargo build --release
 ```
 
-Kubernetes is not required, but if you already run a cluster, a Helm chart is also available:
-
-```bash
-helm install qhook ./charts/qhook
-```
-
 ## CLI
 
 ```bash
@@ -139,6 +133,9 @@ qhook init                         # Generate default config
 qhook validate                     # Validate config
 qhook jobs list --status dead      # List dead-letter jobs
 qhook jobs retry                   # Retry all dead jobs
+qhook start --env production       # Config overlay (merges qhook.production.yaml)
+qhook tail                         # Stream events and jobs in real time
+qhook export events > events.jsonl # Export events as JSONL
 qhook events list                  # List received events
 qhook events replay --source stripe # Replay events for matching handlers
 qhook workflow-runs list           # List workflow runs
@@ -161,7 +158,6 @@ Full documentation at **[totte-dev.github.io/qhook](https://totte-dev.github.io/
 | AWS SNS | [guides/sns](https://totte-dev.github.io/qhook/guides/sns) |
 | Workflows | [guides/workflows](https://totte-dev.github.io/qhook/guides/workflows) |
 | Filtering & Transformation | [guides/filtering](https://totte-dev.github.io/qhook/guides/filtering) |
-| gRPC Output | [guides/grpc](https://totte-dev.github.io/qhook/guides/grpc) |
 | Monitoring & Alerts | [guides/monitoring](https://totte-dev.github.io/qhook/guides/monitoring) |
 | Security | [guides/security](https://totte-dev.github.io/qhook/guides/security) |
 | Deployment | [deploy](https://totte-dev.github.io/qhook/deploy) |

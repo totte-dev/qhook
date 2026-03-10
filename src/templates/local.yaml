@@ -1,0 +1,11 @@
+# yaml-language-server: $schema=https://totte-dev.github.io/qhook/schema.json
+# qhook.local.yaml — Local development overrides
+# This file is merged on top of qhook.yaml when using: qhook start --env local
+
+server:
+  allow_private_urls: true  # Allow localhost URLs in handlers
+
+# Override handler URLs for local development:
+# handlers:
+#   payment-success:
+#     url: http://localhost:3000/jobs/payment

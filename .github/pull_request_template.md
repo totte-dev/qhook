@@ -20,4 +20,3 @@
 - [ ] `docs/guides/monitoring.md` updated (new metrics)
 - [ ] `docs/openapi.yaml` updated (new/changed endpoints)
 - [ ] `README.md` updated (significant features only)
-- [ ] `charts/qhook/Chart.yaml` appVersion matches `Cargo.toml` version

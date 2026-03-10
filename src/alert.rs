@@ -17,6 +17,8 @@ pub enum AlertEvent {
     },
     /// Signature verification failed.
     VerificationFailure { source: String },
+    /// Custom alert message (e.g., config validation failure).
+    Custom(String),
 }
 
 impl AlertEvent {
@@ -24,6 +26,7 @@ impl AlertEvent {
         match self {
             AlertEvent::Dlq { .. } => "dlq",
             AlertEvent::VerificationFailure { .. } => "verification_failure",
+            AlertEvent::Custom(_) => "custom",
         }
     }
 }
@@ -115,6 +118,13 @@ fn format_generic(event: &AlertEvent) -> String {
             })
             .to_string()
         }
+        AlertEvent::Custom(msg) => {
+            serde_json::json!({
+                "alert": "custom",
+                "message": msg
+            })
+            .to_string()
+        }
     }
 }
 
@@ -129,6 +139,9 @@ fn format_slack(event: &AlertEvent) -> String {
         ),
         AlertEvent::VerificationFailure { source } => {
             format!(":warning: *Signature verification failed*\n• Source: `{source}`")
+        }
+        AlertEvent::Custom(msg) => {
+            format!(":gear: *qhook*\n{msg}")
         }
     };
 
@@ -150,6 +163,11 @@ fn format_discord(event: &AlertEvent) -> String {
             "Signature verification failed".to_string(),
             format!("**Source:** `{source}`"),
             0xFFA500, // orange
+        ),
+        AlertEvent::Custom(msg) => (
+            "qhook".to_string(),
+            msg.clone(),
+            0x3498DB, // blue
         ),
     };
 

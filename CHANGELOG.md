@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.3.1] - 2026-03-11
+
+### Added
+- **`qhook send` CLI**: Send test events to a running server without curl. Supports inline JSON, file input, and auto-detects source type/port from config.
+- **`qhook doctor` CLI**: Pre-production readiness check. Validates config, database connectivity, handler/workflow endpoint reachability, and security settings.
+- **Echo endpoint**: Built-in `/_echo` endpoint returns request headers and body as JSON. Eliminates the need for a mock server during development.
+- **Local development guide**: New `docs/guides/local-development.md` covering echo endpoint, test events, tunnels (GitHub CLI, LocalStack, cloudflared).
+- **Remote config loading**: `qhook start -c s3://...`, `-c gs://...`, `-c az://...`, or `-c https://...` loads config from AWS S3, GCS, Azure Blob, or HTTP. Polls every 30s for changes (ETag-based). Invalid config is rejected with current config preserved and logged. Public endpoints only (private bucket support tracked in #26).
+- **`qhook inspect` CLI**: Show an event's full lifecycle — payload, matched jobs with status/attempts, workflow runs. Debug event flow in one command.
+- **`qhook send --dry-run`**: Show which handlers and workflows would match an event without creating jobs.
+- **`qhook init --template`**: Scaffold config from templates (`github`, `stripe`, `sns`, `cron`).
+- **JSON Schema**: `docs/schema.json` for editor autocomplete and validation. Add `# yaml-language-server: $schema=https://totte-dev.github.io/qhook/schema.json` to `qhook.yaml`.
+- **Database schema guide**: `docs/guides/database-schema.md` — full table/column/index reference.
+- **Config overlay (`--env`)**: `qhook start --env production` merges `qhook.production.yaml` on top of `qhook.yaml`. Also loads `.env.production` for environment variables. Supports `QHOOK_ENV` environment variable. `qhook init` now generates `qhook.local.yaml` alongside `qhook.yaml`.
+- **`qhook tail`**: Real-time event and job stream in the terminal. Filter by `--source` or `--status`. Color-coded output.
+- **`qhook export events`**: Export events as JSONL for portability between environments. Supports `--source`, `--event-type`, `--since`, `--until` filters.
+
+### Changed
+- **Dependency reduction**: Replaced `regex` with `regex-lite` (smaller binary, no Unicode tables). Trimmed `tokio` features from `full` to only required features (`rt-multi-thread`, `macros`, `sync`, `signal`, `net`, `time`). ~1MB binary size reduction.
+- **OTLP exporter**: Switched from gRPC (tonic) to HTTP JSON transport. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to an HTTP endpoint.
+
+### Removed
+- **gRPC output**: Removed `type: grpc` handler support and `tonic`/`prost` dependencies. gRPC added significant binary size (~3MB) for limited use cases — HTTP handlers with Envoy or gRPC-gateway cover the same scenarios. If demand exists, gRPC support will be available in the Cloud version.
+- **Helm chart**: Removed `charts/qhook/`. qhook is a single-binary application and doesn't benefit from Helm's complexity. For Kubernetes, use a simple Deployment manifest with the Docker image directly.
+
 ## [0.3.0] - 2026-03-10
 
 ### Added

@@ -103,9 +103,10 @@ impl IpRateLimiter {
     }
 }
 
-pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<()> {
+pub async fn serve(state: AppState, config_path: String) -> Result<()> {
     let port = state.config.server.port;
     let shared = Arc::new(state);
+    let is_remote = crate::config::Config::is_remote(&config_path);
 
     // SIGHUP: validate config and log changes (restart to apply)
     #[cfg(unix)]
@@ -117,7 +118,12 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
                 .expect("failed to listen for SIGHUP");
             loop {
                 sig.recv().await;
-                match crate::config::Config::load(&path) {
+                let result = if crate::config::Config::is_remote(&path) {
+                    crate::config::Config::load_from(&path, None).await
+                } else {
+                    crate::config::Config::load(std::path::Path::new(&path))
+                };
+                match result {
                     Ok(new_cfg) => {
                         log_config_diff(&current_cfg, &new_cfg);
                         tracing::info!("SIGHUP: config is valid (restart to apply)");
@@ -166,14 +172,6 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
         .filter_map(|(name, h)| h.transform.as_ref().map(|t| (name.clone(), t.clone())))
         .collect();
 
-    let handler_types: std::collections::HashMap<String, String> = shared
-        .config
-        .handlers
-        .iter()
-        .filter(|(_, h)| h.handler_type != "http")
-        .map(|(name, h)| (name.clone(), h.handler_type.clone()))
-        .collect();
-
     let handler_headers: std::collections::HashMap<
         String,
         std::collections::HashMap<String, String>,
@@ -201,7 +199,6 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
         shutdown_rx,
         rate_limits,
         handler_transforms,
-        handler_types,
         handler_headers,
         handler_methods,
         shared.config.workflows.clone(),
@@ -227,6 +224,72 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
     } else {
         None
     };
+
+    // Remote config polling (S3/HTTP only)
+    if is_remote {
+        let poll_path = config_path.clone();
+        let current_cfg = shared.config.clone();
+        let poll_alerter = shared.alerter.clone();
+        tokio::spawn(async move {
+            // Get initial ETag
+            let mut last_etag: Option<String> =
+                match crate::config::Config::fetch_remote(&poll_path).await {
+                    Ok((_, etag)) => etag,
+                    Err(_) => None,
+                };
+            let poll_interval = std::time::Duration::from_secs(30);
+            tracing::info!(
+                path = %poll_path,
+                interval = ?poll_interval,
+                "Remote config polling enabled"
+            );
+            loop {
+                tokio::time::sleep(poll_interval).await;
+                match crate::config::Config::fetch_remote(&poll_path).await {
+                    Ok((content, new_etag)) => {
+                        if new_etag == last_etag && last_etag.is_some() {
+                            continue; // No change
+                        }
+                        match crate::config::Config::from_yaml(&content) {
+                            Ok(new_cfg) => {
+                                // Check for restart-required changes
+                                if new_cfg.server.port != current_cfg.server.port
+                                    || new_cfg.database.driver != current_cfg.database.driver
+                                {
+                                    tracing::warn!(
+                                        "Remote config changed port or database driver — restart required to apply"
+                                    );
+                                    last_etag = new_etag;
+                                    continue;
+                                }
+                                log_config_diff(&current_cfg, &new_cfg);
+                                tracing::info!("Remote config updated (restart to apply)");
+                                last_etag = new_etag;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Remote config validation failed — keeping current config"
+                                );
+                                if let Some(ref alerter) = poll_alerter {
+                                    alerter.send(crate::alert::AlertEvent::Custom(format!(
+                                        "Config validation failed: {}",
+                                        e
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Failed to fetch remote config — keeping current config"
+                        );
+                    }
+                }
+            }
+        });
+    }
 
     let body_limit = shared.config.server.max_body_size;
     let max_inbound = shared.config.server.max_inbound;
@@ -260,6 +323,7 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
         .route("/events/{event_type}", post(handle_event))
         .route("/sns/{source}", post(handle_sns))
         .route("/callback/{token}", post(handle_callback))
+        .route("/_echo", axum::routing::any(handle_echo))
         .route("/health", axum::routing::get(handle_health))
         .route("/metrics", axum::routing::get(handle_metrics))
         .layer(security_headers)
@@ -942,6 +1006,38 @@ async fn handle_callback(
     }
 }
 
+async fn handle_echo(
+    headers: HeaderMap,
+    body: Bytes,
+) -> (
+    StatusCode,
+    [(axum::http::header::HeaderName, &'static str); 1],
+    String,
+) {
+    let body_value = match serde_json::from_slice::<Value>(&body) {
+        Ok(v) => v,
+        Err(_) => Value::String(String::from_utf8_lossy(&body).into_owned()),
+    };
+
+    let mut header_map = serde_json::Map::new();
+    for (name, value) in &headers {
+        if let Ok(v) = value.to_str() {
+            header_map.insert(name.to_string(), Value::String(v.to_string()));
+        }
+    }
+
+    let response = serde_json::json!({
+        "headers": header_map,
+        "body": body_value,
+    });
+
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        response.to_string(),
+    )
+}
+
 async fn handle_health(State(state): State<SharedState>) -> impl IntoResponse {
     match state.db.queue_depth().await {
         Ok(depth) => {
@@ -1294,7 +1390,9 @@ pub fn evaluate_filter(payload: &str, filter: &str) -> bool {
         let path = path.trim();
         let pattern = pattern.trim();
         return match extract_json_path_value(payload, path) {
-            Some(Value::String(s)) => regex::Regex::new(pattern).is_ok_and(|re| re.is_match(&s)),
+            Some(Value::String(s)) => {
+                regex_lite::Regex::new(pattern).is_ok_and(|re| re.is_match(&s))
+            }
             _ => false,
         };
     }
@@ -2100,5 +2198,43 @@ mod tests {
     fn test_validate_schema_no_schema() {
         // When no schema is configured, any payload is valid
         assert!(validate_event_schema(r#"{"anything": true}"#, "").is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_echo_returns_json_with_body_and_headers() {
+        let body = Bytes::from(r#"{"order_id": "123", "amount": 500}"#);
+        let headers = HeaderMap::new();
+        let resp = handle_echo(headers, body).await;
+        assert_eq!(resp.0, StatusCode::OK);
+        assert_eq!(
+            resp.1,
+            [(axum::http::header::CONTENT_TYPE, "application/json")]
+        );
+        let parsed: Value = serde_json::from_str(&resp.2).unwrap();
+        assert_eq!(parsed["body"]["order_id"], "123");
+        assert_eq!(parsed["body"]["amount"], 500);
+        assert!(parsed["headers"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_echo_includes_request_headers() {
+        let body = Bytes::from(r#"{}"#);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-custom", "test-value".parse().unwrap());
+        let resp = handle_echo(headers, body).await;
+        assert_eq!(resp.0, StatusCode::OK);
+        let parsed: Value = serde_json::from_str(&resp.2).unwrap();
+        assert_eq!(parsed["body"], serde_json::json!({}));
+        assert_eq!(parsed["headers"]["x-custom"], "test-value");
+    }
+
+    #[tokio::test]
+    async fn test_echo_non_json_body() {
+        let body = Bytes::from("plain text body");
+        let headers = HeaderMap::new();
+        let resp = handle_echo(headers, body).await;
+        assert_eq!(resp.0, StatusCode::OK);
+        let parsed: Value = serde_json::from_str(&resp.2).unwrap();
+        assert_eq!(parsed["body"], "plain text body");
     }
 }
