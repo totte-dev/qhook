@@ -27,7 +27,7 @@ After implementing any feature, update **all applicable** items:
 
 ### Release Checklist
 
-- [ ] Renovate の PR / Issue を確認・マージ（依存関係を最新にしてからリリース）
+- [ ] Check and merge Renovate PRs/Issues (update dependencies before release)
 - [ ] `Cargo.toml` version bumped
 - [ ] `charts/qhook/Chart.yaml` `appVersion` updated
 - [ ] `CHANGELOG.md` — rename `[Unreleased]` to `[x.y.z] - date`
