@@ -374,9 +374,9 @@ impl Args {
                                         }))
                             })
                             .filter(|(_, h)| {
-                                h.filter.as_ref().is_none_or(|f| {
-                                    crate::api::evaluate_filter(&event.payload, f)
-                                })
+                                h.filter
+                                    .as_ref()
+                                    .is_none_or(|f| crate::api::evaluate_filter(&event.payload, f))
                             })
                             .count();
                         total_jobs += handler_count;
@@ -413,9 +413,9 @@ impl Args {
                                         }))
                             })
                             .filter(|(_, h)| {
-                                h.filter.as_ref().is_none_or(|f| {
-                                    crate::api::evaluate_filter(&event.payload, f)
-                                })
+                                h.filter
+                                    .as_ref()
+                                    .is_none_or(|f| crate::api::evaluate_filter(&event.payload, f))
                             })
                             .collect();
 

@@ -1054,7 +1054,12 @@ fn log_config_diff(current: &Config, new: &Config) {
     for (name, h) in &new.handlers {
         if let Some(old_h) = current.handlers.get(name) {
             if old_h.url != h.url {
-                tracing::info!(handler = name.as_str(), old = old_h.url.as_str(), new = h.url.as_str(), "SIGHUP: handler URL changed");
+                tracing::info!(
+                    handler = name.as_str(),
+                    old = old_h.url.as_str(),
+                    new = h.url.as_str(),
+                    "SIGHUP: handler URL changed"
+                );
             }
         } else {
             tracing::info!(handler = name.as_str(), "SIGHUP: handler added");
