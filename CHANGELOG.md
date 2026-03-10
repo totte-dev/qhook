@@ -12,6 +12,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Event replay CLI**: `qhook events replay` re-creates jobs for historical events. Supports `--source`, `--event-type`, `--since`, `--until` filters.
 - **Helm chart**: Kubernetes deployment via `charts/qhook/`. Includes Deployment, Service, ConfigMap, Ingress, PVC, HPA, and ServiceAccount.
 - **SIGHUP config diff**: SIGHUP now logs added/removed/changed sources, handlers, and workflows. Warns about changes requiring restart (port, database driver).
+- **Advanced filter operators**: `contains` (substring + array membership), `starts_with`, `ends_with`, `matches` (regex), `exists`, and `not` (negation).
+- **Event schema validation**: `schema` field on sources for lightweight JSON Schema validation (`type`, `required`, `properties`). Rejects non-conforming events with 400.
 
 ## [0.2.2] - 2026-03-10
 

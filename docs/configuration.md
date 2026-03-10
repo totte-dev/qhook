@@ -169,6 +169,7 @@ Each source is a named entry under `sources:`.
 | `skip_verify` | boolean | `false` | Skip SNS X.509 verification (for testing with LocalStack) |
 | `schedule` | string | - | Cron expression (required for `cron` sources). 5-field standard or 6-field with seconds |
 | `timezone` | string | `UTC` | Timezone for cron evaluation. `UTC` or fixed offset like `+09:00` |
+| `schema` | string | - | JSON Schema for payload validation. Rejects events that don't match (see below) |
 
 **Source types:**
 
@@ -178,6 +179,25 @@ Each source is a named entry under `sources:`.
 | `event` | `POST /events/{event_type}` | Internal events with optional bearer token auth |
 | `sns` | `POST /sns/{source}` | AWS SNS with auto-confirmation and envelope unwrapping |
 | `cron` | *(internal)* | Time-based trigger. Fires `cron.tick` events on schedule |
+
+**Schema validation:**
+
+Sources can enforce payload structure using a subset of JSON Schema (`type`, `required`, `properties`). Events that fail validation are rejected with 400 Bad Request.
+
+```yaml
+sources:
+  orders:
+    type: webhook
+    schema: |
+      {
+        "type": "object",
+        "required": ["order_id", "amount"],
+        "properties": {
+          "order_id": { "type": "string" },
+          "amount": { "type": "number" }
+        }
+      }
+```
 
 ### handlers
 
@@ -194,7 +214,7 @@ Each handler is a named entry under `handlers:`.
 | `timeout` | duration | - | Override delivery timeout for this handler |
 | `idempotency_key` | string | - | JSONPath to dedup key in payload (e.g., `$.id`) |
 | `rate_limit` | integer | - | Max deliveries/sec to this handler |
-| `filter` | string | - | JSONPath filter expression. Job created only if filter matches |
+| `filter` | string | - | JSONPath filter expression. Supports `==`, `!=`, `>`, `<`, `>=`, `<=`, `in`, `contains`, `starts_with`, `ends_with`, `matches`, `exists`, `not` |
 | `transform` | string | - | Payload transformation template with `{{$.path}}` placeholders |
 | `headers` | map | `{}` | Custom HTTP headers to send with delivery (e.g., `Authorization`) |
 
