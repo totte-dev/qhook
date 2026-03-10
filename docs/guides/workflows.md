@@ -281,6 +281,37 @@ Content-Type: application/json
 
 If `callback_timeout` is set and no callback is received within that time, the step is marked as failed and the workflow proceeds according to the step's `on_failure` setting (default: `stop`).
 
+## Sub-workflow step
+
+A workflow step invokes another workflow as a sub-workflow. The current workflow pauses until the sub-workflow completes, then continues to the next step. This enables reuse of common step sequences.
+
+```yaml
+workflows:
+  notify-all:
+    source: app
+    steps:
+      - name: slack
+        url: http://slack-bot:3000/notify
+      - name: email
+        url: http://email-service:3000/send
+
+  order-pipeline:
+    source: app
+    events: [order.created]
+    steps:
+      - name: fulfill
+        url: http://backend:3000/fulfill
+      - name: notify
+        type: workflow
+        workflow: notify-all
+```
+
+When the `notify` step is reached, qhook creates a new workflow run for `notify-all` and executes its steps. After `notify-all` completes, `order-pipeline` advances to its next step (or finishes if `notify` was the last step).
+
+- The sub-workflow receives the current step's payload as input
+- Self-referencing (recursive) workflows are rejected at config validation
+- Sub-workflows can be nested (a sub-workflow can invoke another sub-workflow)
+
 ## Workflow timeout
 
 Set `timeout` on a workflow to limit total execution time. If the workflow runs longer than the specified seconds, subsequent steps are skipped and the workflow is marked as failed.
@@ -324,7 +355,7 @@ workflows:
       # Task step (HTTP call)
       - name: step-name          # required, unique within workflow
         url: http://...           # HTTP endpoint to call
-        type: http                # http (default), grpc, choice, parallel, map, wait, callback
+        type: http                # http (default), grpc, choice, parallel, map, wait, callback, workflow
         timeout: 30               # per-step timeout in seconds
         input: '...'              # input transform template
         result_path: "$.field"    # response merge path
@@ -374,4 +405,9 @@ workflows:
         type: callback
         callback_timeout: 3600     # optional: expire after N seconds
         # External system calls POST /callback/{token} with JSON body to resume
+
+      # Sub-workflow step (invoke another workflow)
+      - name: notify
+        type: workflow
+        workflow: notify-all       # name of workflow to invoke
 ```

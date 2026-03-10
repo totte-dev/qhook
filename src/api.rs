@@ -420,8 +420,8 @@ async fn handle_webhook(
     }
 
     // Parse payload
-    let payload_str = match std::str::from_utf8(&body) {
-        Ok(s) => s.to_string(),
+    let payload_str = match String::from_utf8(body.to_vec()) {
+        Ok(s) => s,
         Err(_) => return (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()),
     };
 
@@ -493,8 +493,8 @@ async fn handle_event(
         }
     }
 
-    let payload_str = match std::str::from_utf8(&body) {
-        Ok(s) => s.to_string(),
+    let payload_str = match String::from_utf8(body.to_vec()) {
+        Ok(s) => s,
         Err(_) => return (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()),
     };
 
@@ -545,8 +545,8 @@ async fn handle_sns(
         _ => return (StatusCode::NOT_FOUND, "Unknown source".to_string()),
     };
 
-    let body_str = match std::str::from_utf8(&body) {
-        Ok(s) => s.to_string(),
+    let body_str = match String::from_utf8(body.to_vec()) {
+        Ok(s) => s,
         Err(_) => return (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()),
     };
 

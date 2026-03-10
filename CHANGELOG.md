@@ -14,6 +14,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **SIGHUP config diff**: SIGHUP now logs added/removed/changed sources, handlers, and workflows. Warns about changes requiring restart (port, database driver).
 - **Advanced filter operators**: `contains` (substring + array membership), `starts_with`, `ends_with`, `matches` (regex), `exists`, and `not` (negation).
 - **Event schema validation**: `schema` field on sources for lightweight JSON Schema validation (`type`, `required`, `properties`). Rejects non-conforming events with 400.
+- **Sub-workflow step**: `type: workflow` step invokes another workflow as a child. Parent workflow resumes after sub-workflow completes. Supports nesting.
+
+### Changed
+- **Performance**: Extracted `format_now()`/`format_dt()` helpers to eliminate 15+ repeated datetime formatting calls in DB layer. Optimized Stripe HMAC to avoid intermediate String allocation. Pre-allocated SNS signature string builder. Replaced `from_utf8` + `to_string()` with `String::from_utf8` in HTTP handlers.
 
 ## [0.2.2] - 2026-03-10
 
