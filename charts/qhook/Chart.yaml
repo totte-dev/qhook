@@ -3,7 +3,7 @@ name: qhook
 description: Lightweight webhook gateway and workflow engine
 type: application
 version: 0.1.0
-appVersion: "0.2.2"
+appVersion: "0.3.0"
 home: https://totte-dev.github.io/qhook/
 sources:
   - https://github.com/totte-dev/qhook
