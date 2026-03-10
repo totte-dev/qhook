@@ -202,6 +202,7 @@ pub async fn serve(state: AppState, config_path: std::path::PathBuf) -> Result<(
         handler_methods,
         shared.config.workflows.clone(),
         shared.config.delivery.default_retry.max,
+        shared.config.handlers.keys().cloned().collect(),
     );
     let worker_handle = tokio::spawn(async move {
         worker.run().await;
