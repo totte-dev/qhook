@@ -18,7 +18,7 @@ qhook start -c /path/to/qhook.yaml # custom config path
 
 **Signals:**
 - `SIGTERM` / `SIGINT` -- graceful shutdown (stops accepting requests, drains in-flight deliveries)
-- `SIGHUP` -- validate config without restart (dry-run reload)
+- `SIGHUP` -- validate config and log changes (added/removed sources, handlers, workflows; warns about port/database changes requiring restart)
 
 ### qhook init
 
@@ -72,6 +72,32 @@ qhook events list                  # recent events
 qhook events list --limit 50      # limit results
 ```
 
+### qhook events replay
+
+Replay historical events by re-creating jobs for matching handlers.
+
+```bash
+qhook events replay                                    # replay all events (with confirmation)
+qhook events replay --source stripe                    # only events from a specific source
+qhook events replay --event-type order.created         # only a specific event type
+qhook events replay --since 2026-03-01T00:00:00       # events after a timestamp
+qhook events replay --until 2026-03-10T00:00:00       # events before a timestamp
+qhook events replay --source stripe --limit 50 -y     # combine filters, skip confirmation
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--source` | Filter by source name |
+| `-t`, `--event-type` | Filter by event type |
+| `--since` | Only events created after this timestamp |
+| `--until` | Only events created before this timestamp |
+| `-l`, `--limit` | Max events to replay (default: 100) |
+| `-y`, `--yes` | Skip confirmation prompt |
+
+Replay respects the current config: only handlers matching the event's source and type (including filters) will have jobs created.
+
 ### qhook workflow-runs list
 
 List workflow runs.
@@ -102,3 +128,4 @@ Resets the workflow run to `pending` and creates a new job for the first step.
 | `RUST_LOG` | Log level filter (e.g., `qhook=info`, `qhook=debug`) |
 | `QHOOK_LOG_FORMAT` | Set to `json` for structured JSON logging |
 | `QHOOK_CONFIG` | Config file path (alternative to `-c` flag) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OpenTelemetry OTLP endpoint (requires `otel` feature). When set, traces are exported via gRPC |

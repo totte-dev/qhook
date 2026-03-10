@@ -102,6 +102,7 @@ qhook start
 | Platform | Guide |
 |----------|-------|
 | AWS (ECS / EC2) | [deploy/aws.md](deploy/aws.md) |
+| Kubernetes (Helm) | [deploy/kubernetes.md](deploy/kubernetes.md) |
 | Fly.io | [deploy/flyio.md](deploy/flyio.md) |
 | Railway | [deploy/railway.md](deploy/railway.md) |
 | Render | [deploy/render.md](deploy/render.md) |
