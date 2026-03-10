@@ -600,19 +600,12 @@ async fn deliver_job(
     let result = if is_workflow {
         deliver_workflow_step(db, http, job, custom_headers.as_ref(), &method).await
     } else {
-        deliver(
-            db,
-            http,
-            job,
-            transform,
-            custom_headers.as_ref(),
-            &method,
-        )
-        .await
-        .map(|status_code| DeliveryResult {
-            status_code,
-            response_body: None,
-        })
+        deliver(db, http, job, transform, custom_headers.as_ref(), &method)
+            .await
+            .map(|status_code| DeliveryResult {
+                status_code,
+                response_body: None,
+            })
     };
     let duration_ms = start.elapsed().as_millis() as i64;
 
