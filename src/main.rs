@@ -43,7 +43,7 @@ fn init_otel_tracing(filter: tracing_subscriber::EnvFilter) {
     }
 
     let exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_tonic()
+        .with_http()
         .build()
         .expect("Failed to create OTLP exporter");
 

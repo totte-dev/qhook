@@ -61,10 +61,10 @@ fn default_required() -> bool {
 #[derive(Debug, Deserialize, Clone)]
 pub struct StepConfig {
     pub name: String,
-    /// HTTP/gRPC endpoint to call (required for task steps).
+    /// HTTP endpoint to call (required for task steps).
     #[serde(default)]
     pub url: Option<String>,
-    /// Handler type: "http" (default), "grpc", "choice", "parallel", "map", "wait", "callback".
+    /// Step type: "http" (default), "choice", "parallel", "map", "wait", "callback", "workflow".
     #[serde(rename = "type", default = "default_handler_type")]
     pub handler_type: String,
     /// HTTP method: GET, POST (default), PUT, PATCH, DELETE.
@@ -393,7 +393,7 @@ pub struct HandlerConfig {
     #[serde(default)]
     pub events: Vec<String>,
     pub url: String,
-    /// Handler type: "http" (default) or "grpc".
+    /// Handler type: "http" (default).
     #[serde(rename = "type", default = "default_handler_type")]
     pub handler_type: String,
     /// HTTP method: GET, POST (default), PUT, PATCH, DELETE.
@@ -427,11 +427,178 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config: {}", path.display()))?;
-        let content = expand_env_vars(&content);
+        Self::from_yaml(&content)
+    }
+
+    /// Load config with optional environment overlay and .env file.
+    ///
+    /// Resolution order:
+    /// 1. Load `.env.{env}` (if exists) into process environment
+    /// 2. Load base config (e.g. `qhook.yaml`)
+    /// 3. Deep merge overlay `qhook.{env}.yaml` (if exists)
+    /// 4. Expand `${VAR}` references and validate
+    pub fn load_with_env(base_path: &Path, env: &str) -> Result<Self> {
+        // Load .env file for this environment
+        let env_file_name = format!(".env.{}", env);
+        let env_file = Path::new(&env_file_name);
+        if env_file.exists() {
+            load_dotenv(env_file)?;
+        }
+
+        // Read base config
+        let base_content = std::fs::read_to_string(base_path)
+            .with_context(|| format!("Failed to read config: {}", base_path.display()))?;
+        let base_value: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&base_content).context("Failed to parse base YAML config")?;
+
+        // Read overlay if exists
+        let stem = base_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("qhook");
+        let ext = base_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("yaml");
+        let overlay_path = base_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(format!("{}.{}.{}", stem, env, ext));
+
+        let merged = if overlay_path.exists() {
+            let overlay_content = std::fs::read_to_string(&overlay_path).with_context(|| {
+                format!("Failed to read overlay config: {}", overlay_path.display())
+            })?;
+            let overlay_value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&overlay_content)
+                .context("Failed to parse overlay YAML config")?;
+            deep_merge_yaml(base_value, overlay_value)
+        } else {
+            base_value
+        };
+
+        // Serialize back to string, expand env vars, parse into Config
+        let merged_str =
+            serde_yaml_ng::to_string(&merged).context("Failed to serialize merged config")?;
+        Self::from_yaml(&merged_str)
+    }
+
+    /// Parse and validate config from a YAML string.
+    pub fn from_yaml(raw: &str) -> Result<Self> {
+        let content = expand_env_vars(raw);
         let config: Config =
             serde_yaml_ng::from_str(&content).context("Failed to parse YAML config")?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Check if a config path refers to a remote source.
+    pub fn is_remote(path: &str) -> bool {
+        path.starts_with("s3://")
+            || path.starts_with("gs://")
+            || path.starts_with("az://")
+            || path.starts_with("http://")
+            || path.starts_with("https://")
+    }
+
+    /// Resolve a remote config path to an HTTPS URL.
+    /// Currently supports public (unauthenticated) access only.
+    ///
+    /// - `s3://bucket/key` → `https://bucket.s3.region.amazonaws.com/key`
+    /// - `gs://bucket/key` → `https://storage.googleapis.com/bucket/key`
+    /// - `az://account/container/key` → `https://account.blob.core.windows.net/container/key`
+    /// - `http(s)://...` → passed through as-is
+    pub fn resolve_remote_url(path: &str) -> Result<String> {
+        if let Some(stripped) = path.strip_prefix("s3://") {
+            let (bucket, key) = stripped
+                .split_once('/')
+                .with_context(|| format!("Invalid S3 path: {}. Expected s3://bucket/key", path))?;
+            let region = std::env::var("AWS_REGION")
+                .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+                .unwrap_or_else(|_| "us-east-1".to_string());
+            if let Ok(endpoint) = std::env::var("AWS_ENDPOINT_URL") {
+                Ok(format!(
+                    "{}/{}/{}",
+                    endpoint.trim_end_matches('/'),
+                    bucket,
+                    key
+                ))
+            } else {
+                Ok(format!(
+                    "https://{}.s3.{}.amazonaws.com/{}",
+                    bucket, region, key
+                ))
+            }
+        } else if let Some(stripped) = path.strip_prefix("gs://") {
+            let (bucket, key) = stripped
+                .split_once('/')
+                .with_context(|| format!("Invalid GCS path: {}. Expected gs://bucket/key", path))?;
+            Ok(format!("https://storage.googleapis.com/{}/{}", bucket, key))
+        } else if let Some(stripped) = path.strip_prefix("az://") {
+            // az://account/container/key
+            let (account, rest) = stripped.split_once('/').with_context(|| {
+                format!(
+                    "Invalid Azure Blob path: {}. Expected az://account/container/key",
+                    path
+                )
+            })?;
+            if rest.is_empty() {
+                anyhow::bail!(
+                    "Invalid Azure Blob path: {}. Expected az://account/container/key",
+                    path
+                );
+            }
+            Ok(format!(
+                "https://{}.blob.core.windows.net/{}",
+                account, rest
+            ))
+        } else {
+            // http:// or https:// — pass through
+            Ok(path.to_string())
+        }
+    }
+
+    /// Fetch config content from a remote source. Returns (content, etag).
+    pub async fn fetch_remote(path: &str) -> Result<(String, Option<String>)> {
+        let url = Self::resolve_remote_url(path)?;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?;
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("Failed to fetch config from {}", path))?;
+        if !resp.status().is_success() {
+            anyhow::bail!(
+                "Failed to fetch config from {}: HTTP {}",
+                path,
+                resp.status()
+            );
+        }
+        let etag = resp
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let body = resp.text().await?;
+        Ok((body, etag))
+    }
+
+    /// Load config from a local path or remote URL, with optional environment overlay.
+    pub async fn load_from(path: &str, env: Option<&str>) -> Result<Self> {
+        if Self::is_remote(path) {
+            let (content, _) = Self::fetch_remote(path).await?;
+            Self::from_yaml(&content)
+        } else if let Some(env) = env {
+            Self::load_with_env(Path::new(path), env)
+        } else {
+            // Check QHOOK_ENV environment variable
+            if let Ok(env) = std::env::var("QHOOK_ENV") {
+                Self::load_with_env(Path::new(path), &env)
+            } else {
+                Self::load(Path::new(path))
+            }
+        }
     }
 
     /// Semantic validation beyond YAML parsing.
@@ -439,7 +606,7 @@ impl Config {
         // Validate handler URLs and types
         for (name, handler) in &self.handlers {
             match handler.handler_type.as_str() {
-                "http" | "grpc" => {}
+                "http" => {}
                 other => anyhow::bail!("handler '{}' has invalid type '{}'", name, other),
             }
             validate_handler_url(name, &handler.url, self.server.allow_private_urls)?;
@@ -709,7 +876,8 @@ impl Config {
     }
 
     pub fn default_yaml() -> &'static str {
-        r#"# qhook.yaml
+        r#"# yaml-language-server: $schema=https://totte-dev.github.io/qhook/schema.json
+# qhook.yaml
 
 database:
   driver: sqlite  # sqlite (default) / postgres
@@ -747,7 +915,7 @@ handlers: {}
   #   url: http://localhost:3000/jobs/payment
   #   retry: { max: 5 }
   #   idempotency_key: "$.id"
-  #   type: http            # http (default) or grpc
+  #   type: http
   #   filter: "$.status == paid"
   #   transform: '{"event_id": "{{$.id}}", "amount": {{$.data.amount}}}'
 
@@ -861,6 +1029,52 @@ fn is_private_ipv4(ip: std::net::Ipv4Addr) -> bool {
     || (octets[0] == 192 && octets[1] == 168)
     // 169.254.0.0/16 (link-local)
     || (octets[0] == 169 && octets[1] == 254)
+}
+
+/// Deep merge two YAML values. Overlay values override base values.
+/// Mappings are merged recursively; all other types are replaced.
+fn deep_merge_yaml(
+    base: serde_yaml_ng::Value,
+    overlay: serde_yaml_ng::Value,
+) -> serde_yaml_ng::Value {
+    use serde_yaml_ng::Value;
+    match (base, overlay) {
+        (Value::Mapping(mut base_map), Value::Mapping(overlay_map)) => {
+            for (key, overlay_val) in overlay_map {
+                let merged = if let Some(base_val) = base_map.remove(&key) {
+                    deep_merge_yaml(base_val, overlay_val)
+                } else {
+                    overlay_val
+                };
+                base_map.insert(key, merged);
+            }
+            Value::Mapping(base_map)
+        }
+        (_, overlay) => overlay,
+    }
+}
+
+/// Load a .env file: each line `KEY=VALUE` is set as an environment variable.
+/// Lines starting with `#` and empty lines are skipped.
+fn load_dotenv(path: &Path) -> Result<()> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read env file: {}", path.display()))?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim();
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            // Only set if not already set (process env takes precedence)
+            if std::env::var(key).is_err() {
+                // SAFETY: We are single-threaded at config load time (before tokio runtime tasks).
+                unsafe { std::env::set_var(key, value) };
+            }
+        }
+    }
+    Ok(())
 }
 
 fn expand_env_vars(input: &str) -> String {
@@ -1016,7 +1230,7 @@ mod tests {
         sources.insert(
             "bad".into(),
             SourceConfig {
-                source_type: "grpc".into(),
+                source_type: "invalid".into(),
                 verify: None,
                 secret: None,
                 skip_verify: false,
@@ -2439,6 +2653,108 @@ workflows:
     }
 
     #[test]
+    fn test_is_remote() {
+        assert!(Config::is_remote("s3://my-bucket/config.yaml"));
+        assert!(Config::is_remote("gs://my-bucket/config.yaml"));
+        assert!(Config::is_remote("az://account/container/config.yaml"));
+        assert!(Config::is_remote("https://example.com/config.yaml"));
+        assert!(Config::is_remote("http://localhost:8080/config.yaml"));
+        assert!(!Config::is_remote("qhook.yaml"));
+        assert!(!Config::is_remote("/etc/qhook/config.yaml"));
+    }
+
+    #[test]
+    fn test_resolve_remote_url_s3() {
+        // Test S3 URL resolution (may include endpoint override from env)
+        let url = Config::resolve_remote_url("s3://my-bucket/path/config.yaml").unwrap();
+        assert!(url.contains("my-bucket"));
+        assert!(url.contains("path/config.yaml"));
+    }
+
+    #[test]
+    fn test_resolve_remote_url_gcs() {
+        let url = Config::resolve_remote_url("gs://my-bucket/path/config.yaml").unwrap();
+        assert_eq!(
+            url,
+            "https://storage.googleapis.com/my-bucket/path/config.yaml"
+        );
+    }
+
+    #[test]
+    fn test_resolve_remote_url_azure() {
+        let url = Config::resolve_remote_url("az://myaccount/mycontainer/config.yaml").unwrap();
+        assert_eq!(
+            url,
+            "https://myaccount.blob.core.windows.net/mycontainer/config.yaml"
+        );
+    }
+
+    #[test]
+    fn test_resolve_remote_url_azure_invalid() {
+        let err = Config::resolve_remote_url("az://account-only").unwrap_err();
+        assert!(err.to_string().contains("Invalid Azure Blob path"));
+    }
+
+    #[test]
+    fn test_resolve_remote_url_https_passthrough() {
+        let url = Config::resolve_remote_url("https://example.com/config.yaml").unwrap();
+        assert_eq!(url, "https://example.com/config.yaml");
+    }
+
+    #[test]
+    fn test_from_yaml_valid() {
+        let yaml = r#"
+server:
+  allow_private_urls: true
+sources:
+  app:
+    type: event
+handlers:
+  test:
+    source: app
+    url: http://localhost:3000/test
+"#;
+        let config = Config::from_yaml(yaml).unwrap();
+        assert_eq!(config.sources.len(), 1);
+        assert_eq!(config.handlers.len(), 1);
+    }
+
+    #[test]
+    fn test_from_yaml_invalid_keeps_error() {
+        let yaml = "not: valid: yaml: [[[";
+        assert!(Config::from_yaml(yaml).is_err());
+    }
+
+    #[test]
+    fn test_from_yaml_validation_error() {
+        let yaml = r#"
+server:
+  allow_private_urls: true
+sources:
+  app:
+    type: event
+handlers:
+  test:
+    source: nonexistent
+    url: http://localhost:3000/test
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_fetch_s3_path_parsing() {
+        // Invalid S3 path (no key)
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(Config::fetch_remote("s3://bucket-only"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid S3 path"));
+    }
+
+    #[test]
     fn test_cron_source_invalid_timezone() {
         let yaml = r#"
 sources:
@@ -2451,5 +2767,81 @@ handlers: {}
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("invalid timezone"));
+    }
+
+    #[test]
+    fn test_deep_merge_yaml_scalars() {
+        use serde_yaml_ng::{Mapping, Value};
+        let mut base = Mapping::new();
+        base.insert(Value::String("a".into()), Value::String("1".into()));
+        base.insert(Value::String("b".into()), Value::String("2".into()));
+
+        let mut overlay = Mapping::new();
+        overlay.insert(Value::String("b".into()), Value::String("99".into()));
+        overlay.insert(Value::String("c".into()), Value::String("3".into()));
+
+        let result = deep_merge_yaml(Value::Mapping(base), Value::Mapping(overlay));
+        let map = result.as_mapping().unwrap();
+        assert_eq!(
+            map.get(Value::String("a".into())),
+            Some(&Value::String("1".into()))
+        );
+        assert_eq!(
+            map.get(Value::String("b".into())),
+            Some(&Value::String("99".into()))
+        );
+        assert_eq!(
+            map.get(Value::String("c".into())),
+            Some(&Value::String("3".into()))
+        );
+    }
+
+    #[test]
+    fn test_deep_merge_yaml_nested() {
+        let base_yaml = "database:\n  driver: sqlite\nserver:\n  port: 8888\n  allow_private_urls: true\n";
+        let overlay_yaml = "database:\n  driver: postgres\n  url: postgres://localhost/qhook\n";
+
+        let base: serde_yaml_ng::Value = serde_yaml_ng::from_str(base_yaml).unwrap();
+        let overlay: serde_yaml_ng::Value = serde_yaml_ng::from_str(overlay_yaml).unwrap();
+        let merged = deep_merge_yaml(base, overlay);
+
+        let merged_str = serde_yaml_ng::to_string(&merged).unwrap();
+        // Database should be merged (driver overridden, url added)
+        assert!(merged_str.contains("postgres"));
+        assert!(merged_str.contains("url:"));
+        // Server should be preserved from base
+        assert!(merged_str.contains("port: 8888"));
+        assert!(merged_str.contains("allow_private_urls: true"));
+    }
+
+    #[test]
+    fn test_deep_merge_yaml_overlay_replaces_non_mapping() {
+        use serde_yaml_ng::Value;
+        let base = Value::String("base".into());
+        let overlay = Value::String("overlay".into());
+        let result = deep_merge_yaml(base, overlay);
+        assert_eq!(result, Value::String("overlay".into()));
+    }
+
+    #[test]
+    fn test_load_dotenv() {
+        let dir = std::env::temp_dir().join("qhook_test_dotenv");
+        let _ = std::fs::create_dir_all(&dir);
+        let env_file = dir.join(".env.test");
+        std::fs::write(
+            &env_file,
+            "# comment\nTEST_QHOOK_DOT_A=hello\nTEST_QHOOK_DOT_B=\"world\"\n\nTEST_QHOOK_DOT_C='quoted'\n",
+        )
+        .unwrap();
+
+        load_dotenv(&env_file).unwrap();
+
+        assert_eq!(std::env::var("TEST_QHOOK_DOT_A").unwrap(), "hello");
+        assert_eq!(std::env::var("TEST_QHOOK_DOT_B").unwrap(), "world");
+        assert_eq!(std::env::var("TEST_QHOOK_DOT_C").unwrap(), "quoted");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&env_file);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

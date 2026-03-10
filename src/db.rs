@@ -558,6 +558,112 @@ impl Database {
         Ok(rows)
     }
 
+    /// List events created after the given ID, optionally filtered by source.
+    /// Used by `qhook tail` for polling.
+    pub async fn list_events_after(
+        &self,
+        after_id: Option<&str>,
+        source: Option<&str>,
+        limit: i32,
+    ) -> Result<Vec<EventRow>> {
+        let rows = match (after_id, source) {
+            (Some(id), Some(src)) => {
+                sqlx::query_as::<_, EventRow>(
+                    "SELECT id, source, event_type, unique_key, created_at \
+                     FROM events WHERE id > $1 AND source = $2 ORDER BY id ASC LIMIT $3",
+                )
+                .bind(id)
+                .bind(src)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (Some(id), None) => {
+                sqlx::query_as::<_, EventRow>(
+                    "SELECT id, source, event_type, unique_key, created_at \
+                     FROM events WHERE id > $1 ORDER BY id ASC LIMIT $2",
+                )
+                .bind(id)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (None, Some(src)) => {
+                sqlx::query_as::<_, EventRow>(
+                    "SELECT id, source, event_type, unique_key, created_at \
+                     FROM events WHERE source = $1 ORDER BY id DESC LIMIT $2",
+                )
+                .bind(src)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (None, None) => {
+                sqlx::query_as::<_, EventRow>(
+                    "SELECT id, source, event_type, unique_key, created_at \
+                     FROM events ORDER BY id DESC LIMIT $1",
+                )
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+        Ok(rows)
+    }
+
+    /// List jobs updated after the given ID, optionally filtered by status.
+    /// Used by `qhook tail` for polling.
+    pub async fn list_jobs_after(
+        &self,
+        after_id: Option<&str>,
+        status: Option<&str>,
+        limit: i32,
+    ) -> Result<Vec<JobRow>> {
+        let rows = match (after_id, status) {
+            (Some(id), Some(st)) => {
+                sqlx::query_as::<_, JobRow>(
+                    "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
+                     FROM jobs WHERE id > $1 AND status = $2 ORDER BY id ASC LIMIT $3",
+                )
+                .bind(id)
+                .bind(st)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (Some(id), None) => {
+                sqlx::query_as::<_, JobRow>(
+                    "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
+                     FROM jobs WHERE id > $1 AND status IN ('completed', 'dead', 'retryable') ORDER BY id ASC LIMIT $2",
+                )
+                .bind(id)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (None, Some(st)) => {
+                sqlx::query_as::<_, JobRow>(
+                    "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
+                     FROM jobs WHERE status = $1 ORDER BY id DESC LIMIT $2",
+                )
+                .bind(st)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (None, None) => {
+                sqlx::query_as::<_, JobRow>(
+                    "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
+                     FROM jobs WHERE status IN ('completed', 'dead', 'retryable') ORDER BY id DESC LIMIT $1",
+                )
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+        Ok(rows)
+    }
+
     pub async fn retry_dead_jobs(&self) -> Result<u64> {
         let now = format_now();
         let result = sqlx::query(
@@ -1198,6 +1304,64 @@ pub struct WorkflowRunRow {
     pub current_step: Option<String>,
     pub created_at: String,
     pub completed_at: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct JobAttemptRow {
+    pub attempt: i32,
+    pub status_code: Option<i32>,
+    pub error: Option<String>,
+    pub duration_ms: Option<i32>,
+}
+
+impl Database {
+    /// Get a single event by ID with full data.
+    pub async fn get_event_by_id(&self, event_id: &str) -> Result<Option<EventRowFull>> {
+        let row = sqlx::query_as::<_, EventRowFull>(
+            "SELECT id, source, event_type, payload, headers, unique_key, created_at \
+             FROM events WHERE id = $1",
+        )
+        .bind(event_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// List jobs for a specific event.
+    pub async fn list_jobs_by_event(&self, event_id: &str) -> Result<Vec<JobRow>> {
+        let rows = sqlx::query_as::<_, JobRow>(
+            "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
+             FROM jobs WHERE event_id = $1 ORDER BY created_at",
+        )
+        .bind(event_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// List attempts for a specific job.
+    pub async fn list_job_attempts(&self, job_id: &str) -> Result<Vec<JobAttemptRow>> {
+        let rows = sqlx::query_as::<_, JobAttemptRow>(
+            "SELECT attempt, status_code, error, duration_ms \
+             FROM job_attempts WHERE job_id = $1 ORDER BY attempt",
+        )
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// List workflow runs for a specific event.
+    pub async fn list_workflow_runs_by_event(&self, event_id: &str) -> Result<Vec<WorkflowRunRow>> {
+        let rows = sqlx::query_as::<_, WorkflowRunRow>(
+            "SELECT id, workflow, event_id, status, current_step, created_at, completed_at \
+             FROM workflow_runs WHERE event_id = $1 ORDER BY created_at",
+        )
+        .bind(event_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]
