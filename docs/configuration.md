@@ -198,6 +198,8 @@ Each handler is a named entry under `handlers:`.
 | `transform` | string | - | Payload transformation template with `{{$.path}}` placeholders |
 | `headers` | map | `{}` | Custom HTTP headers to send with delivery (e.g., `Authorization`) |
 
+**Circuit breaker:** Each handler has an automatic circuit breaker. After 5 consecutive delivery failures, the circuit opens and deliveries are temporarily rejected (jobs are rescheduled). After 60 seconds, a single probe request is allowed through (half-open state). If it succeeds, the circuit closes; if it fails, it stays open for another cooldown period.
+
 ### alerts
 
 | Field | Type | Default | Description |

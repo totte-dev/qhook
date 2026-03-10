@@ -41,6 +41,13 @@ curl http://localhost:8888/metrics
 | `qhook_alerts_sent_total` | - | Alerts sent successfully |
 | `qhook_alerts_failed_total` | - | Failed alert sends |
 
+**Circuit Breaker Counters:**
+
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| `qhook_circuit_breaker_opened_total` | `handler` | Times a circuit breaker opened (after consecutive failures) |
+| `qhook_circuit_breaker_rejected_total` | `handler` | Deliveries rejected by an open circuit breaker |
+
 **Workflow Counters:**
 
 | Metric | Labels | Description |
@@ -83,6 +90,8 @@ Key panels to set up:
 - **Workflow completion rate**: `rate(qhook_workflow_runs_total{status="completed"}[5m])`
 - **Workflow failure rate**: `rate(qhook_workflow_runs_total{status="failed"}[5m])`
 - **Callbacks received**: `rate(qhook_callbacks_received_total[5m])`
+- **Circuit breaker opens**: `rate(qhook_circuit_breaker_opened_total[5m])`
+- **Circuit breaker rejections**: `rate(qhook_circuit_breaker_rejected_total[5m])`
 
 ## Alerts
 
@@ -118,6 +127,42 @@ alerts:
 | `dlq` | A job exhausts all retry attempts and moves to the Dead Letter Queue |
 | `verification_failure` | An inbound webhook fails signature verification |
 
+## OpenTelemetry Tracing
+
+qhook supports distributed tracing via OpenTelemetry (OTLP) as an optional feature.
+
+### Build with OpenTelemetry
+
+```bash
+cargo install qhook --features otel
+# Or build from source:
+cargo build --release --features otel
+```
+
+### Enable Tracing
+
+Set the `OTEL_EXPORTER_OTLP_ENDPOINT` environment variable to enable trace export:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 qhook start
+```
+
+When the endpoint is not set, qhook falls back to standard tracing (no overhead from the otel feature).
+
+### Jaeger Example
+
+```bash
+# Start Jaeger all-in-one
+docker run -d --name jaeger \
+  -p 4317:4317 -p 16686:16686 \
+  jaegertracing/all-in-one:latest
+
+# Start qhook with tracing
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 qhook start
+
+# View traces at http://localhost:16686
+```
+
 ## Structured Logging
 
 For production log aggregation (CloudWatch, Datadog, ELK), enable JSON logging:
@@ -146,4 +191,4 @@ WARN slow query: SELECT ... (152ms)
 |--------|---------|--------|
 | `SIGTERM` | `kill <pid>` | Graceful shutdown (drain in-flight, then exit) |
 | `SIGINT` | `Ctrl+C` | Same as SIGTERM |
-| `SIGHUP` | `kill -HUP <pid>` | Validate config without restart (dry-run reload) |
+| `SIGHUP` | `kill -HUP <pid>` | Validate config and log diff (added/removed sources, handlers, workflows; warns about restart-required changes) |
