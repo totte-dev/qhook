@@ -425,6 +425,17 @@ async fn handle_webhook(
         Err(_) => return (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()),
     };
 
+    // Validate against schema if configured
+    if let Some(ref schema) = source.schema {
+        if let Err(e) = validate_event_schema(&payload_str, schema) {
+            tracing::warn!(source = source_name, error = %e, "Schema validation failed");
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("Schema validation failed: {e}"),
+            );
+        }
+    }
+
     // Extract event type (CloudEvents-aware)
     let event_type = extract_event_type(&source_name, &payload_str, &headers);
 
@@ -486,6 +497,21 @@ async fn handle_event(
         Ok(s) => s.to_string(),
         Err(_) => return (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()),
     };
+
+    // Validate against schema if configured on any matching event source
+    for source in state.config.sources.values() {
+        if source.source_type == "event" {
+            if let Some(ref schema) = source.schema {
+                if let Err(e) = validate_event_schema(&payload_str, schema) {
+                    tracing::warn!(error = %e, "Schema validation failed");
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("Schema validation failed: {e}"),
+                    );
+                }
+            }
+        }
+    }
 
     // CloudEvents ce-type header overrides URL path event type
     let event_type = if let Some(ce_type) = headers.get("ce-type").and_then(|v| v.to_str().ok()) {
@@ -1163,6 +1189,17 @@ pub fn evaluate_filter_pub(payload: &str, filter: &str) -> bool {
 pub fn evaluate_filter(payload: &str, filter: &str) -> bool {
     let filter = filter.trim();
 
+    // "not <expr>" — logical negation (must check before comparison operators)
+    if let Some(inner) = filter.strip_prefix("not ") {
+        return !evaluate_filter(payload, inner.trim());
+    }
+
+    // "$.path exists" — field existence check (must check before comparison operators)
+    if let Some(path) = filter.strip_suffix(" exists") {
+        let path = path.trim();
+        return extract_json_path_value(payload, path).is_some();
+    }
+
     // "$.path >= value" (must check before > and ==)
     if let Some((path, value)) = filter.split_once(">=") {
         let path = path.trim();
@@ -1217,6 +1254,51 @@ pub fn evaluate_filter(payload: &str, filter: &str) -> bool {
         };
     }
 
+    // "$.path contains value" — substring or array membership
+    if let Some((path, value)) = filter.split_once(" contains ") {
+        let path = path.trim();
+        let needle = value.trim().trim_matches('"');
+        return match extract_json_path_value(payload, path) {
+            Some(Value::String(s)) => s.contains(needle),
+            Some(Value::Array(arr)) => arr.iter().any(|v| match v {
+                Value::String(s) => s == needle,
+                Value::Number(n) => n.to_string() == needle,
+                _ => false,
+            }),
+            _ => false,
+        };
+    }
+
+    // "$.path starts_with value"
+    if let Some((path, value)) = filter.split_once(" starts_with ") {
+        let path = path.trim();
+        let prefix = value.trim().trim_matches('"');
+        return match extract_json_path_value(payload, path) {
+            Some(Value::String(s)) => s.starts_with(prefix),
+            _ => false,
+        };
+    }
+
+    // "$.path ends_with value"
+    if let Some((path, value)) = filter.split_once(" ends_with ") {
+        let path = path.trim();
+        let suffix = value.trim().trim_matches('"');
+        return match extract_json_path_value(payload, path) {
+            Some(Value::String(s)) => s.ends_with(suffix),
+            _ => false,
+        };
+    }
+
+    // "$.path matches <regex>"
+    if let Some((path, pattern)) = filter.split_once(" matches ") {
+        let path = path.trim();
+        let pattern = pattern.trim();
+        return match extract_json_path_value(payload, path) {
+            Some(Value::String(s)) => regex::Regex::new(pattern).is_ok_and(|re| re.is_match(&s)),
+            _ => false,
+        };
+    }
+
     // "$.path in [a, b, c]"
     if let Some((path, set_str)) = filter.split_once(" in ") {
         let path = path.trim();
@@ -1242,6 +1324,85 @@ pub fn evaluate_filter(payload: &str, filter: &str) -> bool {
         Some(Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
         _ => true, // arrays, objects are truthy
     }
+}
+
+/// Validate event payload against a JSON Schema (subset).
+/// Supports: type, required, properties (with nested type checks).
+/// Returns Ok(()) if valid or schema is empty, Err with details if invalid.
+pub fn validate_event_schema(payload: &str, schema: &str) -> Result<()> {
+    if schema.is_empty() {
+        return Ok(());
+    }
+
+    let schema_val: Value =
+        serde_json::from_str(schema).map_err(|e| anyhow::anyhow!("invalid schema JSON: {e}"))?;
+    let payload_val: Value =
+        serde_json::from_str(payload).map_err(|e| anyhow::anyhow!("invalid payload JSON: {e}"))?;
+
+    validate_value_against_schema(&payload_val, &schema_val, "$")
+}
+
+fn validate_value_against_schema(value: &Value, schema: &Value, path: &str) -> Result<()> {
+    // Check "type"
+    if let Some(expected_type) = schema.get("type").and_then(|t| t.as_str()) {
+        let actual_type = match value {
+            Value::Object(_) => "object",
+            Value::Array(_) => "array",
+            Value::String(_) => "string",
+            Value::Number(n) => {
+                if n.is_i64() || n.is_u64() {
+                    if expected_type == "number" {
+                        "number"
+                    } else {
+                        "integer"
+                    }
+                } else {
+                    "number"
+                }
+            }
+            Value::Bool(_) => "boolean",
+            Value::Null => "null",
+        };
+        if actual_type != expected_type {
+            anyhow::bail!(
+                "schema validation failed at {path}: expected type '{expected_type}', got '{actual_type}'"
+            );
+        }
+    }
+
+    // Check "required" (only for objects)
+    if let (Some(required), Some(obj)) = (
+        schema.get("required").and_then(|r| r.as_array()),
+        value.as_object(),
+    ) {
+        for field in required {
+            if let Some(field_name) = field.as_str() {
+                if !obj.contains_key(field_name) {
+                    anyhow::bail!(
+                        "schema validation failed at {path}: missing required field '{field_name}'"
+                    );
+                }
+            }
+        }
+    }
+
+    // Check "properties" (recursive type check)
+    if let (Some(props), Some(obj)) = (
+        schema.get("properties").and_then(|p| p.as_object()),
+        value.as_object(),
+    ) {
+        for (prop_name, prop_schema) in props {
+            if let Some(prop_value) = obj.get(prop_name) {
+                validate_value_against_schema(
+                    prop_value,
+                    prop_schema,
+                    &format!("{path}.{prop_name}"),
+                )?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Apply a JSON template transformation to a payload.
@@ -1787,6 +1948,91 @@ mod tests {
         assert!(!evaluate_filter(r#"{"code": 404}"#, "$.code in [200, 201]"));
     }
 
+    // --- Advanced filter operators ---
+
+    #[test]
+    fn test_filter_contains() {
+        assert!(evaluate_filter(
+            r#"{"msg": "hello world"}"#,
+            "$.msg contains world"
+        ));
+        assert!(!evaluate_filter(
+            r#"{"msg": "hello world"}"#,
+            "$.msg contains xyz"
+        ));
+    }
+
+    #[test]
+    fn test_filter_contains_array() {
+        assert!(evaluate_filter(
+            r#"{"tags": ["rust", "web"]}"#,
+            "$.tags contains rust"
+        ));
+        assert!(!evaluate_filter(
+            r#"{"tags": ["rust", "web"]}"#,
+            "$.tags contains python"
+        ));
+    }
+
+    #[test]
+    fn test_filter_starts_with() {
+        assert!(evaluate_filter(
+            r#"{"ref": "refs/heads/main"}"#,
+            "$.ref starts_with refs/heads/"
+        ));
+        assert!(!evaluate_filter(
+            r#"{"ref": "refs/tags/v1"}"#,
+            "$.ref starts_with refs/heads/"
+        ));
+    }
+
+    #[test]
+    fn test_filter_ends_with() {
+        assert!(evaluate_filter(
+            r#"{"file": "image.png"}"#,
+            "$.file ends_with .png"
+        ));
+        assert!(!evaluate_filter(
+            r#"{"file": "image.png"}"#,
+            "$.file ends_with .jpg"
+        ));
+    }
+
+    #[test]
+    fn test_filter_matches() {
+        assert!(evaluate_filter(
+            r#"{"email": "user@example.com"}"#,
+            "$.email matches ^[^@]+@[^@]+$"
+        ));
+        assert!(!evaluate_filter(
+            r#"{"email": "invalid"}"#,
+            "$.email matches ^[^@]+@[^@]+$"
+        ));
+    }
+
+    #[test]
+    fn test_filter_exists() {
+        assert!(evaluate_filter(r#"{"a": 1}"#, "$.a exists"));
+        assert!(!evaluate_filter(r#"{"a": 1}"#, "$.b exists"));
+        // null field exists in the JSON but is null — still "exists"
+        assert!(evaluate_filter(r#"{"a": null}"#, "$.a exists"));
+    }
+
+    #[test]
+    fn test_filter_not() {
+        assert!(evaluate_filter(
+            r#"{"status": "pending"}"#,
+            "not $.status == completed"
+        ));
+        assert!(!evaluate_filter(
+            r#"{"status": "completed"}"#,
+            "not $.status == completed"
+        ));
+        // not with truthy
+        assert!(evaluate_filter(r#"{"a": false}"#, "not $.a"));
+        assert!(!evaluate_filter(r#"{"a": true}"#, "not $.a"));
+    }
+
     #[test]
     fn test_validate_params_invalid_json() {
         let params = vec![crate::config::ParamConfig {
@@ -1806,5 +2052,53 @@ mod tests {
         }];
         assert!(validate_workflow_params("test", &params, r#"{"enabled": true}"#).is_ok());
         assert!(validate_workflow_params("test", &params, r#"{"enabled": "yes"}"#).is_err());
+    }
+
+    // --- Schema validation ---
+
+    #[test]
+    fn test_validate_schema_valid() {
+        let schema = r#"{
+            "type": "object",
+            "required": ["id", "amount"],
+            "properties": {
+                "id": {"type": "string"},
+                "amount": {"type": "number"}
+            }
+        }"#;
+        let payload = r#"{"id": "abc", "amount": 100}"#;
+        assert!(validate_event_schema(payload, schema).is_ok());
+    }
+
+    #[test]
+    fn test_validate_schema_missing_required() {
+        let schema = r#"{
+            "type": "object",
+            "required": ["id", "amount"],
+            "properties": {
+                "id": {"type": "string"},
+                "amount": {"type": "number"}
+            }
+        }"#;
+        let payload = r#"{"id": "abc"}"#;
+        assert!(validate_event_schema(payload, schema).is_err());
+    }
+
+    #[test]
+    fn test_validate_schema_wrong_type() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer"}
+            }
+        }"#;
+        let payload = r#"{"count": "not a number"}"#;
+        assert!(validate_event_schema(payload, schema).is_err());
+    }
+
+    #[test]
+    fn test_validate_schema_no_schema() {
+        // When no schema is configured, any payload is valid
+        assert!(validate_event_schema(r#"{"anything": true}"#, "").is_ok());
     }
 }
