@@ -16,7 +16,7 @@ on:
         description: "Skip Docker image push"
         required: false
         type: boolean
-        default: false
+        default: true
 
 env:
   CARGO_TERM_COLOR: always
