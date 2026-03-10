@@ -67,10 +67,15 @@ tests/
   e2e_sns.sh    — SNS E2E tests with LocalStack (8 tests)
   mock_server.py — Python mock HTTP server for E2E
   bench.sh      — Benchmark script (receive RPS + delivery throughput)
+  bench.js      — k6 load test script
 .github/workflows/
-  ci.yml        — GitHub Actions CI (fmt, clippy, test, E2E)
+  ci.yml        — GitHub Actions CI (fmt, clippy, cargo-audit, test, E2E)
   release.yml   — Release automation (workflow_dispatch: GitHub Release + crates.io + Docker)
+  bench.yml     — k6 benchmark (weekly + workflow_dispatch)
   pages.yml     — GitHub Pages deploy (docs/ on push to main)
+sdks/
+  generate.sh   — OpenAPI SDK generator (Python, Go, TypeScript)
+  README.md     — SDK generation instructions
 examples/
   quickstart/       — Minimal setup, no Docker (qhook binary + curl)
   github-webhook/   — GitHub push/PR with verification + fan-out
@@ -80,7 +85,7 @@ docs/               — GitHub Pages user guide (Jekyll, Cayman theme)
   openapi.yaml      — OpenAPI 3.1 spec (keep in sync with api.rs)
   index.md          — Top page with navigation
   getting-started.md, configuration.md, cli.md, examples.md
-  guides/           — Feature guides (webhook-verification, cloudevents, sns, filtering, grpc, monitoring, security)
+  guides/           — Feature guides (webhook-verification, cloudevents, sns, filtering, grpc, monitoring, security, error-reference)
   deploy/           — Platform deploy guides (aws, flyio, railway, render)
   why-qhook.md      — DIY vs qhook comparison
 ```

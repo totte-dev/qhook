@@ -92,6 +92,8 @@ qhook start
 | [gRPC Output](guides/grpc.md) | Deliver events via gRPC |
 | [Monitoring](guides/monitoring.md) | Prometheus metrics, health checks, alerts |
 | [Security](guides/security.md) | Security features and best practices |
+| [Error Reference](guides/error-reference.md) | HTTP status codes and error messages |
+| [API Spec](openapi.yaml) | OpenAPI 3.1 specification |
 
 ### Deployment
 

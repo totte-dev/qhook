@@ -1,0 +1,60 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"  # Weekly Monday 6:00 UTC
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Install k6
+        run: |
+          curl -sL https://github.com/grafana/k6/releases/download/v0.56.0/k6-v0.56.0-linux-amd64.tar.gz | tar xz
+          sudo mv k6-v0.56.0-linux-amd64/k6 /usr/local/bin/
+
+      - name: Start mock server
+        run: |
+          python3 tests/mock_server.py 19011 &
+          sleep 0.5
+
+      - name: Start qhook
+        run: |
+          cat > /tmp/bench_qhook.yaml <<EOF
+          database:
+            driver: sqlite
+            url: "sqlite:/tmp/bench_qhook.db?mode=rwc"
+          server:
+            port: 8888
+          sources:
+            app:
+              type: event
+          handlers:
+            bench:
+              source: app
+              events: [bench.test]
+              url: http://127.0.0.1:19011/job
+              retry: { max: 1 }
+          EOF
+          ./target/release/qhook start --config /tmp/bench_qhook.yaml &
+          sleep 1
+
+      - name: Run k6 benchmark
+        run: k6 run tests/bench.js --summary-export=/tmp/bench_results.json
+
+      - name: Print results
+        if: always()
+        run: cat /tmp/bench_results.json 2>/dev/null | python3 -m json.tool || true
