@@ -6,10 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-03-11
+
 ### Added
 - JSON response for webhook and event endpoints — returns `event_id`, `jobs_created`, and `duplicate` status
 - Management API: `GET /api/events/:id` returns event details with associated jobs and workflow runs
 - Management API: `GET /api/jobs/:id` returns job details with optional delivery attempts (`?include_attempts=true`)
+- `cargo-deny` security checks (advisories, licenses, bans, sources) in CI and weekly schedule
+- Rust integration tests replacing shell-based E2E tests (30 tests: 12 e2e + 12 workflow + 6 scenarios)
 
 ### Changed
 - `POST /webhooks/:source` now returns JSON instead of plain text (breaking change for clients parsing text responses)
