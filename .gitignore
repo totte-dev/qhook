@@ -24,10 +24,12 @@ Thumbs.db
 # Docker
 docker-compose.override.yaml
 
-# Generated SDKs
-sdks/python/
-sdks/go/
-sdks/typescript/
+# Generated SDK build artifacts (source is committed)
+sdks/python/.tox/
+sdks/python/dist/
+sdks/python/*.egg-info/
+sdks/typescript/node_modules/
+sdks/typescript/dist/
 
 # Private docs
 docs/private/
