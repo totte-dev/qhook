@@ -15,6 +15,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Configurable worker concurrency**: `worker.max_concurrency` and `worker.batch_size` config fields replace hardcoded constants (both default to 10).
 - **CI code coverage**: `cargo-llvm-cov` integrated in CI pipeline with LCOV output.
 - **Cost comparison documentation**: Added infrastructure cost comparison vs Svix, Hookdeck, and AWS Step Functions in `docs/why-qhook.md`.
+- **Standard Webhooks inbound verification**: `verify: standard-webhooks` for providers using the Standard Webhooks spec (Clerk, Resend, Lemon Squeezy, Orb). Includes 5-minute replay protection and multi-signature support for key rotation.
+- **Linear webhook verification**: `verify: linear` checks `Linear-Signature` header (HMAC-SHA256).
+- **IP allowlisting**: `allowed_ips` field on sources restricts webhook reception to specific IPs/CIDRs. Supports IPv4, IPv6, and proxy-aware IP extraction.
 
 ### Changed
 - Outbound webhook headers changed from `X-Qhook-Signature`/`X-Qhook-Timestamp` to Standard Webhooks format (outbound webhooks were added in v0.4.1, minimal impact).

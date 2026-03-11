@@ -476,15 +476,74 @@ async fn shutdown_signal() {
 
 async fn handle_webhook(
     State(state): State<SharedState>,
-    Path(source_name): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
+    req: axum::extract::Request,
 ) -> axum::response::Response {
+    let connect_info = req
+        .extensions()
+        .get::<ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0);
+    let (parts, body_stream) = req.into_parts();
+    let headers = parts.headers;
+    let source_name = match parts.uri.path().strip_prefix("/webhooks/") {
+        Some(name) => name.to_string(),
+        None => return (StatusCode::NOT_FOUND, "Unknown source".to_string()).into_response(),
+    };
+    let body = match axum::body::to_bytes(
+        axum::body::Body::new(body_stream),
+        state.config.server.max_body_size,
+    )
+    .await
+    {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Payload too large".to_string(),
+            )
+                .into_response();
+        }
+    };
+
     // Find source config
     let source = match state.config.sources.get(&source_name) {
         Some(s) if s.source_type == "webhook" => s,
         _ => return (StatusCode::NOT_FOUND, "Unknown source".to_string()).into_response(),
     };
+
+    // IP allowlist check
+    if !source.allowed_ips.is_empty() {
+        let client_ip = if state.config.server.trust_proxy {
+            headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split(',').next())
+                .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
+                .or_else(|| {
+                    headers
+                        .get("x-real-ip")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
+                })
+        } else {
+            None
+        }
+        .or_else(|| connect_info.map(|ci| ci.ip()));
+
+        match client_ip {
+            Some(ip) if source.is_ip_allowed(ip) => {}
+            Some(ip) => {
+                tracing::warn!(source = source_name, ip = %ip, "IP not in allowlist");
+                return (StatusCode::FORBIDDEN, "IP not allowed".to_string()).into_response();
+            }
+            None => {
+                tracing::warn!(
+                    source = source_name,
+                    "Cannot determine client IP for allowlist check"
+                );
+                return (StatusCode::FORBIDDEN, "IP not allowed".to_string()).into_response();
+            }
+        }
+    }
 
     // Verify signature
     if let Some(verify_provider) = &source.verify {

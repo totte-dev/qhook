@@ -29,7 +29,7 @@ Simple:                           Multi-step:
 ## Why qhook?
 
 - **Zero infrastructure.** Single binary, SQLite for dev, Postgres for production. No Redis, no message broker.
-- **Webhook verification built in.** GitHub, Stripe, Shopify, PagerDuty, Grafana, Terraform Cloud, GitLab, HMAC, AWS SNS X.509.
+- **Webhook verification built in.** GitHub, Stripe, Shopify, PagerDuty, Grafana, Terraform Cloud, GitLab, Linear, Standard Webhooks (Clerk/Resend/etc.), HMAC, AWS SNS X.509. IP allowlisting per source.
 - **Outbound webhooks.** Send webhooks to your customers with [Standard Webhooks](https://www.standardwebhooks.com/) compliant signatures. Dynamic endpoint management, subscription-based routing, per-endpoint signing secrets.
 - **From one action to a pipeline.** Start with a single HTTP call; grow into multi-step workflows with branching, parallelism, and rollback — same YAML, same engine.
 - **Production ready.** Prometheus metrics, health checks, Slack/Discord alerts, rate limiting, circuit breaker, OpenTelemetry tracing, structured logging.
