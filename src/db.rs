@@ -1315,6 +1315,18 @@ pub struct JobAttemptRow {
 }
 
 impl Database {
+    /// Get a single job by ID.
+    pub async fn get_job_by_id(&self, job_id: &str) -> Result<Option<JobRow>> {
+        let row = sqlx::query_as::<_, JobRow>(
+            "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
+             FROM jobs WHERE id = $1",
+        )
+        .bind(job_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
     /// Get a single event by ID with full data.
     pub async fn get_event_by_id(&self, event_id: &str) -> Result<Option<EventRowFull>> {
         let row = sqlx::query_as::<_, EventRowFull>(

@@ -176,7 +176,7 @@ workflows:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `auth_token` | string | - | Bearer token for the `/events` endpoint. If not set, the endpoint is open (with a startup warning) |
+| `auth_token` | string | - | Bearer token for the `/events` endpoint and Management API (`/api/events/:id`, `/api/jobs/:id`). If not set, these endpoints are open (with a startup warning) |
 | `metrics_auth_token` | string | - | Bearer token for the `/metrics` endpoint. If not set, the endpoint is open |
 
 ### delivery
@@ -216,7 +216,7 @@ Each source is a named entry under `sources:`.
 | Type | Endpoint | Description |
 |------|----------|-------------|
 | `webhook` | `POST /webhooks/{source}` | External webhooks with signature verification |
-| `event` | `POST /events/{event_type}` | Internal events with optional bearer token auth |
+| `event` | `POST /events/{source}/{event_type}` or `POST /events/{event_type}` | Internal events with optional bearer token auth. The source-qualified route allows multiple named event sources; the short route defaults to source `app` |
 | `sns` | `POST /sns/{source}` | AWS SNS with auto-confirmation and envelope unwrapping |
 | `cron` | *(internal)* | Time-based trigger. Fires `cron.tick` events on schedule |
 

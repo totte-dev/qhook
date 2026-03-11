@@ -68,14 +68,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets
 
-      - name: Unit tests
+      - name: Tests (unit + E2E + scenarios)
         run: cargo test
 
       - name: Build release
         run: cargo build --release
-
-      - name: E2E tests
-        run: bash tests/e2e.sh
 
   github-release:
     needs: test

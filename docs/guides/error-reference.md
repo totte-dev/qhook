@@ -36,7 +36,7 @@ This page documents all HTTP status codes and error messages returned by qhook e
 | 500 | `Verification error` | Signature verification encountered an internal error |
 | 500 | `Internal error` | Database write failed |
 
-### POST /events/{event_type}
+### POST /events/{source}/{event_type}
 
 | Status | Message | Cause |
 |--------|---------|-------|

@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- JSON response for webhook and event endpoints — returns `event_id`, `jobs_created`, and `duplicate` status
+- Management API: `GET /api/events/:id` returns event details with associated jobs and workflow runs
+- Management API: `GET /api/jobs/:id` returns job details with optional delivery attempts (`?include_attempts=true`)
+
+### Changed
+- `POST /webhooks/:source` now returns JSON instead of plain text (breaking change for clients parsing text responses)
+- Event endpoint is now `POST /events/{source}/{event_type}` — the old `POST /events/{event_type}` route was removed
+- `POST /events/:source/:type` now returns JSON `{"event_id": "...", "jobs_created": N}` instead of plain text
+- Updated product positioning to "lightweight workflow engine"
+
 ## [0.3.1] - 2026-03-11
 
 ### Added

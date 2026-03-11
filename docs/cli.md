@@ -235,6 +235,49 @@ qhook export events > events.jsonl                     # save to file
 | `--until` | Only events created before this timestamp |
 | `-l`, `--limit` | Max events to export (default: 1000) |
 
+## Management API
+
+qhook exposes REST endpoints for inspecting events and jobs programmatically.
+
+> **Authentication:** These endpoints are protected by the same `api.auth_token` configured for the `/events` endpoint. Include the token as a Bearer header.
+
+### POST /events/:source/:type
+
+Send an event with a source name. The source must be defined in config as `type: event`.
+
+```bash
+curl -X POST http://localhost:8888/events/platform/deploy.start \
+  -H "Authorization: Bearer $QHOOK_API_TOKEN" \
+  -d '{"service": "api", "version": "1.2.3"}'
+```
+
+### GET /api/events/:id
+
+Returns event details including associated jobs and workflow runs.
+
+```bash
+curl -H "Authorization: Bearer $QHOOK_API_TOKEN" \
+  http://localhost:8888/api/events/01JQ7X...
+```
+
+Response includes event metadata, payload, matched jobs (with status), and any workflow runs triggered by the event.
+
+### GET /api/jobs/:id
+
+Returns job details. Optionally include delivery attempts with `?include_attempts=true`.
+
+```bash
+# Job details only
+curl -H "Authorization: Bearer $QHOOK_API_TOKEN" \
+  http://localhost:8888/api/jobs/01JQ7X...
+
+# Job details with delivery attempts
+curl -H "Authorization: Bearer $QHOOK_API_TOKEN" \
+  "http://localhost:8888/api/jobs/01JQ7X...?include_attempts=true"
+```
+
+Response includes job metadata (handler, status, attempt count, scheduled/completed timestamps). When `include_attempts=true`, each delivery attempt is included with status code, duration, and error details.
+
 ## Environment Variables
 
 | Variable | Description |

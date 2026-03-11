@@ -7,11 +7,11 @@ use anyhow::Result;
 use axum::{
     Router,
     body::Bytes,
-    extract::{ConnectInfo, Path, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{HeaderMap, StatusCode},
     middleware,
     response::IntoResponse,
-    routing::post,
+    routing::{get, post},
 };
 use serde_json::Value;
 
@@ -142,6 +142,9 @@ pub async fn serve(state: AppState, config_path: String) -> Result<()> {
             }
             "sns" => {
                 tracing::info!("  POST http://localhost:{port}/sns/{name}");
+            }
+            "event" => {
+                tracing::info!("  POST http://localhost:{port}/events/{name}/{{event_type}}");
             }
             _ => {}
         }
@@ -320,9 +323,11 @@ pub async fn serve(state: AppState, config_path: String) -> Result<()> {
 
     let mut app = Router::new()
         .route("/webhooks/{source}", post(handle_webhook))
-        .route("/events/{event_type}", post(handle_event))
+        .route("/events/{source}/{event_type}", post(handle_event))
         .route("/sns/{source}", post(handle_sns))
         .route("/callback/{token}", post(handle_callback))
+        .route("/api/events/{event_id}", get(handle_get_event))
+        .route("/api/jobs/{job_id}", get(handle_get_job))
         .route("/_echo", axum::routing::any(handle_echo))
         .route("/health", axum::routing::get(handle_health))
         .route("/metrics", axum::routing::get(handle_metrics))
@@ -451,11 +456,11 @@ async fn handle_webhook(
     Path(source_name): Path<String>,
     headers: HeaderMap,
     body: Bytes,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     // Find source config
     let source = match state.config.sources.get(&source_name) {
         Some(s) if s.source_type == "webhook" => s,
-        _ => return (StatusCode::NOT_FOUND, "Unknown source".to_string()),
+        _ => return (StatusCode::NOT_FOUND, "Unknown source".to_string()).into_response(),
     };
 
     // Verify signature
@@ -471,14 +476,15 @@ async fn handle_webhook(
                         source: source_name.clone(),
                     });
                 }
-                return (StatusCode::UNAUTHORIZED, "Invalid signature".to_string());
+                return (StatusCode::UNAUTHORIZED, "Invalid signature".to_string()).into_response();
             }
             Err(e) => {
                 tracing::error!(source = source_name, error = %e, "Verification error");
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Verification error".to_string(),
-                );
+                )
+                    .into_response();
             }
         }
     }
@@ -486,7 +492,7 @@ async fn handle_webhook(
     // Parse payload
     let payload_str = match String::from_utf8(body.to_vec()) {
         Ok(s) => s,
-        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()),
+        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()).into_response(),
     };
 
     // Validate against schema if configured
@@ -496,7 +502,8 @@ async fn handle_webhook(
             return (
                 StatusCode::BAD_REQUEST,
                 format!("Schema validation failed: {e}"),
-            );
+            )
+                .into_response();
         }
     }
 
@@ -505,12 +512,13 @@ async fn handle_webhook(
 
     // Process event
     match process_event(&state, &source_name, &event_type, &payload_str, &headers).await {
-        Ok(created) => {
-            if created {
-                (StatusCode::OK, "Event received".to_string())
-            } else {
-                (StatusCode::OK, "Duplicate event ignored".to_string())
-            }
+        Ok(result) => {
+            let body = serde_json::json!({
+                "event_id": result.event_id,
+                "duplicate": !result.created,
+                "jobs_created": result.jobs_created,
+            });
+            (StatusCode::OK, axum::Json(body)).into_response()
         }
         Err(e) => {
             state.metrics.inc_db_errors();
@@ -519,16 +527,26 @@ async fn handle_webhook(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal error".to_string(),
             )
+                .into_response()
         }
     }
 }
 
 async fn handle_event(
     State(state): State<SharedState>,
-    Path(event_type): Path<String>,
+    Path((source, event_type)): Path<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    // Validate that source exists and is type "event"
+    match state.config.sources.get(&source) {
+        Some(s) if s.source_type == "event" => {}
+        _ => {
+            return (StatusCode::NOT_FOUND, "Unknown event source".to_string()).into_response();
+        }
+    }
+
+    let source = source.as_str();
     // Check auth token if configured (constant-time comparison)
     if let Some(expected_token) = &state.config.api.auth_token {
         let provided = headers
@@ -544,7 +562,7 @@ async fn handle_event(
                         endpoint = "events",
                         "Authentication failed: invalid bearer token"
                     );
-                    return (StatusCode::UNAUTHORIZED, "Invalid token".to_string());
+                    return (StatusCode::UNAUTHORIZED, "Invalid token".to_string()).into_response();
                 }
             }
             _ => {
@@ -552,27 +570,26 @@ async fn handle_event(
                     endpoint = "events",
                     "Authentication failed: missing bearer token"
                 );
-                return (StatusCode::UNAUTHORIZED, "Invalid token".to_string());
+                return (StatusCode::UNAUTHORIZED, "Invalid token".to_string()).into_response();
             }
         }
     }
 
     let payload_str = match String::from_utf8(body.to_vec()) {
         Ok(s) => s,
-        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()),
+        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()).into_response(),
     };
 
-    // Validate against schema if configured on any matching event source
-    for source in state.config.sources.values() {
-        if source.source_type == "event" {
-            if let Some(ref schema) = source.schema {
-                if let Err(e) = validate_event_schema(&payload_str, schema) {
-                    tracing::warn!(error = %e, "Schema validation failed");
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        format!("Schema validation failed: {e}"),
-                    );
-                }
+    // Validate against schema if configured on the specific source
+    if let Some(src_config) = state.config.sources.get(source) {
+        if let Some(ref schema) = src_config.schema {
+            if let Err(e) = validate_event_schema(&payload_str, schema) {
+                tracing::warn!(error = %e, "Schema validation failed");
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("Schema validation failed: {e}"),
+                )
+                    .into_response();
             }
         }
     }
@@ -584,8 +601,15 @@ async fn handle_event(
         event_type
     };
 
-    match process_event(&state, "app", &event_type, &payload_str, &headers).await {
-        Ok(_) => (StatusCode::ACCEPTED, "Event accepted".to_string()),
+    match process_event(&state, source, &event_type, &payload_str, &headers).await {
+        Ok(result) => {
+            let body = serde_json::json!({
+                "event_id": result.event_id,
+                "duplicate": !result.created,
+                "jobs_created": result.jobs_created,
+            });
+            (StatusCode::ACCEPTED, axum::Json(body)).into_response()
+        }
         Err(e) => {
             state.metrics.inc_db_errors();
             tracing::error!(error = %e, "Failed to process event");
@@ -593,6 +617,7 @@ async fn handle_event(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal error".to_string(),
             )
+                .into_response()
         }
     }
 }
@@ -701,12 +726,16 @@ async fn handle_sns(
             let event_type = extract_sns_event_type(payload, sns_msg.subject.as_deref());
 
             match process_event(&state, &source_name, &event_type, payload, &headers).await {
-                Ok(created) => {
-                    if created {
-                        (StatusCode::OK, "Event received".to_string())
-                    } else {
-                        (StatusCode::OK, "Duplicate event ignored".to_string())
-                    }
+                Ok(result) => {
+                    let body = serde_json::json!({
+                        "event_id": result.event_id,
+                        "duplicate": !result.created,
+                        "jobs_created": result.jobs_created,
+                    });
+                    (
+                        StatusCode::OK,
+                        serde_json::to_string(&body).unwrap_or_default(),
+                    )
                 }
                 Err(e) => {
                     state.metrics.inc_db_errors();
@@ -736,13 +765,19 @@ async fn handle_sns(
     }
 }
 
+struct EventResult {
+    event_id: String,
+    created: bool,
+    jobs_created: u32,
+}
+
 async fn process_event(
     state: &AppState,
     source: &str,
     event_type: &str,
     payload: &str,
     headers: &HeaderMap,
-) -> Result<bool> {
+) -> Result<EventResult> {
     let event_id = ulid::Ulid::new().to_string();
 
     // Find matching handlers
@@ -769,7 +804,11 @@ async fn process_event(
 
     if matching_handlers.is_empty() && matching_workflows.is_empty() {
         tracing::debug!(source, event_type, "No matching handlers or workflows");
-        return Ok(true);
+        return Ok(EventResult {
+            event_id,
+            created: true,
+            jobs_created: 0,
+        });
     }
 
     // Extract idempotency key if configured
@@ -799,8 +838,14 @@ async fn process_event(
     if !created {
         state.metrics.inc_events_duplicated();
         tracing::info!(source, event_type, "Duplicate event");
-        return Ok(false);
+        return Ok(EventResult {
+            event_id,
+            created: false,
+            jobs_created: 0,
+        });
     }
+
+    let mut jobs_created: u32 = 0;
 
     // Create jobs for each matching handler (apply filter if configured)
     for (handler_name, handler) in &matching_handlers {
@@ -824,6 +869,7 @@ async fn process_event(
             .insert_job(&job_id, &event_id, handler_name, &handler.url, max_attempts)
             .await?;
 
+        jobs_created += 1;
         state.metrics.inc_jobs_created();
         tracing::info!(
             event_id,
@@ -839,7 +885,11 @@ async fn process_event(
         start_workflow(state, workflow_name, workflow, &event_id, payload).await?;
     }
 
-    Ok(true)
+    Ok(EventResult {
+        event_id,
+        created,
+        jobs_created,
+    })
 }
 
 /// Start a workflow by creating a workflow_run and the first step's job.
@@ -1004,6 +1054,165 @@ async fn handle_callback(
             (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
         }
     }
+}
+
+/// Check Bearer auth for management API endpoints.
+fn check_api_auth(state: &AppState, headers: &HeaderMap) -> Option<axum::response::Response> {
+    if let Some(expected_token) = &state.config.api.auth_token {
+        let provided = headers
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+
+        match provided {
+            Some(token) => {
+                use subtle::ConstantTimeEq;
+                if !bool::from(token.as_bytes().ct_eq(expected_token.as_bytes())) {
+                    return Some(
+                        (StatusCode::UNAUTHORIZED, "Invalid token".to_string()).into_response(),
+                    );
+                }
+            }
+            _ => {
+                return Some(
+                    (StatusCode::UNAUTHORIZED, "Invalid token".to_string()).into_response(),
+                );
+            }
+        }
+    }
+    None
+}
+
+async fn handle_get_event(
+    State(state): State<SharedState>,
+    Path(event_id): Path<String>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Some(resp) = check_api_auth(&state, &headers) {
+        return resp;
+    }
+
+    let event = match state.db.get_event_by_id(&event_id).await {
+        Ok(Some(e)) => e,
+        Ok(None) => {
+            let body = serde_json::json!({"error": "event not found"});
+            return (StatusCode::NOT_FOUND, axum::Json(body)).into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to get event");
+            let body = serde_json::json!({"error": "internal error"});
+            return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response();
+        }
+    };
+
+    let jobs = state
+        .db
+        .list_jobs_by_event(&event_id)
+        .await
+        .unwrap_or_default();
+    let workflows = state
+        .db
+        .list_workflow_runs_by_event(&event_id)
+        .await
+        .unwrap_or_default();
+
+    let body = serde_json::json!({
+        "id": event.id,
+        "source": event.source,
+        "event_type": event.event_type,
+        "payload": serde_json::from_str::<Value>(&event.payload).unwrap_or(Value::String(event.payload.clone())),
+        "headers": event.headers.as_deref().and_then(|h| serde_json::from_str::<Value>(h).ok()),
+        "unique_key": event.unique_key,
+        "created_at": event.created_at,
+        "jobs": jobs.iter().map(|j| serde_json::json!({
+            "id": j.id,
+            "handler": j.handler,
+            "url": j.url,
+            "status": j.status,
+            "attempt": j.attempt,
+            "max_attempts": j.max_attempts,
+            "last_error": j.last_error,
+        })).collect::<Vec<_>>(),
+        "workflow_runs": workflows.iter().map(|w| serde_json::json!({
+            "id": w.id,
+            "workflow": w.workflow,
+            "status": w.status,
+            "current_step": w.current_step,
+            "created_at": w.created_at,
+            "completed_at": w.completed_at,
+        })).collect::<Vec<_>>(),
+    });
+    (StatusCode::OK, axum::Json(body)).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct GetJobQuery {
+    #[serde(default)]
+    include_attempts: bool,
+}
+
+async fn handle_get_job(
+    State(state): State<SharedState>,
+    Path(job_id): Path<String>,
+    Query(query): Query<GetJobQuery>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Some(resp) = check_api_auth(&state, &headers) {
+        return resp;
+    }
+
+    let job_row = match state.db.get_job_by_id(&job_id).await {
+        Ok(Some(j)) => j,
+        Ok(None) => {
+            let body = serde_json::json!({"error": "job not found"});
+            return (StatusCode::NOT_FOUND, axum::Json(body)).into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to get job");
+            let body = serde_json::json!({"error": "internal error"});
+            return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response();
+        }
+    };
+
+    let mut body = serde_json::json!({
+        "id": job_row.id,
+        "event_id": job_row.event_id,
+        "handler": job_row.handler,
+        "url": job_row.url,
+        "status": job_row.status,
+        "attempt": job_row.attempt,
+        "max_attempts": job_row.max_attempts,
+        "scheduled_at": job_row.scheduled_at,
+        "last_error": job_row.last_error,
+    });
+
+    if query.include_attempts {
+        let attempts = state
+            .db
+            .list_job_attempts(&job_id)
+            .await
+            .unwrap_or_default();
+        body["attempts"] = serde_json::json!(
+            attempts
+                .iter()
+                .map(|a| serde_json::json!({
+                    "attempt": a.attempt,
+                    "status_code": a.status_code,
+                    "error": a.error,
+                    "duration_ms": a.duration_ms,
+                }))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // Include workflow data if present
+    if let Ok(Some(wf_data)) = state.db.get_workflow_job_data(&job_id).await {
+        body["workflow_run_id"] = serde_json::json!(wf_data.workflow_run_id);
+        body["step_name"] = serde_json::json!(wf_data.step_name);
+        body["step_index"] = serde_json::json!(wf_data.step_index);
+    }
+
+    (StatusCode::OK, axum::Json(body)).into_response()
 }
 
 async fn handle_echo(
