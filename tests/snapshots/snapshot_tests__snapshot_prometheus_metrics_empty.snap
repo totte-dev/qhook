@@ -1,0 +1,38 @@
+---
+source: tests/snapshot_tests.rs
+expression: output
+---
+# HELP qhook_events_received_total Total events received
+# TYPE qhook_events_received_total counter
+qhook_events_received_total 0
+# HELP qhook_events_duplicated_total Duplicate events ignored
+# TYPE qhook_events_duplicated_total counter
+qhook_events_duplicated_total 0
+# HELP qhook_jobs_created_total Total jobs created
+# TYPE qhook_jobs_created_total counter
+qhook_jobs_created_total 0
+# HELP qhook_deliveries_total Total delivery attempts
+# TYPE qhook_deliveries_total counter
+qhook_deliveries_total{result="success"} 0
+qhook_deliveries_total{result="failure"} 0
+# HELP qhook_delivery_duration_seconds_sum Total delivery duration
+# TYPE qhook_delivery_duration_seconds_sum counter
+qhook_delivery_duration_seconds_sum 0
+# HELP qhook_delivery_duration_seconds_count Total delivery attempts
+# TYPE qhook_delivery_duration_seconds_count counter
+qhook_delivery_duration_seconds_count 0
+# HELP qhook_delivery_duration_seconds_max Max single delivery duration
+# TYPE qhook_delivery_duration_seconds_max gauge
+qhook_delivery_duration_seconds_max 0
+# HELP qhook_db_errors_total Database errors
+# TYPE qhook_db_errors_total counter
+qhook_db_errors_total 0
+# HELP qhook_queue_depth Jobs waiting to be delivered
+# TYPE qhook_queue_depth gauge
+qhook_queue_depth 0
+# HELP qhook_dead_jobs Jobs in dead letter queue
+# TYPE qhook_dead_jobs gauge
+qhook_dead_jobs 0
+# HELP qhook_metric_label_count Total unique label values across all labeled counters
+# TYPE qhook_metric_label_count gauge
+qhook_metric_label_count 0

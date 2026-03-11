@@ -1,0 +1,5 @@
+---
+source: tests/snapshot_tests.rs
+expression: config_error(yaml)
+---
+workflow 'my-flow' step 'step1' catch goto 'nonexistent-step' references nonexistent step

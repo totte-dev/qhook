@@ -1,0 +1,9 @@
+---
+source: tests/snapshot_tests.rs
+expression: body
+---
+{
+  "duplicate": false,
+  "event_id": "01EXAMPLE000000000000000000",
+  "jobs_created": 1
+}

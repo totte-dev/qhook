@@ -124,8 +124,17 @@ pub struct Worker {
     http: reqwest::Client,
     poll_interval: Duration,
     shutdown: tokio::sync::watch::Receiver<bool>,
-    /// Per-handler rate limiters (handler_name -> semaphore with N permits = N/sec).
-    rate_limiters: HashMap<String, Arc<Semaphore>>,
+    /// Per-handler rate limiters (handler_name -> governor rate limiter).
+    rate_limiters: HashMap<
+        String,
+        Arc<
+            governor::RateLimiter<
+                governor::state::NotKeyed,
+                governor::state::InMemoryState,
+                governor::clock::DefaultClock,
+            >,
+        >,
+    >,
     /// Per-handler payload transform templates.
     transforms: Arc<HashMap<String, String>>,
     /// Per-handler custom HTTP headers.
@@ -161,9 +170,14 @@ impl Worker {
             .build()
             .expect("Failed to build HTTP client");
 
-        let rate_limiters: HashMap<String, Arc<Semaphore>> = handler_rate_limits
+        let rate_limiters = handler_rate_limits
             .into_iter()
-            .map(|(name, rate)| (name, Arc::new(Semaphore::new(rate as usize))))
+            .filter(|(_, rate)| *rate > 0)
+            .map(|(name, rate)| {
+                let quota = governor::Quota::per_second(std::num::NonZeroU32::new(rate).unwrap());
+                let limiter = governor::RateLimiter::direct(quota);
+                (name, Arc::new(limiter))
+            })
             .collect();
 
         let circuit_breakers: HashMap<String, Arc<CircuitBreaker>> = handler_names
@@ -281,7 +295,7 @@ impl Worker {
                         let handler_methods = self.handler_methods.clone();
                         let workflows = self.workflows.clone();
                         let default_retry_max = self.default_retry_max;
-                        let rate_sem = self.rate_limiters.get(&job.handler).cloned();
+                        let rate_limiter = self.rate_limiters.get(&job.handler).cloned();
                         let cb = self.circuit_breakers.get(&job.handler).cloned();
 
                         in_flight.spawn(async move {
@@ -301,23 +315,13 @@ impl Worker {
                                 }
                             }
 
-                            // Acquire rate limit permit (blocks if at limit)
-                            let rate_permit = if let Some(ref sem) = rate_sem {
-                                sem.clone().acquire_owned().await.ok()
-                            } else {
-                                None
-                            };
+                            // Wait for rate limiter (GCRA — blocks until quota allows)
+                            if let Some(ref rl) = rate_limiter {
+                                rl.until_ready().await;
+                            }
 
                             deliver_job(&db, &http, &metrics, &alerter, &transforms, &handler_headers, &handler_methods, &workflows, default_retry_max, &job, cb.as_deref()).await;
                             drop(permit);
-
-                            // Hold rate permit for 1s to enforce per-second limit
-                            if let Some(rp) = rate_permit {
-                                tokio::spawn(async move {
-                                    tokio::time::sleep(Duration::from_secs(1)).await;
-                                    drop(rp);
-                                });
-                            }
                         });
                     }
 

@@ -1,0 +1,82 @@
+---
+source: tests/snapshot_tests.rs
+expression: output
+---
+# HELP qhook_events_received_total Total events received
+# TYPE qhook_events_received_total counter
+qhook_events_received_total 3
+# HELP qhook_events_by_source_total Events received per source
+# TYPE qhook_events_by_source_total counter
+qhook_events_by_source_total{source="github"} 1
+qhook_events_by_source_total{source="stripe"} 2
+# HELP qhook_events_duplicated_total Duplicate events ignored
+# TYPE qhook_events_duplicated_total counter
+qhook_events_duplicated_total 0
+# HELP qhook_jobs_created_total Total jobs created
+# TYPE qhook_jobs_created_total counter
+qhook_jobs_created_total 2
+# HELP qhook_deliveries_total Total delivery attempts
+# TYPE qhook_deliveries_total counter
+qhook_deliveries_total{result="success"} 2
+qhook_deliveries_total{result="failure"} 1
+# HELP qhook_deliveries_by_handler_total Delivery attempts per handler
+# TYPE qhook_deliveries_by_handler_total counter
+qhook_deliveries_by_handler_total{handler="payment-handler",result="success"} 2
+qhook_deliveries_by_handler_total{handler="notification-handler",result="failure"} 1
+# HELP qhook_delivery_duration_seconds_sum Total delivery duration
+# TYPE qhook_delivery_duration_seconds_sum counter
+qhook_delivery_duration_seconds_sum 0.8
+# HELP qhook_delivery_duration_seconds_count Total delivery attempts
+# TYPE qhook_delivery_duration_seconds_count counter
+qhook_delivery_duration_seconds_count 3
+# HELP qhook_delivery_duration_seconds_max Max single delivery duration
+# TYPE qhook_delivery_duration_seconds_max gauge
+qhook_delivery_duration_seconds_max 0.5
+# HELP qhook_delivery_errors_by_type_total Delivery errors by type
+# TYPE qhook_delivery_errors_by_type_total counter
+qhook_delivery_errors_by_type_total{type="5xx"} 1
+qhook_delivery_errors_by_type_total{type="timeout"} 1
+# HELP qhook_verification_failures_total Signature verification failures per source
+# TYPE qhook_verification_failures_total counter
+qhook_verification_failures_total{source="stripe"} 1
+# HELP qhook_dlq_total Jobs moved to dead letter queue per handler
+# TYPE qhook_dlq_total counter
+qhook_dlq_total{handler="notification-handler"} 1
+# HELP qhook_db_errors_total Database errors
+# TYPE qhook_db_errors_total counter
+qhook_db_errors_total 1
+# HELP qhook_alerts_sent_total Alert webhooks sent successfully
+# TYPE qhook_alerts_sent_total counter
+qhook_alerts_sent_total 1
+# HELP qhook_alerts_failed_total Alert webhooks that failed to send
+# TYPE qhook_alerts_failed_total counter
+qhook_alerts_failed_total 1
+# HELP qhook_queue_depth Jobs waiting to be delivered
+# TYPE qhook_queue_depth gauge
+qhook_queue_depth 42
+# HELP qhook_dead_jobs Jobs in dead letter queue
+# TYPE qhook_dead_jobs gauge
+qhook_dead_jobs 7
+# HELP qhook_workflow_runs_total Workflow runs by workflow and status
+# TYPE qhook_workflow_runs_total counter
+qhook_workflow_runs_total{workflow="order-pipeline",status="started"} 2
+qhook_workflow_runs_total{workflow="order-pipeline",status="completed"} 1
+qhook_workflow_runs_total{workflow="order-pipeline",status="failed"} 1
+# HELP qhook_workflow_steps_completed_total Workflow steps completed per workflow
+# TYPE qhook_workflow_steps_completed_total counter
+qhook_workflow_steps_completed_total{workflow="order-pipeline"} 2
+# HELP qhook_callbacks_received_total Callback webhook invocations
+# TYPE qhook_callbacks_received_total counter
+qhook_callbacks_received_total 1
+# HELP qhook_callbacks_expired_total Callback jobs expired by timeout
+# TYPE qhook_callbacks_expired_total counter
+qhook_callbacks_expired_total 1
+# HELP qhook_circuit_breaker_opened_total Times circuit breaker opened by handler
+# TYPE qhook_circuit_breaker_opened_total counter
+qhook_circuit_breaker_opened_total{handler="payment-handler"} 1
+# HELP qhook_circuit_breaker_rejected_total Deliveries skipped by circuit breaker
+# TYPE qhook_circuit_breaker_rejected_total counter
+qhook_circuit_breaker_rejected_total{handler="payment-handler"} 1
+# HELP qhook_metric_label_count Total unique label values across all labeled counters
+# TYPE qhook_metric_label_count gauge
+qhook_metric_label_count 14

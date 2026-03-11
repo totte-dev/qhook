@@ -60,12 +60,26 @@ handlers:
     let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
     assert_eq!(body["message"], "hello");
 
-    // X-Qhook headers present
-    let has_qhook = reqs[0]
-        .headers
-        .iter()
-        .any(|(name, _)| name.as_str().to_lowercase().contains("qhook"));
-    assert!(has_qhook, "X-Qhook headers should be present");
+    // Verify specific X-Qhook delivery headers
+    let headers = &reqs[0].headers;
+    assert!(
+        headers.get("X-Qhook-Job-ID").is_some(),
+        "X-Qhook-Job-ID header should be present"
+    );
+    assert!(
+        headers.get("X-Qhook-Event-ID").is_some(),
+        "X-Qhook-Event-ID header should be present"
+    );
+    assert_eq!(
+        headers.get("X-Qhook-Handler").unwrap().to_str().unwrap(),
+        "on-test",
+        "X-Qhook-Handler should match handler name"
+    );
+    assert_eq!(
+        headers.get("X-Qhook-Attempt").unwrap().to_str().unwrap(),
+        "1",
+        "X-Qhook-Attempt should be 1 for first delivery"
+    );
 
     server.stop().await;
 }
@@ -582,20 +596,22 @@ handlers:
 
     let accepted = codes.iter().filter(|c| **c == 202).count();
     let rate_limited = codes.iter().filter(|c| **c == 429).count();
+    // ip_rate_limit=3 with sliding window counter: at most 3 per window.
+    // Window boundary timing may cause 2-3 accepted out of 5 rapid requests.
     assert!(
-        accepted >= 1,
-        "At least some requests should be accepted (202), got: {:?}",
+        accepted <= 3,
+        "At most 3 requests should be accepted per window (ip_rate_limit: 3), got: {:?}",
         codes
     );
     assert!(
-        rate_limited >= 1,
-        "At least some requests should be rate-limited (429), got: {:?}",
+        rate_limited >= 2,
+        "At least 2 requests should be rate-limited (5 - 3 = 2), got: {:?}",
         codes
     );
     assert_eq!(
         accepted + rate_limited,
         5,
-        "All responses should be 202 or 429, got: {:?}",
+        "All responses should be either 202 or 429, got: {:?}",
         codes
     );
 
@@ -908,5 +924,103 @@ handlers:
 
     assert_eq!(resp.status(), 403);
 
+    server.stop().await;
+}
+
+// Test 15: replay-local — replay JSONL events to a running server
+
+#[tokio::test]
+async fn replay_local() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/jobs/replay"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock)
+        .await;
+
+    let yaml = format!(
+        r#"
+database:
+  driver: sqlite
+  url: "sqlite:__DB_PATH__?mode=rwc"
+server:
+  port: __PORT__
+  allow_private_urls: true
+api:
+  auth_token: "test-token-replay"
+sources:
+  app:
+    type: event
+handlers:
+  on-replay:
+    source: app
+    events: [order.created]
+    url: {mock_url}/jobs/replay
+    retry:
+      max: 0
+"#,
+        mock_url = mock.uri()
+    );
+
+    let server = QhookProcess::start(&yaml, 19725).await;
+
+    // Create a JSONL file (same format as `qhook export events`)
+    let id = ulid::Ulid::new();
+    let jsonl_path = format!("/tmp/qhook_test_replay_{}.jsonl", id);
+    let config_path = format!("/tmp/qhook_test_replay_{}.yaml", id);
+    let jsonl_content = r#"{"id":"evt_1","source":"app","event_type":"order.created","payload":{"item":"widget","qty":1},"created_at":"2026-01-01T00:00:00.000"}
+{"id":"evt_2","source":"app","event_type":"order.created","payload":{"item":"gadget","qty":2},"created_at":"2026-01-01T00:01:00.000"}"#;
+    std::fs::write(&jsonl_path, jsonl_content).unwrap();
+
+    // Write a minimal config for replay-local (only needs port for default target)
+    std::fs::write(
+        &config_path,
+        "database:\n  driver: sqlite\n  url: \"sqlite:/tmp/unused.db?mode=rwc\"\nserver:\n  port: 19725\nsources:\n  app:\n    type: event\nhandlers: {}\n",
+    )
+    .unwrap();
+
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_qhook"))
+        .args([
+            "replay-local",
+            &jsonl_path,
+            "--target",
+            &server.base_url,
+            "--token",
+            "test-token-replay",
+            "-y",
+            "--config",
+            &config_path,
+        ])
+        .output()
+        .await
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("2 ok"),
+        "Expected 2 ok events, got stdout: {}, stderr: {}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Wait for delivery
+    wait_for_mock(&mock, 2, 10).await;
+
+    let reqs = mock.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 2);
+
+    let items: Vec<String> = reqs
+        .iter()
+        .map(|r| {
+            let b: Value = serde_json::from_slice(&r.body).unwrap();
+            b["item"].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert!(items.contains(&"widget".to_string()), "missing widget");
+    assert!(items.contains(&"gadget".to_string()), "missing gadget");
+
+    // Cleanup
+    let _ = std::fs::remove_file(&jsonl_path);
+    let _ = std::fs::remove_file(&config_path);
     server.stop().await;
 }

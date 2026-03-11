@@ -1,0 +1,5 @@
+---
+source: tests/snapshot_tests.rs
+expression: config_error(yaml)
+---
+workflow 'dup-flow' has duplicate step name 'step1'

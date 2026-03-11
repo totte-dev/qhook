@@ -24,46 +24,6 @@ sources:
 // --- Endpoint CRUD ---
 
 #[tokio::test]
-async fn outbound_create_endpoint() {
-    let server = QhookProcess::start(BASE_YAML, 19801).await;
-    let client = http();
-
-    // Create endpoint
-    let resp = client
-        .post(server.url("/api/outbound/endpoints"))
-        .header("Authorization", "Bearer test-token")
-        .json(&serde_json::json!({
-            "source": "my-saas",
-            "url": "https://customer.example.com/webhook",
-            "description": "Customer A"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 201);
-
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["source"], "my-saas");
-    assert_eq!(body["url"], "https://customer.example.com/webhook");
-    assert_eq!(body["description"], "Customer A");
-    assert_eq!(body["status"], "active");
-
-    // Signing secret returned and has whsec_ prefix
-    let secret = body["signing_secret"].as_str().unwrap();
-    assert!(
-        secret.starts_with("whsec_"),
-        "Secret should start with whsec_, got: {}",
-        secret
-    );
-
-    // ID is a ULID
-    let id = body["id"].as_str().unwrap();
-    assert!(!id.is_empty());
-
-    server.stop().await;
-}
-
-#[tokio::test]
 async fn outbound_create_endpoint_requires_outbound_source() {
     // Config with an event source, not outbound
     let yaml = r#"

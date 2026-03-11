@@ -1,0 +1,5 @@
+---
+source: tests/snapshot_tests.rs
+expression: config_error(yaml)
+---
+handler 'bad-url' URL must start with http:// or https://, got 'localhost:3000/hook'
