@@ -8,7 +8,7 @@ info:
     configured handlers with retry and dead-letter support.
 
     All responses include an `X-API-Version` header indicating the current API version.
-  version: 0.3.2
+  version: 0.4.0
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -161,7 +161,7 @@ paths:
         - name: source
           in: path
           required: true
-          description: Source name as defined in qhook configuration (must be `type: event`)
+          description: "Source name as defined in qhook configuration (must be type: event)"
           schema:
             type: string
           example: platform
