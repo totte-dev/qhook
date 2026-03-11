@@ -5,7 +5,7 @@ title: Why qhook?
 
 # Why qhook?
 
-qhook is a **lightweight event-to-action engine**. It receives events (webhooks, SNS, API calls) and executes HTTP actions reliably — from a single call to a multi-step pipeline with error routing and rollback. Single binary, no Redis, no Kubernetes.
+qhook is a **lightweight workflow engine with built-in queue and retry**. It receives events (webhooks, SNS, API calls) and executes HTTP actions reliably — from a single call to a multi-step pipeline with error routing and rollback. Single binary, no Redis, no Kubernetes.
 
 ---
 
@@ -32,7 +32,7 @@ Event source               qhook                           Your services
 
   Webhook (verified) ---->|                              |
   SNS message ----------->| Route + execute              |
-  API call --------------->|                              |
+  API call (POST /events/{source}/{type}) ->|              |
                            |  Simple (handler):           |
                            |    event → POST /billing --->|  one HTTP call
                            |    (retry, DLQ, fan-out)     |
@@ -379,6 +379,7 @@ workflows:
 ## Where qhook Fits
 
 qhook is purpose-built for one pattern: **event arrives → execute HTTP actions reliably**.
+Whether the event is an external webhook (Stripe, GitHub) or an internal API call (your app, IDP, CI/CD), qhook handles both through the same engine.
 
 It is **not** a replacement for:
 - Kubernetes-native tools if you already run K8s
@@ -400,8 +401,9 @@ It **is** the right choice when:
 |---|---|
 | **Deployment** | Single binary, zero external deps |
 | **Database** | SQLite (dev) / Postgres (prod) |
-| **Input** | Webhooks (9 providers verified), SNS, internal API |
+| **Input** | Webhooks (9 providers verified), SNS, internal API (`POST /events/{source}/{type}` or `POST /events/{type}`) |
 | **Actions** | HTTP with custom headers for authentication |
+| **Management API** | Track events, jobs, and workflow runs programmatically |
 | **Reliability** | Retry (exponential backoff), error routing, DLQ |
 | **Workflows** | Sequential, choice, parallel, map, wait, callback |
 | **Input validation** | Workflow params with type checking |

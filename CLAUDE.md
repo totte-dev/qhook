@@ -36,21 +36,39 @@ After implementing any feature, update **all applicable** items:
 **NEVER implement before tests exist.** Always:
 
 1. Write unit tests in `#[cfg(test)] mod tests` within the relevant source file.
-2. Write E2E tests in `tests/e2e.sh` (basic) or `tests/e2e_sns.sh` (SNS/LocalStack).
+2. Write integration tests in `tests/e2e.rs`, `tests/e2e_workflow.rs`, or `tests/scenarios.rs`.
 3. Run tests to **confirm they fail**.
 4. Implement the feature.
 5. Run tests to **confirm they pass**.
 
 If implementing multiple features, repeat this cycle per feature — do not batch implementations before writing tests.
 
+### Test Quality Gate (MANDATORY)
+
+When writing integration tests (`tests/e2e.rs`, `tests/e2e_workflow.rs`, `tests/scenarios.rs`), perform **3 rounds of create → review** before finalizing:
+
+1. **Round 1 (Create):** Write the test code.
+2. **Round 1 (Review):** Self-review each assertion. For every `assert`, ask: "Would this test still pass if the feature was broken?" Fix any weak assertions:
+   - `>= 1` → `== 1` when exactly one call is expected
+   - Presence checks (`is_some()`) → value checks (`== "expected"`)
+   - Add negative assertions (verify things that should NOT happen)
+3. **Round 2 (Create):** Fix all issues found in Round 1 review.
+4. **Round 2 (Review):** Check test completeness. For every behavior the test claims to verify, confirm there is a corresponding assertion. Look for missing assertions on response bodies, error values, and request counts.
+5. **Round 3 (Create):** Fix all issues found in Round 2 review.
+6. **Round 3 (Review):** Final pass — run the tests and verify they fail when the feature is intentionally broken (e.g., comment out the feature code). If a test passes with the feature disabled, the test is not testing what it claims.
+
+**Common anti-patterns to catch during review:**
+- `assert!(count >= 1)` when exactly N calls are expected → use `assert_eq!(count, N)`
+- Checking header/field existence without verifying the value
+- No negative assertions (missing `assert_eq!(count, 0)` for paths that should NOT be called)
+- Using `wait_for_mock` count as the only verification (it proves at least N, not exactly N)
+- Assertions that pass regardless of feature behavior (tautological tests)
+
 ### 3. Test Commands
 
 ```bash
-# Unit tests (fast, always run)
+# All tests: unit + E2E + workflow + scenarios (no external deps)
 cargo test
-
-# E2E tests (starts qhook + mock server, no external deps)
-bash tests/e2e.sh
 
 # SNS E2E tests (requires LocalStack)
 docker run -d --name localstack-qhook -p 4567:4566 -e SERVICES=sns -e LOCALSTACK_HOST=localhost:4567 localstack/localstack:3
@@ -83,9 +101,12 @@ src/
   alert.rs      — Alert system (Slack, Discord, generic webhook)
   templates/    — Config templates (default, github, stripe, sns, cron, local overlay)
 tests/
-  e2e.sh        — E2E tests (26 tests)
-  e2e_sns.sh    — SNS E2E tests with LocalStack (8 tests)
-  mock_server.py — Python mock HTTP server for E2E
+  common/       — Shared test infrastructure (QhookProcess, helpers)
+  e2e.rs        — E2E integration tests (12 tests, converted from e2e.sh)
+  e2e_workflow.rs — Workflow E2E tests (12 tests, converted from e2e_workflow.sh)
+  scenarios.rs  — Scenario-based integration tests (6 tests)
+  e2e_sns.sh    — SNS E2E tests with LocalStack (8 tests, shell)
+  mock_server.py — Python mock HTTP server for SNS tests + benchmarks
   bench.sh      — Benchmark script (receive RPS + delivery throughput)
   bench.js      — k6 load test script
 .github/workflows/

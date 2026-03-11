@@ -1,0 +1,36 @@
+name: Security
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    # Every Monday at 09:00 UTC
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check advisories, licenses, bans, sources
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+  audit-lockfile:
+    name: Lockfile audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit (binary-level, with lockfile)
+        run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0009

@@ -8,7 +8,7 @@ info:
     configured handlers with retry and dead-letter support.
 
     All responses include an `X-API-Version` header indicating the current API version.
-  version: 0.2.2
+  version: 0.3.2
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -32,6 +32,8 @@ tags:
     description: Event ingestion endpoints
   - name: Callback
     description: Workflow callback endpoint
+  - name: Management
+    description: Event and job inspection endpoints
   - name: Operations
     description: Health check and metrics
 
@@ -106,12 +108,23 @@ paths:
         "200":
           description: Event received or duplicate ignored
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
-                enum:
-                  - Event received
-                  - Duplicate event ignored
+                type: object
+                properties:
+                  event_id:
+                    type: string
+                    description: ULID of the received event
+                    example: 01JEXAMPLE00000000000000000
+                  duplicate:
+                    type: boolean
+                    description: Whether the event was a duplicate
+                    example: false
+                  jobs_created:
+                    type: integer
+                    description: Number of jobs created for this event
+                    example: 2
+                required: [event_id, duplicate, jobs_created]
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -132,25 +145,33 @@ paths:
         "503":
           $ref: "#/components/responses/ServiceUnavailable"
 
-  /events/{event_type}:
+  /events/{source}/{event_type}:
     post:
       tags: [Ingest]
       summary: Send an event
       description: |
-        Sends an event directly to qhook. Used for application-generated events
-        (as opposed to external webhooks).
+        Sends an event to qhook with a source name. The source must be defined in
+        the config as `type: event`. Multiple event sources are supported (e.g.,
+        `app`, `platform`, `billing-app`, `provisioning-app`).
 
-        If a `ce-type` header is present, it overrides the path parameter.
+        If a `ce-type` header is present, it overrides the `event_type` path parameter.
         Requires Bearer token authentication if `api.auth_token` is configured.
       operationId: sendEvent
       parameters:
+        - name: source
+          in: path
+          required: true
+          description: Source name as defined in qhook configuration (must be `type: event`)
+          schema:
+            type: string
+          example: platform
         - name: event_type
           in: path
           required: true
           description: Event type identifier
           schema:
             type: string
-          example: order.created
+          example: deploy.start
         - name: ce-type
           in: header
           description: CloudEvents event type (overrides path parameter)
@@ -205,10 +226,19 @@ paths:
         "202":
           description: Event accepted
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
-                example: Event accepted
+                type: object
+                properties:
+                  event_id:
+                    type: string
+                    description: ULID of the accepted event
+                    example: 01JEXAMPLE00000000000000000
+                  jobs_created:
+                    type: integer
+                    description: Number of jobs created for this event
+                    example: 1
+                required: [event_id, jobs_created]
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -218,6 +248,8 @@ paths:
               schema:
                 type: string
                 example: Invalid token
+        "404":
+          $ref: "#/components/responses/SourceNotFound"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "429":
@@ -359,6 +391,184 @@ paths:
                 error: internal error
         "503":
           $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/events/{event_id}:
+    get:
+      tags: [Management]
+      summary: Get event details
+      description: |
+        Returns event details including associated jobs and workflow runs.
+        Requires Bearer token authentication if `api.auth_token` is configured.
+      operationId: getEvent
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - name: event_id
+          in: path
+          required: true
+          description: Event ID (ULID)
+          schema:
+            type: string
+          example: 01JEXAMPLE00000000000000000
+      responses:
+        "200":
+          description: Event details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    description: Event ULID
+                  source:
+                    type: string
+                    description: Source name
+                  event_type:
+                    type: string
+                    description: Event type
+                  payload:
+                    type: object
+                    additionalProperties: true
+                    description: Event payload
+                  headers:
+                    type: object
+                    additionalProperties:
+                      type: string
+                    description: Stored headers
+                  unique_key:
+                    type: string
+                    nullable: true
+                    description: Deduplication key
+                  created_at:
+                    type: string
+                    description: Creation timestamp (UTC)
+                  jobs:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                    description: Associated jobs
+                  workflow_runs:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                    description: Associated workflow runs
+                required: [id, source, event_type, payload, headers, created_at, jobs, workflow_runs]
+        "401":
+          description: Missing or invalid Bearer token
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid token
+        "404":
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: event not found
+
+  /api/jobs/{job_id}:
+    get:
+      tags: [Management]
+      summary: Get job details
+      description: |
+        Returns job details including workflow data. Optionally includes delivery attempts.
+        Requires Bearer token authentication if `api.auth_token` is configured.
+      operationId: getJob
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: Job ID (ULID)
+          schema:
+            type: string
+          example: 01JEXAMPLE00000000000000000
+        - name: include_attempts
+          in: query
+          required: false
+          description: Include delivery attempts in response
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Job details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    description: Job ULID
+                  event_id:
+                    type: string
+                    description: Associated event ULID
+                  handler:
+                    type: string
+                    description: Handler name
+                  url:
+                    type: string
+                    description: Delivery URL
+                  status:
+                    type: string
+                    description: Job status
+                  attempt:
+                    type: integer
+                    description: Current attempt number
+                  max_attempts:
+                    type: integer
+                    description: Maximum retry attempts
+                  scheduled_at:
+                    type: string
+                    description: Next scheduled delivery time (UTC)
+                  last_error:
+                    type: string
+                    nullable: true
+                    description: Last delivery error message
+                  workflow_run_id:
+                    type: string
+                    nullable: true
+                    description: Associated workflow run ID
+                  step_name:
+                    type: string
+                    nullable: true
+                    description: Workflow step name
+                  step_index:
+                    type: integer
+                    nullable: true
+                    description: Workflow step index
+                  attempts:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                    description: Delivery attempts (only if include_attempts=true)
+                required: [id, event_id, handler, url, status, attempt, max_attempts, scheduled_at]
+        "401":
+          description: Missing or invalid Bearer token
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid token
+        "404":
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: job not found
 
   /health:
     get:
