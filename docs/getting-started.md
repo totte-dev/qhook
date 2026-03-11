@@ -84,7 +84,7 @@ docker run -p 8888:8888 -v $(pwd)/qhook.yaml:/data/qhook.yaml ghcr.io/totte-dev/
 ## Send Your First Event
 
 ```bash
-curl -X POST http://localhost:8888/events/order.created \
+curl -X POST http://localhost:8888/events/app/order.created \
   -H "Content-Type: application/json" \
   -d '{"id": "ord_123", "customer": "alice", "amount": 4999}'
 ```
@@ -110,7 +110,7 @@ qhook jobs list
 ```
 Your App / Webhook Provider    qhook                          Your Backend
                                +--------------------------+
-POST /events/order.created --> | Store event (dedup)      |
+POST /events/app/order.created -> | Store event (dedup)      |
 POST /webhooks/stripe -------> | Verify signature         |
 POST /sns/my-topic ----------> | Verify X.509 + unwrap    |
                                |   |                      |
@@ -131,7 +131,7 @@ POST /sns/my-topic ----------> | Verify X.509 + unwrap    |
 |-------|---------|
 | `POST /webhooks/{source}` | Receive external webhooks (signature verified) |
 | `POST /sns/{source}` | Receive AWS SNS messages (X.509 verified) |
-| `POST /events/{event_type}` | Receive internal events (bearer token auth) |
+| `POST /events/{source}/{event_type}` | Receive internal events (bearer token auth) |
 | `GET /health` | Health check with queue depth |
 | `GET /metrics` | Prometheus metrics |
 

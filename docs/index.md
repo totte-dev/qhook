@@ -5,12 +5,12 @@ title: Home
 
 # qhook
 
-**Lightweight event-to-action engine.** Turn webhooks and API events into reliable HTTP actions — single binary, no Redis, no Kubernetes.
+**Lightweight workflow engine with built-in queue and retry.** Receive webhooks and API events, execute HTTP actions reliably — single binary, zero infrastructure.
 
-- **Zero infrastructure.** Single binary, SQLite for dev, Postgres for production.
-- **Webhook verification built in.** GitHub, Stripe, Shopify, PagerDuty, Grafana, Terraform Cloud, GitLab, HMAC, AWS SNS X.509.
+- **Two entry points.** Receive external webhooks (with signature verification for 9 providers) and internal API events (`POST /events/:source/:type`) through the same engine.
+- **Zero infrastructure.** Single binary, SQLite for dev, Postgres for production. No Redis, no message broker.
 - **From one action to a pipeline.** Single HTTP call or multi-step workflow with branching, parallelism, and rollback.
-- **Production ready.** Prometheus metrics, health checks, alerts, CloudEvents.
+- **Production ready.** Prometheus metrics, health checks, alerts, Management API for tracking events and jobs, CloudEvents.
 
 ## Quick Start
 

@@ -1,6 +1,6 @@
 # qhook
 
-**Lightweight event-to-action engine.** Turn webhooks and API events into reliable HTTP actions — single binary, no Redis, no Kubernetes.
+**Lightweight workflow engine with built-in queue and retry.** Receive webhooks and API events, execute HTTP actions reliably — single binary, zero infrastructure.
 
 <!-- badges -->
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
@@ -13,7 +13,9 @@
 
 ## What qhook Does
 
-1. **Receive** events — webhooks (with signature verification), AWS SNS, or internal API
+1. **Receive** events from two entry points:
+   - **Webhooks** (external) — Stripe, GitHub, PagerDuty, etc. with signature verification
+   - **API** (internal) — your apps, IDP, CI/CD trigger events via `POST /events/{source}/{event_type}` (or `POST /events/{event_type}` with default source)
 2. **Execute** HTTP actions reliably — one call or a multi-step pipeline
 3. **Handle** failures — retry, error routing, rollback, Dead Letter Queue
 
@@ -143,6 +145,30 @@ qhook workflow-runs redrive <ID>   # Redrive a failed workflow
 ```
 
 > See the [CLI Reference](https://totte-dev.github.io/qhook/cli) for all commands.
+
+## Management API
+
+Track events and jobs programmatically:
+
+```bash
+# Send an event with explicit source name
+curl -X POST http://localhost:8888/events/platform/deploy.start \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"service": "api", "version": "1.2.3"}'
+# → {"event_id": "01J...", "jobs_created": 2}
+
+# The old route still works (defaults to source "app")
+# curl -X POST http://localhost:8888/events/deploy.start ...
+
+# Check event status
+curl http://localhost:8888/api/events/01J... -H "Authorization: Bearer $TOKEN"
+# → {jobs: [{status: "completed"}, {status: "running"}], ...}
+
+# Check job details
+curl http://localhost:8888/api/jobs/01J...?include_attempts=true -H "Authorization: Bearer $TOKEN"
+```
+
+Any frontend — Backstage, Retool, or custom dashboards — can consume this API.
 
 ## Documentation
 
