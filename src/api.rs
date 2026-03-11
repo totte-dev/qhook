@@ -11,7 +11,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     middleware,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde_json::Value;
 
@@ -328,6 +328,29 @@ pub async fn serve(state: AppState, config_path: String) -> Result<()> {
         .route("/callback/{token}", post(handle_callback))
         .route("/api/events/{event_id}", get(handle_get_event))
         .route("/api/jobs/{job_id}", get(handle_get_job))
+        // Outbound webhook management
+        .route(
+            "/api/outbound/endpoints",
+            post(handle_create_endpoint).get(handle_list_endpoints),
+        )
+        .route(
+            "/api/outbound/endpoints/{endpoint_id}",
+            get(handle_get_endpoint)
+                .put(handle_update_endpoint)
+                .delete(handle_delete_endpoint),
+        )
+        .route(
+            "/api/outbound/endpoints/{endpoint_id}/rotate-secret",
+            post(handle_rotate_secret),
+        )
+        .route(
+            "/api/outbound/endpoints/{endpoint_id}/subscriptions",
+            post(handle_create_subscriptions).get(handle_list_subscriptions),
+        )
+        .route(
+            "/api/outbound/endpoints/{endpoint_id}/subscriptions/{subscription_id}",
+            delete(handle_delete_subscription),
+        )
         .route("/_echo", axum::routing::any(handle_echo))
         .route("/health", axum::routing::get(handle_health))
         .route("/metrics", axum::routing::get(handle_metrics))
@@ -538,9 +561,9 @@ async fn handle_event(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    // Validate that source exists and is type "event"
+    // Validate that source exists and is type "event" or "outbound"
     match state.config.sources.get(&source) {
-        Some(s) if s.source_type == "event" => {}
+        Some(s) if s.source_type == "event" || s.source_type == "outbound" => {}
         _ => {
             return (StatusCode::NOT_FOUND, "Unknown event source".to_string()).into_response();
         }
@@ -802,7 +825,14 @@ async fn process_event(
         })
         .collect();
 
-    if matching_handlers.is_empty() && matching_workflows.is_empty() {
+    // Check if this is an outbound source — endpoints come from DB, not config
+    let is_outbound = state
+        .config
+        .sources
+        .get(source)
+        .is_some_and(|s| s.source_type == "outbound");
+
+    if !is_outbound && matching_handlers.is_empty() && matching_workflows.is_empty() {
         tracing::debug!(source, event_type, "No matching handlers or workflows");
         return Ok(EventResult {
             event_id,
@@ -878,6 +908,42 @@ async fn process_event(
             event_type,
             "Job created"
         );
+    }
+
+    // Create jobs for outbound endpoints (dynamically registered via API)
+    if is_outbound {
+        match state.db.find_subscribed_endpoints(source, event_type).await {
+            Ok(endpoints) => {
+                for ep in &endpoints {
+                    let job_id = ulid::Ulid::new().to_string();
+                    let handler_name = format!("outbound/{}", ep.id);
+                    let max_attempts = state.config.delivery.default_retry.max;
+
+                    if let Err(e) = state
+                        .db
+                        .insert_job(&job_id, &event_id, &handler_name, &ep.url, max_attempts)
+                        .await
+                    {
+                        tracing::error!(error = %e, endpoint_id = ep.id, "Failed to create outbound job");
+                        continue;
+                    }
+
+                    jobs_created += 1;
+                    state.metrics.inc_jobs_created();
+                    tracing::info!(
+                        event_id,
+                        job_id,
+                        handler = handler_name,
+                        endpoint_url = ep.url,
+                        event_type,
+                        "Outbound job created"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, source, "Failed to find subscribed endpoints");
+            }
+        }
     }
 
     // Start matching workflows
@@ -1823,6 +1889,367 @@ fn serialize_headers(headers: &HeaderMap) -> String {
         .collect();
 
     serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
+}
+
+// --- Outbound webhook management API ---
+
+async fn handle_create_endpoint(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> axum::response::Response {
+    if let Some(resp) = check_api_auth(&state, &headers) {
+        return resp;
+    }
+
+    let source = body["source"].as_str().unwrap_or("");
+    let url = body["url"].as_str().unwrap_or("");
+    let description = body["description"].as_str();
+
+    if source.is_empty() || url.is_empty() {
+        let body = serde_json::json!({"error": "source and url are required"});
+        return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+    }
+
+    // Verify source exists and is outbound type
+    match state.config.sources.get(source) {
+        Some(s) if s.source_type == "outbound" => {}
+        Some(_) => {
+            let body = serde_json::json!({"error": format!("source '{}' is not an outbound source", source)});
+            return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+        }
+        None => {
+            let body = serde_json::json!({"error": format!("source '{}' not found", source)});
+            return (StatusCode::NOT_FOUND, axum::Json(body)).into_response();
+        }
+    }
+
+    // Validate URL (reuse SSRF protection)
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        let body = serde_json::json!({"error": "url must start with http:// or https://"});
+        return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+    }
+
+    let id = ulid::Ulid::new().to_string();
+    let signing_secret = crate::verify::generate_signing_secret();
+
+    match state
+        .db
+        .insert_endpoint(&id, source, url, description, &signing_secret)
+        .await
+    {
+        Ok(()) => {
+            let body = serde_json::json!({
+                "id": id,
+                "source": source,
+                "url": url,
+                "description": description,
+                "signing_secret": signing_secret,
+                "status": "active",
+            });
+            (StatusCode::CREATED, axum::Json(body)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to create endpoint");
+            let body = serde_json::json!({"error": "internal error"});
+            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
+        }
+    }
+}
+
+async fn handle_list_endpoints(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> axum::response::Response {
+    if let Some(resp) = check_api_auth(&state, &headers) {
+        return resp;
+    }
+
+    let source = params.get("source").map(|s| s.as_str());
+    match state.db.list_endpoints(source).await {
+        Ok(endpoints) => {
+            // Redact signing secrets in list response
+            let items: Vec<Value> = endpoints
+                .iter()
+                .map(|ep| {
+                    serde_json::json!({
+                        "id": ep.id,
+                        "source": ep.source,
+                        "url": ep.url,
+                        "description": ep.description,
+                        "status": ep.status,
+                        "created_at": ep.created_at,
+                        "updated_at": ep.updated_at,
+                    })
+                })
+                .collect();
+            axum::Json(serde_json::json!({"endpoints": items})).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to list endpoints");
+            let body = serde_json::json!({"error": "internal error"});
+            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
+        }
+    }
+}
+
+async fn handle_get_endpoint(
+    State(state): State<SharedState>,
+    Path(endpoint_id): Path<String>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Some(resp) = check_api_auth(&state, &headers) {
+        return resp;
+    }
+
+    match state.db.get_endpoint(&endpoint_id).await {
+        Ok(Some(ep)) => {
+            let subs = state
+                .db
+                .list_subscriptions(&endpoint_id)
+                .await
+                .unwrap_or_default();
+            let body = serde_json::json!({
+                "id": ep.id,
+                "source": ep.source,
+                "url": ep.url,
+                "description": ep.description,
+                "signing_secret": ep.signing_secret,
+                "status": ep.status,
+                "created_at": ep.created_at,
+                "updated_at": ep.updated_at,
+                "subscriptions": subs,
+            });
+            axum::Json(body).into_response()
+        }
+        Ok(None) => {
+            let body = serde_json::json!({"error": "endpoint not found"});
+            (StatusCode::NOT_FOUND, axum::Json(body)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to get endpoint");
+            let body = serde_json::json!({"error": "internal error"});
+            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
+        }
+    }
+}
+
+async fn handle_update_endpoint(
+    State(state): State<SharedState>,
+    Path(endpoint_id): Path<String>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> axum::response::Response {
+    if let Some(resp) = check_api_auth(&state, &headers) {
+        return resp;
+    }
+
+    let url = body["url"].as_str();
+    let description = body["description"].as_str();
+    let status = body["status"].as_str();
+
+    // Validate status if provided
+    if let Some(s) = status {
+        if s != "active" && s != "disabled" {
+            let body = serde_json::json!({"error": "status must be 'active' or 'disabled'"});
+            return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+        }
+    }
+
+    // Validate URL if provided
+    if let Some(u) = url {
+        if !u.starts_with("http://") && !u.starts_with("https://") {
+            let body = serde_json::json!({"error": "url must start with http:// or https://"});
+            return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+        }
+    }
+
+    match state
+        .db
+        .update_endpoint(&endpoint_id, url, description, status)
+        .await
+    {
+        Ok(true) => {
+            let ep = state.db.get_endpoint(&endpoint_id).await.ok().flatten();
+            if let Some(ep) = ep {
+                let body = serde_json::json!({
+                    "id": ep.id,
+                    "source": ep.source,
+                    "url": ep.url,
+                    "description": ep.description,
+                    "status": ep.status,
+                    "updated_at": ep.updated_at,
+                });
+                axum::Json(body).into_response()
+            } else {
+                StatusCode::OK.into_response()
+            }
+        }
+        Ok(false) => {
+            let body = serde_json::json!({"error": "endpoint not found"});
+            (StatusCode::NOT_FOUND, axum::Json(body)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to update endpoint");
+            let body = serde_json::json!({"error": "internal error"});
+            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
+        }
+    }
+}
+
+async fn handle_delete_endpoint(
+    State(state): State<SharedState>,
+    Path(endpoint_id): Path<String>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Some(resp) = check_api_auth(&state, &headers) {
+        return resp;
+    }
+
+    match state.db.delete_endpoint(&endpoint_id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => {
+            let body = serde_json::json!({"error": "endpoint not found"});
+            (StatusCode::NOT_FOUND, axum::Json(body)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to delete endpoint");
+            let body = serde_json::json!({"error": "internal error"});
+            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
+        }
+    }
+}
+
+async fn handle_rotate_secret(
+    State(state): State<SharedState>,
+    Path(endpoint_id): Path<String>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Some(resp) = check_api_auth(&state, &headers) {
+        return resp;
+    }
+
+    let new_secret = crate::verify::generate_signing_secret();
+    match state
+        .db
+        .rotate_endpoint_secret(&endpoint_id, &new_secret)
+        .await
+    {
+        Ok(true) => {
+            let body = serde_json::json!({"signing_secret": new_secret});
+            axum::Json(body).into_response()
+        }
+        Ok(false) => {
+            let body = serde_json::json!({"error": "endpoint not found"});
+            (StatusCode::NOT_FOUND, axum::Json(body)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to rotate secret");
+            let body = serde_json::json!({"error": "internal error"});
+            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
+        }
+    }
+}
+
+async fn handle_create_subscriptions(
+    State(state): State<SharedState>,
+    Path(endpoint_id): Path<String>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> axum::response::Response {
+    if let Some(resp) = check_api_auth(&state, &headers) {
+        return resp;
+    }
+
+    // Verify endpoint exists
+    match state.db.get_endpoint(&endpoint_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            let body = serde_json::json!({"error": "endpoint not found"});
+            return (StatusCode::NOT_FOUND, axum::Json(body)).into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to get endpoint");
+            let body = serde_json::json!({"error": "internal error"});
+            return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response();
+        }
+    }
+
+    let event_types: Vec<String> = body["event_types"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if event_types.is_empty() {
+        let body = serde_json::json!({"error": "event_types array is required"});
+        return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+    }
+
+    match state
+        .db
+        .insert_subscriptions(&endpoint_id, &event_types)
+        .await
+    {
+        Ok(subs) => {
+            let body = serde_json::json!({"subscriptions": subs});
+            (StatusCode::CREATED, axum::Json(body)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to create subscriptions");
+            let body = serde_json::json!({"error": "internal error"});
+            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
+        }
+    }
+}
+
+async fn handle_list_subscriptions(
+    State(state): State<SharedState>,
+    Path(endpoint_id): Path<String>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Some(resp) = check_api_auth(&state, &headers) {
+        return resp;
+    }
+
+    match state.db.list_subscriptions(&endpoint_id).await {
+        Ok(subs) => {
+            let body = serde_json::json!({"subscriptions": subs});
+            axum::Json(body).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to list subscriptions");
+            let body = serde_json::json!({"error": "internal error"});
+            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
+        }
+    }
+}
+
+async fn handle_delete_subscription(
+    State(state): State<SharedState>,
+    Path((_, subscription_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Some(resp) = check_api_auth(&state, &headers) {
+        return resp;
+    }
+
+    match state.db.delete_subscription(&subscription_id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => {
+            let body = serde_json::json!({"error": "subscription not found"});
+            (StatusCode::NOT_FOUND, axum::Json(body)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to delete subscription");
+            let body = serde_json::json!({"error": "internal error"});
+            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
+        }
+    }
 }
 
 #[cfg(test)]
