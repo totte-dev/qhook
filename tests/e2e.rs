@@ -60,12 +60,26 @@ handlers:
     let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
     assert_eq!(body["message"], "hello");
 
-    // X-Qhook headers present
-    let has_qhook = reqs[0]
-        .headers
-        .iter()
-        .any(|(name, _)| name.as_str().to_lowercase().contains("qhook"));
-    assert!(has_qhook, "X-Qhook headers should be present");
+    // Verify specific X-Qhook delivery headers
+    let headers = &reqs[0].headers;
+    assert!(
+        headers.get("X-Qhook-Job-ID").is_some(),
+        "X-Qhook-Job-ID header should be present"
+    );
+    assert!(
+        headers.get("X-Qhook-Event-ID").is_some(),
+        "X-Qhook-Event-ID header should be present"
+    );
+    assert_eq!(
+        headers.get("X-Qhook-Handler").unwrap().to_str().unwrap(),
+        "on-test",
+        "X-Qhook-Handler should match handler name"
+    );
+    assert_eq!(
+        headers.get("X-Qhook-Attempt").unwrap().to_str().unwrap(),
+        "1",
+        "X-Qhook-Attempt should be 1 for first delivery"
+    );
 
     server.stop().await;
 }
@@ -582,20 +596,22 @@ handlers:
 
     let accepted = codes.iter().filter(|c| **c == 202).count();
     let rate_limited = codes.iter().filter(|c| **c == 429).count();
+    // ip_rate_limit=3 with sliding window counter: at most 3 per window.
+    // Window boundary timing may cause 2-3 accepted out of 5 rapid requests.
     assert!(
-        accepted >= 1,
-        "At least some requests should be accepted (202), got: {:?}",
+        accepted <= 3,
+        "At most 3 requests should be accepted per window (ip_rate_limit: 3), got: {:?}",
         codes
     );
     assert!(
-        rate_limited >= 1,
-        "At least some requests should be rate-limited (429), got: {:?}",
+        rate_limited >= 2,
+        "At least 2 requests should be rate-limited (5 - 3 = 2), got: {:?}",
         codes
     );
     assert_eq!(
         accepted + rate_limited,
         5,
-        "All responses should be 202 or 429, got: {:?}",
+        "All responses should be either 202 or 429, got: {:?}",
         codes
     );
 
