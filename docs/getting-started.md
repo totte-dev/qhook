@@ -61,7 +61,7 @@ handlers:
 ```
 
 This config:
-- Uses SQLite (no external database needed)
+- Uses SQLite (no external database needed; Postgres and MySQL also supported)
 - Listens on port 8888
 - `allow_private_urls` allows handler URLs pointing to localhost (disabled by default for SSRF protection)
 - Defines one source called `app` (no signature verification)

@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- **Gzip compression**: HTTP responses are now gzip-compressed via `tower-http` `CompressionLayer`, reducing bandwidth for API and metrics responses.
+- **Full JSON Schema validation**: Replaced manual schema validation with the `jsonschema` crate (Draft 2020-12). Now supports `enum`, `pattern`, `minLength`, `maxLength`, and all standard JSON Schema keywords.
+- **Local replay mode**: `qhook replay-local <file.jsonl>` replays exported events (from `qhook export events`) to a running server. Supports `--target`, `--token`, and stdin (`-`).
+- **Twilio webhook verification**: `verify: twilio` checks `X-Twilio-Signature` header (HMAC-SHA1, base64-encoded).
+- **Paddle webhook verification**: `verify: paddle` checks `Paddle-Signature` header (`ts=...;h1=...` format, HMAC-SHA256) with 5-minute replay protection.
+- **MySQL support**: `database.driver: mysql` for MySQL/MariaDB backends via sqlx AnyPool. Adapts `FOR UPDATE SKIP LOCKED`, `INSERT IGNORE`, and `VARCHAR(255)` primary keys for MySQL compatibility.
+- **llms.txt**: AI agent discoverability file at `docs/llms.txt` following the llms.txt specification.
+- **Compliance documentation**: PCI DSS 4.0 and SOC 2 compliance framing guide (`docs/guides/compliance.md`) with audit trail mapping tables.
+- **proptest property-based tests**: 29 property-based tests covering config parsing robustness, retry backoff invariants, filter evaluation safety, and ULID generation properties.
+- **insta snapshot tests**: 21 snapshot tests for config validation error messages, default config template, Prometheus metrics format, and API response formats.
+
+### Changed
+- **Per-destination rate limiting**: Switched from semaphore-hold to GCRA-based rate limiting via the `governor` crate. Provides smoother, more accurate per-handler rate limiting.
+
 ## [0.4.2] - 2026-03-11
 
 ### Added

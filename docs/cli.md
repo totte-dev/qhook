@@ -235,6 +235,33 @@ qhook export events > events.jsonl                     # save to file
 | `--until` | Only events created before this timestamp |
 | `-l`, `--limit` | Max events to export (default: 1000) |
 
+### qhook replay-local
+
+Replay events from a JSONL file to a running qhook server. Reads the output of `qhook export events` and sends each event to the server's `/events/{source}/{event_type}` endpoint.
+
+```bash
+# Export from production, replay locally
+qhook export events --source stripe > events.jsonl
+qhook replay-local events.jsonl                          # replay to localhost (port from config)
+qhook replay-local events.jsonl --target http://localhost:9999  # custom target
+qhook replay-local events.jsonl --token my-api-token -y  # with auth, skip confirmation
+cat events.jsonl | qhook replay-local -                  # read from stdin
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--target` | Target server URL (default: `http://localhost:{port}` from config) |
+| `--token` | API auth token (overrides config `api.auth_token`) |
+| `-y`, `--yes` | Skip confirmation prompt |
+| `-c`, `--config` | Config file path (default: `qhook.yaml`) |
+
+**Use cases:**
+- Reproduce production issues locally using real event data
+- Test new handler/filter configurations against historical events
+- Migration testing with actual payloads
+
 ## Management API
 
 qhook exposes REST endpoints for inspecting events and jobs programmatically.

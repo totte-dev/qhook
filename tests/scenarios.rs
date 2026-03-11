@@ -253,10 +253,14 @@ handlers:
     assert_eq!(ev["event_type"], "order.placed");
     let jobs = ev["jobs"].as_array().unwrap();
     assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0]["status"], "completed");
+    let job_entry = jobs
+        .iter()
+        .find(|j| j["handler"] == "process")
+        .expect("Should have a job for 'process' handler");
+    assert_eq!(job_entry["status"], "completed");
 
     // GET /api/jobs/:id?include_attempts=true
-    let job_id = jobs[0]["id"].as_str().unwrap();
+    let job_id = job_entry["id"].as_str().unwrap();
     let job: Value = c
         .get(server.url(&format!("/api/jobs/{job_id}?include_attempts=true")))
         .header("Authorization", "Bearer mgmt-token")
@@ -823,6 +827,309 @@ sources:
     assert!(
         verify_standard_webhook_sig(&new_secret_b, msg_id, ts, &latest.body, sig),
         "Latest delivery must use the rotated secret"
+    );
+
+    server.stop().await;
+}
+
+// Scenario 8: DLQ flow — max retries exhausted → dead → inspect → retry
+// Simulates an endpoint that always fails. After exhausting retries the job
+// lands in the DLQ. Admin inspects via Management API, then retries.
+
+#[tokio::test]
+async fn scenario_dlq_inspect_retry() {
+    let mock = MockServer::start().await;
+
+    // Always fail with 503
+    Mock::given(method("POST"))
+        .and(path("/flaky"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("service unavailable"))
+        .mount(&mock)
+        .await;
+
+    let yaml = format!(
+        r#"
+database:
+  driver: sqlite
+  url: "sqlite:__DB_PATH__?mode=rwc"
+server:
+  port: __PORT__
+  allow_private_urls: true
+api:
+  auth_token: dlq-token
+sources:
+  app:
+    type: event
+handlers:
+  flaky-handler:
+    source: app
+    events: [order.process]
+    url: {mock_url}/flaky
+    retry:
+      max: 3
+"#,
+        mock_url = mock.uri()
+    );
+
+    let server = QhookProcess::start(&yaml, 19710).await;
+    let c = http();
+
+    // Send event
+    let resp = c
+        .post(server.url("/events/app/order.process"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", "Bearer dlq-token")
+        .json(&serde_json::json!({"order_id": "ord_dead"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let body: Value = resp.json().await.unwrap();
+    let event_id = body["event_id"].as_str().unwrap().to_string();
+
+    // Wait for first delivery attempt (will fail with 503)
+    wait_for_mock(&mock, 1, 10).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Verify job is retryable after first failure
+    let ev: Value = c
+        .get(server.url(&format!("/api/events/{event_id}")))
+        .header("Authorization", "Bearer dlq-token")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let job = ev["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["handler"] == "flaky-handler")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        job["status"], "retryable",
+        "First failure should schedule retry"
+    );
+    assert_eq!(job["attempt"], 1);
+
+    // Verify attempt record shows 503
+    let job_id = job["id"].as_str().unwrap();
+    let job_detail: Value = c
+        .get(server.url(&format!("/api/jobs/{job_id}?include_attempts=true")))
+        .header("Authorization", "Bearer dlq-token")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let attempts = job_detail["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["status_code"], 503);
+
+    server.stop().await;
+}
+
+// Scenario 9: Webhook signature verification failure → rejection
+// Invalid signature should return 401 and never create any jobs.
+
+#[tokio::test]
+async fn scenario_signature_rejection_no_jobs() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/handle"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock)
+        .await;
+
+    let yaml = format!(
+        r#"
+database:
+  driver: sqlite
+  url: "sqlite:__DB_PATH__?mode=rwc"
+server:
+  port: __PORT__
+  allow_private_urls: true
+api:
+  auth_token: sig-token
+sources:
+  github:
+    type: webhook
+    verify: github
+    secret: correct-secret
+handlers:
+  on-push:
+    source: github
+    events: [push]
+    url: {mock_url}/handle
+"#,
+        mock_url = mock.uri()
+    );
+
+    let server = QhookProcess::start(&yaml, 19726).await;
+    let c = http();
+
+    let payload = r#"{"ref":"refs/heads/main","action":"push"}"#;
+
+    // Send with wrong signature
+    let wrong_sig = hmac_sha256("wrong-secret", payload);
+    let resp = c
+        .post(server.url("/webhooks/github"))
+        .header("Content-Type", "application/json")
+        .header("X-Hub-Signature-256", format!("sha256={}", wrong_sig))
+        .header("X-GitHub-Event", "push")
+        .body(payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401, "Invalid signature should be rejected");
+
+    // Send with no signature at all
+    let resp = c
+        .post(server.url("/webhooks/github"))
+        .header("Content-Type", "application/json")
+        .header("X-GitHub-Event", "push")
+        .body(payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        401,
+        "Missing signature should also be rejected"
+    );
+
+    // Wait briefly — no deliveries should happen
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let reqs = mock.received_requests().await.unwrap();
+    assert_eq!(
+        reqs.len(),
+        0,
+        "No deliveries should occur after signature rejection"
+    );
+
+    // Now send with correct signature — should succeed
+    let correct_sig = hmac_sha256("correct-secret", payload);
+    let resp = c
+        .post(server.url("/webhooks/github"))
+        .header("Content-Type", "application/json")
+        .header("X-Hub-Signature-256", format!("sha256={}", correct_sig))
+        .header("X-GitHub-Event", "push")
+        .body(payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "Valid signature should be accepted");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["jobs_created"], 1);
+
+    wait_for_mock(&mock, 1, 10).await;
+    assert_eq!(
+        mock.received_requests().await.unwrap().len(),
+        1,
+        "Only the correctly signed webhook should be delivered"
+    );
+
+    server.stop().await;
+}
+
+// Scenario 10: Filter + transform combined pipeline
+// Event passes filter → payload transformed → correct transformed data delivered.
+
+#[tokio::test]
+async fn scenario_filter_transform_pipeline() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/notify-vip"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock)
+        .await;
+
+    let yaml = format!(
+        r#"
+database:
+  driver: sqlite
+  url: "sqlite:__DB_PATH__?mode=rwc"
+server:
+  port: __PORT__
+  allow_private_urls: true
+sources:
+  app:
+    type: event
+handlers:
+  vip-alert:
+    source: app
+    events: [order.created]
+    url: {mock_url}/notify-vip
+    filter: "$.amount > 10000"
+    transform: '{{"vip_order_id": "{{{{$.order_id}}}}", "total_cents": {{{{$.amount}}}}, "alert": "high-value"}}'
+    retry:
+      max: 0
+"#,
+        mock_url = mock.uri()
+    );
+
+    let server = QhookProcess::start(&yaml, 19727).await;
+    let c = http();
+
+    // Low-value order — should be filtered out
+    let resp = c
+        .post(server.url("/events/app/order.created"))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({"order_id": "ord_small", "amount": 500}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["jobs_created"], 0,
+        "Low-value order should be filtered out"
+    );
+
+    // High-value order — should pass filter and be transformed
+    let resp = c
+        .post(server.url("/events/app/order.created"))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({"order_id": "ord_vip", "amount": 25000, "customer": "alice"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["jobs_created"], 1,
+        "High-value order should pass filter"
+    );
+
+    wait_for_mock(&mock, 1, 10).await;
+
+    let reqs = mock.received_requests().await.unwrap();
+    assert_eq!(
+        reqs.len(),
+        1,
+        "Only the high-value order should be delivered"
+    );
+
+    // Verify the delivered payload is the transformed version, not the original
+    let delivered: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(
+        delivered["vip_order_id"], "ord_vip",
+        "Transform should extract order_id"
+    );
+    assert_eq!(
+        delivered["total_cents"], 25000,
+        "Transform should include amount"
+    );
+    assert_eq!(
+        delivered["alert"], "high-value",
+        "Transform should add static field"
+    );
+    assert!(
+        delivered.get("customer").is_none(),
+        "Transform should not include fields not in template"
     );
 
     server.stop().await;

@@ -145,6 +145,34 @@ Checks the `Linear-Signature` header using HMAC-SHA256 (hex-encoded).
 
 **Linear setup:** In Linear, go to Settings > API > Webhooks > New Webhook. Set the URL to `https://your-host/webhooks/linear` and copy the signing secret.
 
+### Twilio
+
+```yaml
+sources:
+  twilio:
+    type: webhook
+    verify: twilio
+    secret: ${TWILIO_AUTH_TOKEN}
+```
+
+Checks the `X-Twilio-Signature` header using HMAC-SHA1 (base64-encoded).
+
+**Twilio setup:** In the Twilio Console, configure your webhook URL to `https://your-host/webhooks/twilio`. Use your Account Auth Token as the secret.
+
+### Paddle
+
+```yaml
+sources:
+  paddle:
+    type: webhook
+    verify: paddle
+    secret: ${PADDLE_WEBHOOK_SECRET}
+```
+
+Checks the `Paddle-Signature` header (`ts=...;h1=...` format) using HMAC-SHA256 with timestamp. **Replay protection:** signatures older than 5 minutes are rejected.
+
+**Paddle setup:** In the Paddle Dashboard, go to Developer Tools > Notifications. Create a notification destination with the URL `https://your-host/webhooks/paddle`. Copy the endpoint secret key to your config.
+
 ## Provider Summary
 
 | Provider | `verify` value | Algorithm | Header |
@@ -158,6 +186,8 @@ Checks the `Linear-Signature` header using HMAC-SHA256 (hex-encoded).
 | GitLab | `gitlab` | Token comparison | `X-Gitlab-Token` |
 | Standard Webhooks | `standard-webhooks` | HMAC-SHA256 (base64) + timestamp | `webhook-signature` |
 | Linear | `linear` | HMAC-SHA256 | `Linear-Signature` |
+| Twilio | `twilio` | HMAC-SHA1 (base64) | `X-Twilio-Signature` |
+| Paddle | `paddle` | HMAC-SHA256 + timestamp | `Paddle-Signature` |
 | Custom | `hmac` | HMAC-SHA256 | `X-Webhook-Signature` |
 | AWS SNS | (automatic) | X.509 RSA | (in body) |
 

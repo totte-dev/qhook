@@ -51,8 +51,8 @@ handlers:
 
 ```yaml
 database:
-  driver: sqlite                    # sqlite (default) or postgres
-  # url: ${DATABASE_URL}            # required for postgres
+  driver: sqlite                    # sqlite (default), postgres, or mysql
+  # url: ${DATABASE_URL}            # required for postgres/mysql
   max_connections: 10               # DB pool size (default: 10)
 
 server:
@@ -159,8 +159,8 @@ workflows:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `driver` | string | `sqlite` | Database driver: `sqlite` or `postgres` |
-| `url` | string | - | Connection string. Required for postgres. For sqlite, defaults to `./qhook.db` |
+| `driver` | string | `sqlite` | Database driver: `sqlite`, `postgres`, or `mysql` |
+| `url` | string | - | Connection string. Required for postgres/mysql. For sqlite, defaults to `./qhook.db` |
 | `max_connections` | integer | `10` | Connection pool size |
 
 ### server

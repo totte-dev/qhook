@@ -1,0 +1,8 @@
+---
+source: tests/snapshot_tests.rs
+expression: body
+---
+{
+  "message": "callback received",
+  "status": "ok"
+}

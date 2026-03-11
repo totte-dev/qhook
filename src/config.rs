@@ -911,7 +911,7 @@ impl Config {
 
         // Validate database driver
         match self.database.driver.as_str() {
-            "sqlite" | "postgres" => {}
+            "sqlite" | "postgres" | "mysql" => {}
             other => anyhow::bail!("unsupported database driver '{}'", other),
         }
 
@@ -923,7 +923,7 @@ impl Config {
 # qhook.yaml
 
 database:
-  driver: sqlite  # sqlite (default) / postgres
+  driver: sqlite  # sqlite (default) / postgres / mysql
   # url: ${DATABASE_URL}
 
 server:
@@ -2216,6 +2216,14 @@ sources:
     type: webhook
     verify: gitlab
     secret: gl-token
+  twilio:
+    type: webhook
+    verify: twilio
+    secret: twilio-auth-token
+  paddle:
+    type: webhook
+    verify: paddle
+    secret: pdl-secret
 handlers: {}
 workflows: {}
 "#;
@@ -2226,6 +2234,8 @@ workflows: {}
             Some("pagerduty")
         );
         assert_eq!(config.sources["gitlab"].verify.as_deref(), Some("gitlab"));
+        assert_eq!(config.sources["twilio"].verify.as_deref(), Some("twilio"));
+        assert_eq!(config.sources["paddle"].verify.as_deref(), Some("paddle"));
     }
 
     #[test]
@@ -2577,7 +2587,7 @@ alerts:
     fn test_validate_invalid_database_driver() {
         let yaml = r#"
 database:
-  driver: mysql
+  driver: mongodb
 sources: {}
 handlers: {}
 "#;

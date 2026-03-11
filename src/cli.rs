@@ -100,6 +100,25 @@ enum Command {
         #[command(subcommand)]
         action: ExportAction,
     },
+    /// Replay events from a JSONL file to a running qhook server
+    #[command(name = "replay-local")]
+    ReplayLocal {
+        /// Path to JSONL file (output of `qhook export events`), or `-` for stdin
+        #[arg()]
+        file: String,
+        /// Target server URL (default: http://localhost:{config port})
+        #[arg(short, long)]
+        target: Option<String>,
+        /// API auth token (overrides config)
+        #[arg(long)]
+        token: Option<String>,
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Path to config file (used for default port and auth token)
+        #[arg(short, long, default_value = "qhook.yaml")]
+        config: PathBuf,
+    },
     /// Manage workflow runs
     #[command(name = "workflow-runs")]
     WorkflowRuns {
@@ -897,6 +916,117 @@ impl Args {
                     Ok(())
                 }
             },
+            Command::ReplayLocal {
+                file,
+                target,
+                token,
+                yes,
+                config,
+            } => {
+                let cfg = Config::load(&config)?;
+                let base_url =
+                    target.unwrap_or_else(|| format!("http://localhost:{}", cfg.server.port));
+                let auth_token = token.or_else(|| cfg.api.auth_token.clone());
+
+                // Read JSONL lines
+                let lines: Vec<String> = if file == "-" {
+                    use std::io::BufRead;
+                    std::io::stdin().lock().lines().collect::<Result<_, _>>()?
+                } else {
+                    let content = std::fs::read_to_string(&file)
+                        .with_context(|| format!("Failed to read {}", file))?;
+                    content
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(String::from)
+                        .collect()
+                };
+
+                if lines.is_empty() {
+                    println!("No events found in input.");
+                    return Ok(());
+                }
+
+                // Parse and validate all lines first
+                let mut events: Vec<serde_json::Value> = Vec::with_capacity(lines.len());
+                for (i, line) in lines.iter().enumerate() {
+                    let val: serde_json::Value = serde_json::from_str(line)
+                        .with_context(|| format!("Invalid JSON on line {}", i + 1))?;
+                    if val.get("source").and_then(|v| v.as_str()).is_none() {
+                        anyhow::bail!("Line {} missing 'source' field", i + 1);
+                    }
+                    if val.get("event_type").and_then(|v| v.as_str()).is_none() {
+                        anyhow::bail!("Line {} missing 'event_type' field", i + 1);
+                    }
+                    events.push(val);
+                }
+
+                println!(
+                    "Loaded {} event(s) from {}.",
+                    events.len(),
+                    if file == "-" { "stdin" } else { &file }
+                );
+                println!("Target: {}", base_url);
+
+                if !yes {
+                    print!("Proceed? [y/N] ");
+                    use std::io::Write;
+                    std::io::stdout().flush()?;
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input)?;
+                    if !input.trim().eq_ignore_ascii_case("y") {
+                        println!("Aborted.");
+                        return Ok(());
+                    }
+                }
+
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()?;
+
+                let mut ok = 0u32;
+                let mut fail = 0u32;
+                for event in &events {
+                    let source = event["source"].as_str().unwrap();
+                    let event_type = event["event_type"].as_str().unwrap();
+                    let payload = event
+                        .get("payload")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Object(Default::default()));
+
+                    let url = format!("{}/events/{}/{}", base_url, source, event_type);
+                    let mut req = client
+                        .post(&url)
+                        .header("Content-Type", "application/json")
+                        .json(&payload);
+
+                    if let Some(ref token) = auth_token {
+                        req = req.header("Authorization", format!("Bearer {}", token));
+                    }
+
+                    match req.send().await {
+                        Ok(resp) if resp.status().is_success() => ok += 1,
+                        Ok(resp) => {
+                            let status = resp.status();
+                            let body = resp.text().await.unwrap_or_default();
+                            eprintln!("  FAIL {}/{}: {} {}", source, event_type, status, body);
+                            fail += 1;
+                        }
+                        Err(e) => {
+                            eprintln!("  ERROR {}/{}: {}", source, event_type, e);
+                            fail += 1;
+                        }
+                    }
+                }
+
+                println!(
+                    "Replayed {} event(s): {} ok, {} failed.",
+                    events.len(),
+                    ok,
+                    fail
+                );
+                Ok(())
+            }
             Command::Events { action } => match action {
                 EventsAction::List { limit, config } => {
                     let cfg = Config::load(&config)?;
