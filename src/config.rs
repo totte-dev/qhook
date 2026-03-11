@@ -625,7 +625,7 @@ impl Config {
         // Validate source types and verify/secret consistency
         for (name, source) in &self.sources {
             match source.source_type.as_str() {
-                "webhook" | "event" | "sns" => {}
+                "webhook" | "event" | "sns" | "outbound" => {}
                 "cron" => {
                     // Cron sources require a schedule
                     let schedule = source.schedule.as_deref().unwrap_or("");
