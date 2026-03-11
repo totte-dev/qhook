@@ -8,8 +8,7 @@
 
 ## Test plan
 
-- [ ] `cargo test` passes
-- [ ] `bash tests/e2e.sh` passes (if applicable)
+- [ ] `cargo test` passes (unit + E2E + workflow + scenarios)
 - [ ] New tests added for new functionality
 
 ## Documentation (if applicable)

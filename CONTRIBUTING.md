@@ -25,7 +25,7 @@ cargo test
 
 All contributions must follow TDD. **Never implement before tests exist.**
 
-1. Write tests first (unit tests in `#[cfg(test)] mod tests`, E2E in `tests/e2e.sh`)
+1. Write tests first (unit tests in `#[cfg(test)] mod tests`, integration tests in `tests/*.rs`)
 2. Confirm the tests fail
 3. Implement the feature or fix
 4. Confirm the tests pass
@@ -35,15 +35,12 @@ For multiple features, repeat this cycle per feature — do not batch.
 ### Running Tests
 
 ```bash
-# Unit tests
+# All tests: unit + E2E + workflow + scenarios
 cargo test
 
 # Lint
 cargo fmt --check
 cargo clippy --all-targets
-
-# E2E tests (starts qhook + mock server)
-bash tests/e2e.sh
 
 # SNS E2E tests (requires LocalStack)
 docker run -d --name localstack-qhook -p 4567:4566 \
@@ -97,9 +94,10 @@ src/
   alert.rs      — Alert notifications
   cli.rs        — CLI commands
 tests/
-  e2e.sh        — E2E tests
-  e2e_sns.sh    — SNS E2E tests (LocalStack)
-  mock_server.py — Mock HTTP server for E2E
+  e2e.rs          — E2E integration tests (Rust)
+  e2e_workflow.rs — Workflow E2E tests (Rust)
+  scenarios.rs    — Scenario-based integration tests (Rust)
+  e2e_sns.sh      — SNS E2E tests (LocalStack, shell)
 ```
 
 ## Reporting Issues

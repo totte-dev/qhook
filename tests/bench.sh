@@ -59,12 +59,12 @@ PIDS+=($!)
 sleep 1
 
 # --- Benchmark 1: Receive RPS ---
-echo "--- 1. Receive RPS (HTTP POST /events/bench.test) ---"
+echo "--- 1. Receive RPS (HTTP POST /events/app/bench.test) ---"
 echo ""
 
 ab -n "$N" -c "$C" -T "application/json" \
    -p <(echo '{"id":"bench","data":"hello"}') \
-   "http://127.0.0.1:$QHOOK_PORT/events/bench.test" 2>/dev/null \
+   "http://127.0.0.1:$QHOOK_PORT/events/app/bench.test" 2>/dev/null \
    | grep -E "(Requests per second|Time taken|Complete requests|Failed requests|50%|95%|99%)"
 
 echo ""

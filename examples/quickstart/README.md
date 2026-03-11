@@ -25,7 +25,7 @@ python3 examples/quickstart/receiver.py
 4. Send a test event:
 
 ```bash
-curl -X POST http://localhost:8888/events/order.created \
+curl -X POST http://localhost:8888/events/app/order.created \
   -H "Content-Type: application/json" \
   -d '{"id": "ord_001", "customer": "alice", "amount": 4999}'
 ```
@@ -47,7 +47,7 @@ job delivered handler=process-order status=200
 
 ## What This Shows
 
-- **Event ingestion** via `POST /events/{event_type}`
+- **Event ingestion** via `POST /events/{source}/{event_type}`
 - **Automatic queuing** with retry on failure
 - **Delivery** to your HTTP handler with the original JSON payload
 

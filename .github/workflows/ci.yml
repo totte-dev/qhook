@@ -22,8 +22,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Security audit
-        run: cargo install cargo-audit --locked && cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0009
+      - name: Security check (advisories + licenses + bans + sources)
+        uses: EmbarkStudios/cargo-deny-action@v2
 
       - name: Doc sync check
         run: bash scripts/check-docs.sh
@@ -34,11 +34,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets
 
-      - name: Unit tests
+      - name: Tests (unit + E2E + scenarios)
         run: cargo test
 
       - name: Build release
         run: cargo build --release
-
-      - name: E2E tests
-        run: bash tests/e2e.sh

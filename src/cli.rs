@@ -398,7 +398,8 @@ impl Args {
 
                 let (url, auth_header) = match source_type {
                     "event" => {
-                        let url = format!("http://localhost:{}/events/{}", port, event_type);
+                        let url =
+                            format!("http://localhost:{}/events/{}/{}", port, source, event_type);
                         let token = cfg.api.auth_token.as_deref().unwrap_or("");
                         (url, Some(format!("Bearer {}", token)))
                     }

@@ -74,6 +74,18 @@ anyhow = "1"
 thiserror = "2"
 croner = "3.0.1"
 
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process"] }
+reqwest = { version = "0.13", features = ["json"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+axum = "0.8"
+wiremock = "0.6"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+ulid = "1"
+
 [features]
 default = []
 otel = ["opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp", "tracing-opentelemetry"]
