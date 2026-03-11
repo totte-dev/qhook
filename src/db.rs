@@ -215,6 +215,53 @@ impl Database {
         .await
         .ok();
 
+        // --- v0.5: Outbound webhook tables ---
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS outbound_endpoints (
+                id             TEXT PRIMARY KEY,
+                source         TEXT NOT NULL,
+                url            TEXT NOT NULL,
+                description    TEXT,
+                signing_secret TEXT NOT NULL,
+                status         TEXT NOT NULL DEFAULT 'active',
+                created_at     TEXT NOT NULL,
+                updated_at     TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS outbound_subscriptions (
+                id           TEXT PRIMARY KEY,
+                endpoint_id  TEXT NOT NULL,
+                event_type   TEXT NOT NULL,
+                created_at   TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_outbound_sub_unique \
+             ON outbound_subscriptions (endpoint_id, event_type)",
+        )
+        .execute(&self.pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_outbound_endpoints_source \
+             ON outbound_endpoints (source, status)",
+        )
+        .execute(&self.pool)
+        .await
+        .ok();
+
         tracing::info!("Database migrated");
         Ok(())
     }
@@ -1314,6 +1361,34 @@ pub struct JobAttemptRow {
     pub duration_ms: Option<i32>,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct EndpointRow {
+    pub id: String,
+    pub source: String,
+    pub url: String,
+    pub description: Option<String>,
+    pub signing_secret: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct SubscriptionRow {
+    pub id: String,
+    pub endpoint_id: String,
+    pub event_type: String,
+    pub created_at: String,
+}
+
+/// Minimal endpoint info needed for outbound job creation.
+#[derive(Debug, sqlx::FromRow)]
+pub struct SubscribedEndpoint {
+    pub id: String,
+    pub url: String,
+    pub signing_secret: String,
+}
+
 impl Database {
     /// Get a single job by ID.
     pub async fn get_job_by_id(&self, job_id: &str) -> Result<Option<JobRow>> {
@@ -1373,6 +1448,203 @@ impl Database {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
+    }
+
+    // --- Outbound webhook endpoint CRUD ---
+
+    pub async fn insert_endpoint(
+        &self,
+        id: &str,
+        source: &str,
+        url: &str,
+        description: Option<&str>,
+        signing_secret: &str,
+    ) -> Result<()> {
+        let now = format_now();
+        sqlx::query(
+            "INSERT INTO outbound_endpoints (id, source, url, description, signing_secret, status, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, 'active', $6, $6)",
+        )
+        .bind(id)
+        .bind(source)
+        .bind(url)
+        .bind(description)
+        .bind(signing_secret)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_endpoint(&self, id: &str) -> Result<Option<EndpointRow>> {
+        let row = sqlx::query_as::<_, EndpointRow>(
+            "SELECT id, source, url, description, signing_secret, status, created_at, updated_at \
+             FROM outbound_endpoints WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    pub async fn list_endpoints(&self, source: Option<&str>) -> Result<Vec<EndpointRow>> {
+        let rows = if let Some(src) = source {
+            sqlx::query_as::<_, EndpointRow>(
+                "SELECT id, source, url, description, signing_secret, status, created_at, updated_at \
+                 FROM outbound_endpoints WHERE source = $1 ORDER BY created_at",
+            )
+            .bind(src)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, EndpointRow>(
+                "SELECT id, source, url, description, signing_secret, status, created_at, updated_at \
+                 FROM outbound_endpoints ORDER BY created_at",
+            )
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows)
+    }
+
+    pub async fn update_endpoint(
+        &self,
+        id: &str,
+        url: Option<&str>,
+        description: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<bool> {
+        let now = format_now();
+        // Build dynamic update — always update updated_at
+        let current = self.get_endpoint(id).await?;
+        let Some(current) = current else {
+            return Ok(false);
+        };
+        let new_url = url.unwrap_or(&current.url);
+        let new_desc = description.or(current.description.as_deref());
+        let new_status = status.unwrap_or(&current.status);
+
+        let result = sqlx::query(
+            "UPDATE outbound_endpoints SET url = $1, description = $2, status = $3, updated_at = $4 WHERE id = $5",
+        )
+        .bind(new_url)
+        .bind(new_desc)
+        .bind(new_status)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn delete_endpoint(&self, id: &str) -> Result<bool> {
+        // Delete subscriptions first
+        sqlx::query("DELETE FROM outbound_subscriptions WHERE endpoint_id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        let result = sqlx::query("DELETE FROM outbound_endpoints WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn rotate_endpoint_secret(&self, id: &str, new_secret: &str) -> Result<bool> {
+        let now = format_now();
+        let result = sqlx::query(
+            "UPDATE outbound_endpoints SET signing_secret = $1, updated_at = $2 WHERE id = $3",
+        )
+        .bind(new_secret)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // --- Outbound subscription CRUD ---
+
+    pub async fn insert_subscriptions(
+        &self,
+        endpoint_id: &str,
+        event_types: &[String],
+    ) -> Result<Vec<SubscriptionRow>> {
+        let now = format_now();
+        let mut created = Vec::new();
+        for event_type in event_types {
+            let id = ulid::Ulid::new().to_string();
+            let result = sqlx::query(
+                "INSERT INTO outbound_subscriptions (id, endpoint_id, event_type, created_at) \
+                 VALUES ($1, $2, $3, $4) \
+                 ON CONFLICT (endpoint_id, event_type) DO NOTHING",
+            )
+            .bind(&id)
+            .bind(endpoint_id)
+            .bind(event_type)
+            .bind(&now)
+            .execute(&self.pool)
+            .await?;
+            if result.rows_affected() > 0 {
+                created.push(SubscriptionRow {
+                    id,
+                    endpoint_id: endpoint_id.to_string(),
+                    event_type: event_type.clone(),
+                    created_at: now.clone(),
+                });
+            }
+        }
+        Ok(created)
+    }
+
+    pub async fn list_subscriptions(&self, endpoint_id: &str) -> Result<Vec<SubscriptionRow>> {
+        let rows = sqlx::query_as::<_, SubscriptionRow>(
+            "SELECT id, endpoint_id, event_type, created_at \
+             FROM outbound_subscriptions WHERE endpoint_id = $1 ORDER BY created_at",
+        )
+        .bind(endpoint_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn delete_subscription(&self, id: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM outbound_subscriptions WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Find all active endpoints subscribed to this source + event_type.
+    pub async fn find_subscribed_endpoints(
+        &self,
+        source: &str,
+        event_type: &str,
+    ) -> Result<Vec<SubscribedEndpoint>> {
+        let rows = sqlx::query_as::<_, SubscribedEndpoint>(
+            "SELECT DISTINCT e.id, e.url, e.signing_secret \
+             FROM outbound_endpoints e \
+             JOIN outbound_subscriptions s ON s.endpoint_id = e.id \
+             WHERE e.source = $1 AND e.status = 'active' \
+               AND (s.event_type = $2 OR s.event_type = '*') \
+             ORDER BY e.id",
+        )
+        .bind(source)
+        .bind(event_type)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Get signing secret for an outbound endpoint.
+    pub async fn get_endpoint_secret(&self, endpoint_id: &str) -> Result<Option<String>> {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT signing_secret FROM outbound_endpoints WHERE id = $1")
+                .bind(endpoint_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|r| r.0))
     }
 }
 

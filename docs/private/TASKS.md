@@ -63,8 +63,10 @@ qhookの独自性を強化する新機能。
 |--------|--------|------|
 | ドメイン取得 (qhook.dev / qhook.io 等) | High | 未着手 |
 | DNS設定 + GitHub Pages カスタムドメイン | High | ドメイン取得後 |
-| crates.io publish | High | v0.2.2 公開済 |
+| crates.io publish | High | v0.4.0 公開済 |
 | Docker Hub / GHCR イメージ公開 | Medium | release.yml整備済。シークレット設定要 |
+| npm publish (qhook-client) | Medium | 未着手。npmアカウント作成後。sdks/typescript/ |
+| PyPI publish (qhook-client) | Medium | 未着手。PyPIアカウント作成後。sdks/python/ |
 | awesome-rust PR | Medium | publish後 |
 
 ## マーケティング / 認知

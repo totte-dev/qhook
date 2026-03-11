@@ -408,6 +408,35 @@ pub fn build_sns_string_to_sign(msg: &SnsMessage) -> String {
     lines
 }
 
+// --- Outbound webhook signing ---
+
+/// Sign an outbound webhook payload using HMAC-SHA256.
+/// Returns the hex-encoded signature.
+///
+/// Format: HMAC-SHA256(secret, "{timestamp}.{payload}")
+/// This matches the Stripe/Svix convention for webhook signature verification.
+pub fn sign_outbound_payload(secret: &str, timestamp: i64, payload: &[u8]) -> String {
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(timestamp.to_string().as_bytes());
+    mac.update(b".");
+    mac.update(payload);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Generate a signing secret for an outbound endpoint.
+/// Uses SHA-256 of a ULID (which contains timestamp + random bytes) for uniqueness.
+/// Prefixed with `whsec_` for easy identification.
+pub fn generate_signing_secret() -> String {
+    use sha2::Digest;
+    let ulid = ulid::Ulid::new();
+    let hash = Sha256::digest(ulid.to_bytes());
+    format!(
+        "whsec_{}",
+        base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, hash,)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -915,5 +944,99 @@ mod tests {
         let cached = get_cached_cert(url);
         assert!(cached.is_some());
         assert_eq!(cached.unwrap(), b"PEM DATA");
+    }
+
+    // --- Outbound signing ---
+
+    #[test]
+    fn test_sign_outbound_payload_deterministic() {
+        let secret = "whsec_test_secret";
+        let timestamp = 1710000000i64;
+        let payload = b"{\"order_id\":\"123\"}";
+
+        let sig1 = sign_outbound_payload(secret, timestamp, payload);
+        let sig2 = sign_outbound_payload(secret, timestamp, payload);
+        assert_eq!(sig1, sig2, "Same inputs must produce same signature");
+    }
+
+    #[test]
+    fn test_sign_outbound_payload_different_secret() {
+        let timestamp = 1710000000i64;
+        let payload = b"{\"order_id\":\"123\"}";
+
+        let sig1 = sign_outbound_payload("secret_a", timestamp, payload);
+        let sig2 = sign_outbound_payload("secret_b", timestamp, payload);
+        assert_ne!(
+            sig1, sig2,
+            "Different secrets must produce different signatures"
+        );
+    }
+
+    #[test]
+    fn test_sign_outbound_payload_different_timestamp() {
+        let secret = "whsec_test";
+        let payload = b"{}";
+
+        let sig1 = sign_outbound_payload(secret, 1000, payload);
+        let sig2 = sign_outbound_payload(secret, 2000, payload);
+        assert_ne!(
+            sig1, sig2,
+            "Different timestamps must produce different signatures"
+        );
+    }
+
+    #[test]
+    fn test_sign_outbound_payload_hex_format() {
+        let sig = sign_outbound_payload("secret", 1710000000, b"test");
+        // HMAC-SHA256 produces 32 bytes = 64 hex chars
+        assert_eq!(sig.len(), 64);
+        assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_sign_outbound_payload_verifiable() {
+        // Verify the signature can be checked with standard HMAC-SHA256
+        let secret = "whsec_verify_test";
+        let timestamp = 1710000000i64;
+        let payload = b"{\"amount\":5000}";
+
+        let signature = sign_outbound_payload(secret, timestamp, payload);
+
+        // Manually compute the expected HMAC
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(b"1710000000");
+        mac.update(b".");
+        mac.update(payload);
+        let expected = hex::encode(mac.finalize().into_bytes());
+
+        assert_eq!(signature, expected);
+    }
+
+    #[test]
+    fn test_generate_signing_secret_prefix() {
+        let secret = generate_signing_secret();
+        assert!(
+            secret.starts_with("whsec_"),
+            "Secret must start with whsec_ prefix, got: {}",
+            secret
+        );
+    }
+
+    #[test]
+    fn test_generate_signing_secret_unique() {
+        let s1 = generate_signing_secret();
+        let s2 = generate_signing_secret();
+        assert_ne!(s1, s2, "Each generated secret must be unique");
+    }
+
+    #[test]
+    fn test_generate_signing_secret_length() {
+        let secret = generate_signing_secret();
+        // "whsec_" (6) + base64url(32 bytes SHA-256) = 6 + 43 = 49
+        assert!(
+            secret.len() > 40,
+            "Secret should be sufficiently long, got: {}",
+            secret.len()
+        );
     }
 }
