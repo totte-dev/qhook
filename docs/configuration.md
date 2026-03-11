@@ -214,6 +214,25 @@ Each source is a named entry under `sources:`.
 | `schedule` | string | - | Cron expression (required for `cron` sources). 5-field standard or 6-field with seconds |
 | `timezone` | string | `UTC` | Timezone for cron evaluation. `UTC` or fixed offset like `+09:00` |
 | `schema` | string | - | JSON Schema for payload validation. Rejects events that don't match (see below) |
+| `allowed_ips` | list | `[]` | IP allowlist (CIDR or single IP). If set, only requests from listed IPs are accepted. Requires `trust_proxy: true` when behind a proxy |
+
+**IP allowlisting:**
+
+Restrict webhook sources to known sender IPs. Supports individual IPs and CIDR notation:
+
+```yaml
+sources:
+  stripe:
+    type: webhook
+    verify: stripe
+    secret: ${STRIPE_WEBHOOK_SECRET}
+    allowed_ips:
+      - 3.18.12.63/32
+      - 3.130.192.0/24
+      - 13.235.14.237/32
+```
+
+When behind a reverse proxy, set `server.trust_proxy: true` so qhook reads the client IP from `X-Forwarded-For` / `X-Real-IP` headers.
 
 **Source types:**
 

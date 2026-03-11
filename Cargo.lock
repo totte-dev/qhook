@@ -1836,6 +1836,7 @@ dependencies = [
  "croner",
  "hex",
  "hmac",
+ "ipnet",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

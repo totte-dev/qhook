@@ -117,6 +117,34 @@ sources:
 
 Checks the `X-Webhook-Signature` header using HMAC-SHA256 (hex-encoded). Use this for any service that sends an HMAC signature in a custom header.
 
+### Standard Webhooks (Clerk, Resend, Lemon Squeezy, etc.)
+
+```yaml
+sources:
+  clerk:
+    type: webhook
+    verify: standard-webhooks
+    secret: ${CLERK_WEBHOOK_SECRET}    # whsec_... from provider dashboard
+```
+
+Checks `webhook-id`, `webhook-timestamp`, and `webhook-signature` headers per the [Standard Webhooks](https://www.standardwebhooks.com/) specification. HMAC-SHA256 with base64 encoding. Includes **replay protection** (5-minute timestamp tolerance). Supports multiple signatures (space-separated) for key rotation.
+
+Use this for any provider that follows the Standard Webhooks spec, including Clerk, Resend, Lemon Squeezy, and Orb.
+
+### Linear
+
+```yaml
+sources:
+  linear:
+    type: webhook
+    verify: linear
+    secret: ${LINEAR_WEBHOOK_SECRET}
+```
+
+Checks the `Linear-Signature` header using HMAC-SHA256 (hex-encoded).
+
+**Linear setup:** In Linear, go to Settings > API > Webhooks > New Webhook. Set the URL to `https://your-host/webhooks/linear` and copy the signing secret.
+
 ## Provider Summary
 
 | Provider | `verify` value | Algorithm | Header |
@@ -128,6 +156,8 @@ Checks the `X-Webhook-Signature` header using HMAC-SHA256 (hex-encoded). Use thi
 | Grafana | `grafana` | HMAC-SHA256 | `X-Grafana-Alerting-Signature` |
 | Terraform Cloud | `terraform` | HMAC-SHA512 | `X-TFE-Notification-Signature` |
 | GitLab | `gitlab` | Token comparison | `X-Gitlab-Token` |
+| Standard Webhooks | `standard-webhooks` | HMAC-SHA256 (base64) + timestamp | `webhook-signature` |
+| Linear | `linear` | HMAC-SHA256 | `Linear-Signature` |
 | Custom | `hmac` | HMAC-SHA256 | `X-Webhook-Signature` |
 | AWS SNS | (automatic) | X.509 RSA | (in body) |
 

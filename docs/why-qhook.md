@@ -318,6 +318,8 @@ workflows:
 | Grafana | HMAC-SHA256 | `X-Grafana-Alerting-Signature` |
 | Terraform Cloud | HMAC-SHA512 | `X-TFE-Notification-Signature` |
 | GitLab | Token comparison | `X-Gitlab-Token` |
+| Standard Webhooks | HMAC-SHA256 (base64) + timestamp | `webhook-signature` |
+| Linear | HMAC-SHA256 | `Linear-Signature` |
 | AWS SNS | X.509 certificate | (in body) |
 | Custom HMAC | HMAC-SHA256 | `X-Webhook-Signature` |
 

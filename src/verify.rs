@@ -20,6 +20,8 @@ pub fn verify_signature(
         "grafana" => verify_grafana(secret, payload, headers),
         "terraform" => verify_terraform(secret, payload, headers),
         "gitlab" => verify_gitlab(secret, payload, headers),
+        "standard-webhooks" => verify_standard_webhooks(secret, payload, headers),
+        "linear" => verify_linear(secret, payload, headers),
         _ => anyhow::bail!("Unknown verification provider: {provider}"),
     }
 }
@@ -174,6 +176,92 @@ fn verify_gitlab(secret: &str, _payload: &[u8], headers: &axum::http::HeaderMap)
     }
 
     Ok(constant_time_eq(secret, token))
+}
+
+fn verify_standard_webhooks(
+    secret: &str,
+    payload: &[u8],
+    headers: &axum::http::HeaderMap,
+) -> Result<bool> {
+    use base64::Engine;
+
+    let msg_id = match headers.get("webhook-id").and_then(|v| v.to_str().ok()) {
+        Some(v) if !v.is_empty() => v,
+        _ => return Ok(false),
+    };
+    let timestamp_str = match headers
+        .get("webhook-timestamp")
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(v) if !v.is_empty() => v,
+        _ => return Ok(false),
+    };
+    let sig_header = match headers
+        .get("webhook-signature")
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(v) if !v.is_empty() => v,
+        _ => return Ok(false),
+    };
+
+    // Replay protection: reject timestamps older than 5 minutes
+    const TOLERANCE_SECS: i64 = 300;
+    let timestamp: i64 = match timestamp_str.parse() {
+        Ok(ts) => ts,
+        Err(_) => return Ok(false),
+    };
+    let now = chrono::Utc::now().timestamp();
+    if (now - timestamp).abs() > TOLERANCE_SECS {
+        tracing::warn!(
+            timestamp,
+            now,
+            "Standard Webhooks signature timestamp too old or too far in the future"
+        );
+        return Ok(false);
+    }
+
+    // Decode the secret key
+    let key_bytes = if let Some(stripped) = secret.strip_prefix("whsec_") {
+        base64::engine::general_purpose::STANDARD
+            .decode(stripped)
+            .unwrap_or_else(|_| secret.as_bytes().to_vec())
+    } else {
+        secret.as_bytes().to_vec()
+    };
+
+    // Compute expected signature: HMAC-SHA256(key, "{msg_id}.{timestamp}.{body}")
+    let mut mac = HmacSha256::new_from_slice(&key_bytes).expect("HMAC accepts any key length");
+    mac.update(msg_id.as_bytes());
+    mac.update(b".");
+    mac.update(timestamp_str.as_bytes());
+    mac.update(b".");
+    mac.update(payload);
+    let expected = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+    // Check against all signatures (space-separated, for key rotation)
+    for sig_entry in sig_header.split(' ') {
+        if let Some(sig_b64) = sig_entry.strip_prefix("v1,") {
+            if constant_time_eq(&expected, sig_b64) {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn verify_linear(secret: &str, payload: &[u8], headers: &axum::http::HeaderMap) -> Result<bool> {
+    let sig_header = headers
+        .get("Linear-Signature")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if sig_header.is_empty() {
+        return Ok(false);
+    }
+
+    let expected = compute_hmac_sha256_hex(secret.as_bytes(), payload);
+    Ok(constant_time_eq(&expected, sig_header))
 }
 
 fn compute_hmac_sha256_hex(key: &[u8], data: &[u8]) -> String {
@@ -959,6 +1047,192 @@ mod tests {
         let cached = get_cached_cert(url);
         assert!(cached.is_some());
         assert_eq!(cached.unwrap(), b"PEM DATA");
+    }
+
+    // --- Standard Webhooks inbound verification ---
+
+    #[test]
+    fn test_standard_webhooks_valid() {
+        use base64::Engine;
+        let raw_key = b"test_standard_webhooks_key_12345";
+        let secret = format!(
+            "whsec_{}",
+            base64::engine::general_purpose::STANDARD.encode(raw_key)
+        );
+        let payload = b"{\"type\":\"user.created\",\"data\":{\"id\":\"usr_123\"}}";
+        let msg_id = "msg_01JEXAMPLE";
+        let timestamp = chrono::Utc::now().timestamp();
+
+        // Compute valid signature
+        let mut mac = HmacSha256::new_from_slice(raw_key).unwrap();
+        mac.update(msg_id.as_bytes());
+        mac.update(b".");
+        mac.update(timestamp.to_string().as_bytes());
+        mac.update(b".");
+        mac.update(payload);
+        let sig = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert("webhook-id", msg_id.parse().unwrap());
+        headers.insert("webhook-timestamp", timestamp.to_string().parse().unwrap());
+        headers.insert("webhook-signature", format!("v1,{sig}").parse().unwrap());
+
+        assert!(verify_standard_webhooks(&secret, payload, &headers).unwrap());
+    }
+
+    #[test]
+    fn test_standard_webhooks_invalid_signature() {
+        let mut headers = HeaderMap::new();
+        headers.insert("webhook-id", "msg_test".parse().unwrap());
+        headers.insert(
+            "webhook-timestamp",
+            chrono::Utc::now().timestamp().to_string().parse().unwrap(),
+        );
+        headers.insert(
+            "webhook-signature",
+            "v1,aW52YWxpZHNpZ25hdHVyZQ==".parse().unwrap(),
+        );
+
+        assert!(!verify_standard_webhooks("whsec_dGVzdA==", b"payload", &headers).unwrap());
+    }
+
+    #[test]
+    fn test_standard_webhooks_missing_headers() {
+        let headers = HeaderMap::new();
+        assert!(!verify_standard_webhooks("whsec_dGVzdA==", b"payload", &headers).unwrap());
+    }
+
+    #[test]
+    fn test_standard_webhooks_expired_timestamp() {
+        use base64::Engine;
+        let raw_key = b"test_key_for_expired_timestamp_!";
+        let secret = format!(
+            "whsec_{}",
+            base64::engine::general_purpose::STANDARD.encode(raw_key)
+        );
+        let payload = b"{}";
+        let msg_id = "msg_expired";
+        // 10 minutes ago
+        let timestamp = chrono::Utc::now().timestamp() - 600;
+
+        let mut mac = HmacSha256::new_from_slice(raw_key).unwrap();
+        mac.update(msg_id.as_bytes());
+        mac.update(b".");
+        mac.update(timestamp.to_string().as_bytes());
+        mac.update(b".");
+        mac.update(payload);
+        let sig = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert("webhook-id", msg_id.parse().unwrap());
+        headers.insert("webhook-timestamp", timestamp.to_string().parse().unwrap());
+        headers.insert("webhook-signature", format!("v1,{sig}").parse().unwrap());
+
+        assert!(!verify_standard_webhooks(&secret, payload, &headers).unwrap());
+    }
+
+    #[test]
+    fn test_standard_webhooks_multiple_signatures() {
+        use base64::Engine;
+        let raw_key = b"test_multi_sig_key_0123456789ab";
+        let secret = format!(
+            "whsec_{}",
+            base64::engine::general_purpose::STANDARD.encode(raw_key)
+        );
+        let payload = b"{\"test\":true}";
+        let msg_id = "msg_multi";
+        let timestamp = chrono::Utc::now().timestamp();
+
+        let mut mac = HmacSha256::new_from_slice(raw_key).unwrap();
+        mac.update(msg_id.as_bytes());
+        mac.update(b".");
+        mac.update(timestamp.to_string().as_bytes());
+        mac.update(b".");
+        mac.update(payload);
+        let sig = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert("webhook-id", msg_id.parse().unwrap());
+        headers.insert("webhook-timestamp", timestamp.to_string().parse().unwrap());
+        // Multiple signatures space-separated (for key rotation)
+        headers.insert(
+            "webhook-signature",
+            format!("v1,invalidbase64== v1,{sig}").parse().unwrap(),
+        );
+
+        assert!(verify_standard_webhooks(&secret, payload, &headers).unwrap());
+    }
+
+    #[test]
+    fn test_verify_signature_dispatches_standard_webhooks() {
+        use base64::Engine;
+        let raw_key = b"dispatch_test_key_01234567890ab";
+        let secret = format!(
+            "whsec_{}",
+            base64::engine::general_purpose::STANDARD.encode(raw_key)
+        );
+        let payload = b"{}";
+        let msg_id = "msg_dispatch";
+        let timestamp = chrono::Utc::now().timestamp();
+
+        let mut mac = HmacSha256::new_from_slice(raw_key).unwrap();
+        mac.update(msg_id.as_bytes());
+        mac.update(b".");
+        mac.update(timestamp.to_string().as_bytes());
+        mac.update(b".");
+        mac.update(payload);
+        let sig = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert("webhook-id", msg_id.parse().unwrap());
+        headers.insert("webhook-timestamp", timestamp.to_string().parse().unwrap());
+        headers.insert("webhook-signature", format!("v1,{sig}").parse().unwrap());
+
+        assert!(verify_signature("standard-webhooks", &secret, payload, &headers).unwrap());
+    }
+
+    // --- Linear verification ---
+
+    #[test]
+    fn test_linear_signature_valid() {
+        let secret = "linear_secret_key";
+        let payload = b"{\"action\":\"create\",\"type\":\"Issue\"}";
+        let expected = compute_hmac_sha256_hex(secret.as_bytes(), payload);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("Linear-Signature", expected.parse().unwrap());
+
+        assert!(verify_linear(secret, payload, &headers).unwrap());
+    }
+
+    #[test]
+    fn test_linear_signature_invalid() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Linear-Signature",
+            "0000000000000000000000000000000000000000000000000000000000000000"
+                .parse()
+                .unwrap(),
+        );
+        assert!(!verify_linear("secret", b"payload", &headers).unwrap());
+    }
+
+    #[test]
+    fn test_linear_signature_missing() {
+        let headers = HeaderMap::new();
+        assert!(!verify_linear("secret", b"payload", &headers).unwrap());
+    }
+
+    #[test]
+    fn test_verify_signature_dispatches_linear() {
+        let secret = "lin_key";
+        let payload = b"test";
+        let sig = compute_hmac_sha256_hex(secret.as_bytes(), payload);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("Linear-Signature", sig.parse().unwrap());
+
+        assert!(verify_signature("linear", secret, payload, &headers).unwrap());
     }
 
     // --- Outbound signing ---
