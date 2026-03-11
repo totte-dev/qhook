@@ -30,6 +30,7 @@ Simple:                           Multi-step:
 
 - **Zero infrastructure.** Single binary, SQLite for dev, Postgres for production. No Redis, no message broker.
 - **Webhook verification built in.** GitHub, Stripe, Shopify, PagerDuty, Grafana, Terraform Cloud, GitLab, HMAC, AWS SNS X.509.
+- **Outbound webhooks.** Send webhooks to your customers with [Standard Webhooks](https://www.standardwebhooks.com/) compliant signatures. Dynamic endpoint management, subscription-based routing, per-endpoint signing secrets.
 - **From one action to a pipeline.** Start with a single HTTP call; grow into multi-step workflows with branching, parallelism, and rollback — same YAML, same engine.
 - **Production ready.** Prometheus metrics, health checks, Slack/Discord alerts, rate limiting, circuit breaker, OpenTelemetry tracing, structured logging.
 
@@ -199,6 +200,7 @@ Full documentation at **[totte-dev.github.io/qhook](https://totte-dev.github.io/
 | [stripe-checkout](./examples/stripe-checkout/) | Stripe checkout with dual handlers |
 | [workflow](./examples/workflow/) | Multi-step pipeline with catch routing |
 | [tenant-provision](./examples/tenant-provision/) | Tenant provisioning with rollback and auth headers |
+| [outbound-webhook](./examples/outbound-webhook/) | Send webhooks to customers with Standard Webhooks signatures |
 | [alert-remediation](./examples/alert-remediation/) | PagerDuty alert → triage → remediate → escalate |
 
 ## License
