@@ -408,32 +408,47 @@ pub fn build_sns_string_to_sign(msg: &SnsMessage) -> String {
     lines
 }
 
-// --- Outbound webhook signing ---
+// --- Outbound webhook signing (Standard Webhooks spec) ---
 
-/// Sign an outbound webhook payload using HMAC-SHA256.
-/// Returns the hex-encoded signature.
+/// Sign an outbound webhook payload using HMAC-SHA256 per the Standard Webhooks spec.
+/// Returns the base64-encoded signature.
 ///
-/// Format: HMAC-SHA256(secret, "{timestamp}.{payload}")
-/// This matches the Stripe/Svix convention for webhook signature verification.
-pub fn sign_outbound_payload(secret: &str, timestamp: i64, payload: &[u8]) -> String {
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+/// Signed content format: `{msg_id}.{timestamp}.{payload}`
+/// The secret should be a `whsec_`-prefixed base64-encoded key.
+pub fn sign_outbound_payload(secret: &str, msg_id: &str, timestamp: i64, payload: &[u8]) -> String {
+    use base64::Engine;
+    // Strip whsec_ prefix and base64-decode to get raw key bytes
+    let key_bytes = if let Some(stripped) = secret.strip_prefix("whsec_") {
+        base64::engine::general_purpose::STANDARD
+            .decode(stripped)
+            .unwrap_or_else(|_| secret.as_bytes().to_vec())
+    } else {
+        secret.as_bytes().to_vec()
+    };
+    let mut mac = HmacSha256::new_from_slice(&key_bytes).expect("HMAC accepts any key length");
+    mac.update(msg_id.as_bytes());
+    mac.update(b".");
     mac.update(timestamp.to_string().as_bytes());
     mac.update(b".");
     mac.update(payload);
-    hex::encode(mac.finalize().into_bytes())
+    base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
 }
 
-/// Generate a signing secret for an outbound endpoint.
-/// Uses SHA-256 of a ULID (which contains timestamp + random bytes) for uniqueness.
-/// Prefixed with `whsec_` for easy identification.
+/// Generate a signing secret for an outbound endpoint (Standard Webhooks format).
+/// Generates 32 random bytes, encodes as standard base64, prefixed with `whsec_`.
 pub fn generate_signing_secret() -> String {
+    use base64::Engine;
     use sha2::Digest;
-    let ulid = ulid::Ulid::new();
-    let hash = Sha256::digest(ulid.to_bytes());
+    // Use SHA-256 of two ULIDs for 256 bits of entropy without adding `rand` dependency
+    let ulid1 = ulid::Ulid::new();
+    let ulid2 = ulid::Ulid::new();
+    let mut hasher = Sha256::new();
+    hasher.update(ulid1.to_bytes());
+    hasher.update(ulid2.to_bytes());
+    let hash = hasher.finalize();
     format!(
         "whsec_{}",
-        base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, hash,)
+        base64::engine::general_purpose::STANDARD.encode(hash)
     )
 }
 
@@ -950,22 +965,24 @@ mod tests {
 
     #[test]
     fn test_sign_outbound_payload_deterministic() {
-        let secret = "whsec_test_secret";
+        let secret = "whsec_dGVzdF9zZWNyZXRfa2V5X2Zvcl9zaWduaW5n";
+        let msg_id = "msg_001";
         let timestamp = 1710000000i64;
         let payload = b"{\"order_id\":\"123\"}";
 
-        let sig1 = sign_outbound_payload(secret, timestamp, payload);
-        let sig2 = sign_outbound_payload(secret, timestamp, payload);
+        let sig1 = sign_outbound_payload(secret, msg_id, timestamp, payload);
+        let sig2 = sign_outbound_payload(secret, msg_id, timestamp, payload);
         assert_eq!(sig1, sig2, "Same inputs must produce same signature");
     }
 
     #[test]
     fn test_sign_outbound_payload_different_secret() {
+        let msg_id = "msg_001";
         let timestamp = 1710000000i64;
         let payload = b"{\"order_id\":\"123\"}";
 
-        let sig1 = sign_outbound_payload("secret_a", timestamp, payload);
-        let sig2 = sign_outbound_payload("secret_b", timestamp, payload);
+        let sig1 = sign_outbound_payload("whsec_c2VjcmV0X2E=", msg_id, timestamp, payload);
+        let sig2 = sign_outbound_payload("whsec_c2VjcmV0X2I=", msg_id, timestamp, payload);
         assert_ne!(
             sig1, sig2,
             "Different secrets must produce different signatures"
@@ -974,11 +991,12 @@ mod tests {
 
     #[test]
     fn test_sign_outbound_payload_different_timestamp() {
-        let secret = "whsec_test";
+        let secret = "whsec_dGVzdA==";
+        let msg_id = "msg_001";
         let payload = b"{}";
 
-        let sig1 = sign_outbound_payload(secret, 1000, payload);
-        let sig2 = sign_outbound_payload(secret, 2000, payload);
+        let sig1 = sign_outbound_payload(secret, msg_id, 1000, payload);
+        let sig2 = sign_outbound_payload(secret, msg_id, 2000, payload);
         assert_ne!(
             sig1, sig2,
             "Different timestamps must produce different signatures"
@@ -986,30 +1004,53 @@ mod tests {
     }
 
     #[test]
-    fn test_sign_outbound_payload_hex_format() {
-        let sig = sign_outbound_payload("secret", 1710000000, b"test");
-        // HMAC-SHA256 produces 32 bytes = 64 hex chars
-        assert_eq!(sig.len(), 64);
-        assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
+    fn test_sign_outbound_payload_base64_format() {
+        let sig = sign_outbound_payload("whsec_c2VjcmV0", "msg_001", 1710000000, b"test");
+        // HMAC-SHA256 produces 32 bytes = 44 base64 chars (with padding)
+        assert_eq!(sig.len(), 44);
+        assert!(
+            sig.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+        );
     }
 
     #[test]
     fn test_sign_outbound_payload_verifiable() {
-        // Verify the signature can be checked with standard HMAC-SHA256
-        let secret = "whsec_verify_test";
+        use base64::Engine;
+        // Standard Webhooks format: HMAC-SHA256(base64_decode(secret), "{msg_id}.{timestamp}.{payload}")
+        let raw_key = b"verify_test_key_0123456789abcdef";
+        let secret = format!(
+            "whsec_{}",
+            base64::engine::general_purpose::STANDARD.encode(raw_key)
+        );
+        let msg_id = "msg_verify";
         let timestamp = 1710000000i64;
         let payload = b"{\"amount\":5000}";
 
-        let signature = sign_outbound_payload(secret, timestamp, payload);
+        let signature = sign_outbound_payload(&secret, msg_id, timestamp, payload);
 
-        // Manually compute the expected HMAC
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(b"1710000000");
-        mac.update(b".");
+        // Manually compute the expected HMAC per Standard Webhooks spec
+        let mut mac = HmacSha256::new_from_slice(raw_key).unwrap();
+        mac.update(b"msg_verify.1710000000.");
         mac.update(payload);
-        let expected = hex::encode(mac.finalize().into_bytes());
+        let expected =
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
 
         assert_eq!(signature, expected);
+    }
+
+    #[test]
+    fn test_sign_outbound_msg_id_included() {
+        let secret = "whsec_dGVzdA==";
+        let payload = b"{}";
+
+        // Different msg_ids should produce different signatures
+        let sig1 = sign_outbound_payload(secret, "msg_001", 1000, payload);
+        let sig2 = sign_outbound_payload(secret, "msg_002", 1000, payload);
+        assert_ne!(
+            sig1, sig2,
+            "Different msg_ids must produce different signatures"
+        );
     }
 
     #[test]
@@ -1030,13 +1071,12 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_signing_secret_length() {
+    fn test_generate_signing_secret_decodable() {
+        use base64::Engine;
         let secret = generate_signing_secret();
-        // "whsec_" (6) + base64url(32 bytes SHA-256) = 6 + 43 = 49
-        assert!(
-            secret.len() > 40,
-            "Secret should be sufficiently long, got: {}",
-            secret.len()
-        );
+        let b64_part = secret.strip_prefix("whsec_").unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD.decode(b64_part);
+        assert!(decoded.is_ok(), "Secret base64 part must be decodable");
+        assert_eq!(decoded.unwrap().len(), 32, "Decoded key must be 32 bytes");
     }
 }
