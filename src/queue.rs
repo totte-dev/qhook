@@ -403,7 +403,8 @@ async fn deliver_job(
     circuit_breaker: Option<&CircuitBreaker>,
 ) {
     let start = std::time::Instant::now();
-    let is_workflow = job.handler.contains('/');
+    let is_outbound = job.handler.starts_with("outbound/");
+    let is_workflow = !is_outbound && job.handler.contains('/');
 
     // Check workflow timeout before executing any step
     if is_workflow {
@@ -599,6 +600,13 @@ async fn deliver_job(
 
     let result = if is_workflow {
         deliver_workflow_step(db, http, job, custom_headers.as_ref(), &method).await
+    } else if is_outbound {
+        deliver_outbound(db, http, job)
+            .await
+            .map(|status_code| DeliveryResult {
+                status_code,
+                response_body: None,
+            })
     } else {
         deliver(db, http, job, transform, custom_headers.as_ref(), &method)
             .await
@@ -2297,6 +2305,53 @@ async fn deliver(
     };
 
     deliver_http(http, job, &payload, &headers_json, custom_headers, method).await
+}
+
+/// Deliver an outbound webhook with HMAC-SHA256 signature.
+async fn deliver_outbound(
+    db: &Database,
+    http: &reqwest::Client,
+    job: &crate::db::JobRow,
+) -> Result<u16> {
+    let endpoint_id = job
+        .handler
+        .strip_prefix("outbound/")
+        .unwrap_or(&job.handler);
+
+    let (payload, _headers_json) = db.get_event_data(&job.event_id).await?;
+
+    // Look up the endpoint's signing secret
+    let signing_secret = db
+        .get_endpoint_secret(endpoint_id)
+        .await?
+        .unwrap_or_default();
+
+    let timestamp = chrono::Utc::now().timestamp();
+    let signature =
+        crate::verify::sign_outbound_payload(&signing_secret, timestamp, payload.as_bytes());
+
+    // Get event type for the header
+    let event_type: Option<String> =
+        sqlx::query_as::<_, (String,)>("SELECT event_type FROM events WHERE id = $1")
+            .bind(&job.event_id)
+            .fetch_optional(&db.pool)
+            .await?
+            .map(|r| r.0);
+
+    let mut request = http
+        .post(&job.url)
+        .header("Content-Type", "application/json")
+        .header("X-Qhook-Signature", format!("v1={}", signature))
+        .header("X-Qhook-Timestamp", timestamp.to_string())
+        .header("X-Qhook-Delivery-ID", &job.id)
+        .header("X-Qhook-Event-ID", &job.event_id);
+
+    if let Some(ref et) = event_type {
+        request = request.header("X-Qhook-Event-Type", et.as_str());
+    }
+
+    let response = request.body(payload).send().await?;
+    Ok(response.status().as_u16())
 }
 
 async fn deliver_http(
