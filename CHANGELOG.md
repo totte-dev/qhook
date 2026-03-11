@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-03-11
+
+### Added
+- **Standard Webhooks compliance**: Outbound webhooks now use `webhook-id`, `webhook-timestamp`, `webhook-signature` headers per the [Standard Webhooks](https://www.standardwebhooks.com/) spec. Signed content format: `{msg_id}.{timestamp}.{body}` with base64 output and `v1,` prefix.
+- **Retry-After header support**: Respects `Retry-After` from downstream 429/503 responses to override exponential backoff delay (capped at 86400s).
+- **DB migration versioning**: Migrations tracked in `_migrations` table with auto-detection of pre-existing databases. Enables safe schema upgrades across versions.
+- **Configurable worker concurrency**: `worker.max_concurrency` and `worker.batch_size` config fields replace hardcoded constants (both default to 10).
+- **CI code coverage**: `cargo-llvm-cov` integrated in CI pipeline with LCOV output.
+- **Cost comparison documentation**: Added infrastructure cost comparison vs Svix, Hookdeck, and AWS Step Functions in `docs/why-qhook.md`.
+
+### Changed
+- Outbound webhook headers changed from `X-Qhook-Signature`/`X-Qhook-Timestamp` to Standard Webhooks format (outbound webhooks were added in v0.4.1, minimal impact).
+
 ## [0.4.1] - 2026-03-11
 
 ### Added

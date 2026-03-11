@@ -13,14 +13,10 @@ use crate::config::{self, WorkerConfig};
 use crate::db::Database;
 use crate::metrics::Metrics;
 
-/// Max concurrent deliveries per worker.
-const MAX_CONCURRENCY: usize = 10;
 /// Default circuit breaker threshold (consecutive failures to open).
 const DEFAULT_CB_THRESHOLD: u32 = 5;
 /// Default circuit breaker cooldown (seconds before half-open).
 const DEFAULT_CB_COOLDOWN_SECS: u64 = 60;
-/// Batch size for job fetching.
-const BATCH_SIZE: i32 = 10;
 /// How often to run maintenance (stale recovery + cleanup).
 const MAINTENANCE_INTERVAL_SECS: u64 = 3600;
 
@@ -213,7 +209,7 @@ impl Worker {
         )
         .await;
 
-        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENCY));
+        let semaphore = Arc::new(Semaphore::new(self.worker_config.max_concurrency));
         let mut in_flight = JoinSet::new();
         let mut poll_ticker = interval(self.poll_interval);
         let busy_interval = Duration::from_millis(50);
@@ -231,7 +227,7 @@ impl Worker {
                 }
                 _ = poll_ticker.tick() => {
                     let is_postgres = self.db.driver == "postgres";
-                    let batch = BATCH_SIZE.min(
+                    let batch = self.worker_config.batch_size.min(
                         semaphore.available_permits() as i32
                     ).max(1);
                     let jobs = match self.db.fetch_available_jobs(batch).await {
@@ -601,19 +597,9 @@ async fn deliver_job(
     let result = if is_workflow {
         deliver_workflow_step(db, http, job, custom_headers.as_ref(), &method).await
     } else if is_outbound {
-        deliver_outbound(db, http, job)
-            .await
-            .map(|status_code| DeliveryResult {
-                status_code,
-                response_body: None,
-            })
+        deliver_outbound(db, http, job).await
     } else {
-        deliver(db, http, job, transform, custom_headers.as_ref(), &method)
-            .await
-            .map(|status_code| DeliveryResult {
-                status_code,
-                response_body: None,
-            })
+        deliver(db, http, job, transform, custom_headers.as_ref(), &method).await
     };
     let duration_ms = start.elapsed().as_millis() as i64;
 
@@ -700,7 +686,7 @@ async fn deliver_job(
                             metrics.inc_circuit_opened(&job.handler);
                         }
                     }
-                    match handle_failure(db, job, &error).await {
+                    match handle_failure(db, job, &error, delivery_result.retry_after_secs).await {
                         Ok(true) => {
                             metrics.inc_dlq(&job.handler);
                             if let Some(a) = alerter {
@@ -763,7 +749,7 @@ async fn deliver_job(
                         metrics.inc_circuit_opened(&job.handler);
                     }
                 }
-                match handle_failure(db, job, &error).await {
+                match handle_failure(db, job, &error, None).await {
                     Ok(true) => metrics.inc_dlq(&job.handler),
                     Ok(false) => {}
                     Err(e) => {
@@ -778,6 +764,8 @@ async fn deliver_job(
 struct DeliveryResult {
     status_code: u16,
     response_body: Option<String>,
+    /// Retry-After header value in seconds (from downstream 429/503 response).
+    retry_after_secs: Option<i64>,
 }
 
 /// Deliver a workflow step job using the step_input payload.
@@ -825,11 +813,17 @@ async fn deliver_workflow_step(
     };
 
     let status_code = response.status().as_u16();
+    let retry_after_secs = response
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_retry_after);
     let body = response.text().await.ok();
 
     Ok(DeliveryResult {
         status_code,
         response_body: body,
+        retry_after_secs,
     })
 }
 
@@ -1055,7 +1049,7 @@ async fn handle_workflow_step_failure(
         Some(w) => w,
         None => {
             // Fallback to default failure handling
-            let _ = handle_failure(db, job, error).await;
+            let _ = handle_failure(db, job, error, None).await;
             return;
         }
     };
@@ -2295,7 +2289,7 @@ async fn deliver(
     transform: Option<&str>,
     custom_headers: Option<&HashMap<String, String>>,
     method: &str,
-) -> Result<u16> {
+) -> Result<DeliveryResult> {
     let (raw_payload, headers_json) = db.get_event_data(&job.event_id).await?;
 
     // Apply transformation if configured
@@ -2312,7 +2306,7 @@ async fn deliver_outbound(
     db: &Database,
     http: &reqwest::Client,
     job: &crate::db::JobRow,
-) -> Result<u16> {
+) -> Result<DeliveryResult> {
     let endpoint_id = job
         .handler
         .strip_prefix("outbound/")
@@ -2327,8 +2321,14 @@ async fn deliver_outbound(
         .unwrap_or_default();
 
     let timestamp = chrono::Utc::now().timestamp();
-    let signature =
-        crate::verify::sign_outbound_payload(&signing_secret, timestamp, payload.as_bytes());
+    // Use job ID as the message ID for Standard Webhooks
+    let msg_id = &job.id;
+    let signature = crate::verify::sign_outbound_payload(
+        &signing_secret,
+        msg_id,
+        timestamp,
+        payload.as_bytes(),
+    );
 
     // Get event type for the header
     let event_type: Option<String> =
@@ -2338,12 +2338,14 @@ async fn deliver_outbound(
             .await?
             .map(|r| r.0);
 
+    // Standard Webhooks spec headers
     let mut request = http
         .post(&job.url)
         .header("Content-Type", "application/json")
-        .header("X-Qhook-Signature", format!("v1={}", signature))
-        .header("X-Qhook-Timestamp", timestamp.to_string())
-        .header("X-Qhook-Delivery-ID", &job.id)
+        .header("webhook-id", msg_id.as_str())
+        .header("webhook-timestamp", timestamp.to_string())
+        .header("webhook-signature", format!("v1,{}", signature))
+        // Supplementary qhook headers (not part of Standard Webhooks spec)
         .header("X-Qhook-Event-ID", &job.event_id);
 
     if let Some(ref et) = event_type {
@@ -2351,7 +2353,26 @@ async fn deliver_outbound(
     }
 
     let response = request.body(payload).send().await?;
-    Ok(response.status().as_u16())
+    let retry_after_secs = response
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_retry_after);
+    Ok(DeliveryResult {
+        status_code: response.status().as_u16(),
+        response_body: None,
+        retry_after_secs,
+    })
+}
+
+/// Parse `Retry-After` header value into seconds.
+/// Supports integer seconds (e.g., "120") only. HTTP-date format is not supported.
+fn parse_retry_after(value: &str) -> Option<i64> {
+    value
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|&s| s > 0 && s <= 86400)
 }
 
 async fn deliver_http(
@@ -2361,7 +2382,7 @@ async fn deliver_http(
     headers_json: &Option<String>,
     custom_headers: Option<&HashMap<String, String>>,
     method: &str,
-) -> Result<u16> {
+) -> Result<DeliveryResult> {
     let reqwest_method = match method {
         "GET" => reqwest::Method::GET,
         "PUT" => reqwest::Method::PUT,
@@ -2402,11 +2423,27 @@ async fn deliver_http(
     } else {
         request.body(payload.to_string()).send().await?
     };
-    Ok(response.status().as_u16())
+    let retry_after_secs = response
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_retry_after);
+    Ok(DeliveryResult {
+        status_code: response.status().as_u16(),
+        response_body: None,
+        retry_after_secs,
+    })
 }
 
 /// Handle delivery failure. Returns `true` if the job was moved to DLQ.
-async fn handle_failure(db: &Database, job: &crate::db::JobRow, error: &str) -> Result<bool> {
+/// If `retry_after_secs` is provided (from downstream Retry-After header), it overrides
+/// the default exponential backoff delay.
+async fn handle_failure(
+    db: &Database,
+    job: &crate::db::JobRow,
+    error: &str,
+    retry_after_secs: Option<i64>,
+) -> Result<bool> {
     let current_attempt = job.attempt + 1;
 
     if current_attempt >= job.max_attempts {
@@ -2419,8 +2456,9 @@ async fn handle_failure(db: &Database, job: &crate::db::JobRow, error: &str) -> 
         );
         Ok(true)
     } else {
-        // Exponential backoff: 30s * 2^attempt
-        let backoff_secs = 30i64 * (1i64 << current_attempt.min(10));
+        // Use Retry-After header if provided, otherwise exponential backoff: 30s * 2^attempt
+        let backoff_secs =
+            retry_after_secs.unwrap_or_else(|| 30i64 * (1i64 << current_attempt.min(10)));
         let next_at = Utc::now().naive_utc() + chrono::Duration::seconds(backoff_secs);
         db.mark_job_retryable(&job.id, next_at, error).await?;
         tracing::info!(
@@ -2428,6 +2466,7 @@ async fn handle_failure(db: &Database, job: &crate::db::JobRow, error: &str) -> 
             handler = job.handler,
             attempt = current_attempt,
             next_retry_secs = backoff_secs,
+            retry_after = retry_after_secs.is_some(),
             error,
             "Job scheduled for retry"
         );
@@ -2559,5 +2598,27 @@ mod tests {
         cb.record_failure(); // fails again -> reopen
         assert_eq!(cb.state(), CircuitState::Open);
         assert!(!cb.allow_request());
+    }
+
+    #[test]
+    fn test_parse_retry_after_valid() {
+        assert_eq!(parse_retry_after("120"), Some(120));
+        assert_eq!(parse_retry_after("1"), Some(1));
+        assert_eq!(parse_retry_after(" 30 "), Some(30));
+    }
+
+    #[test]
+    fn test_parse_retry_after_invalid() {
+        assert_eq!(parse_retry_after("0"), None);
+        assert_eq!(parse_retry_after("-1"), None);
+        assert_eq!(parse_retry_after("abc"), None);
+        assert_eq!(parse_retry_after(""), None);
+    }
+
+    #[test]
+    fn test_parse_retry_after_clamped() {
+        // Over 24h is rejected
+        assert_eq!(parse_retry_after("86401"), None);
+        assert_eq!(parse_retry_after("86400"), Some(86400));
     }
 }

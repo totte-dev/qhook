@@ -1,9 +1,10 @@
 """
-Customer webhook receiver that verifies qhook signatures.
+Customer webhook receiver that verifies Standard Webhooks signatures.
 Demonstrates how your customers verify outbound webhook deliveries.
 No dependencies beyond Python stdlib.
 """
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import base64
 import hashlib
 import hmac
 import json
@@ -19,28 +20,32 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
 
-        # Extract signature headers
-        signature = self.headers.get("X-Qhook-Signature", "")
-        timestamp = self.headers.get("X-Qhook-Timestamp", "")
+        # Extract Standard Webhooks headers
+        signature = self.headers.get("webhook-signature", "")
+        timestamp = self.headers.get("webhook-timestamp", "")
+        msg_id = self.headers.get("webhook-id", "")
+        # Supplementary qhook headers
         event_type = self.headers.get("X-Qhook-Event-Type", "")
         event_id = self.headers.get("X-Qhook-Event-ID", "")
-        delivery_id = self.headers.get("X-Qhook-Delivery-ID", "")
 
-        # Verify signature
+        # Verify signature per Standard Webhooks spec
         verified = False
-        if SIGNING_SECRET and signature.startswith("v1="):
-            expected = hmac.new(
-                SIGNING_SECRET.encode(),
-                f"{timestamp}.".encode() + body,
-                hashlib.sha256,
-            ).hexdigest()
+        if SIGNING_SECRET and signature.startswith("v1,"):
+            # Decode the whsec_ secret to raw key bytes
+            secret_b64 = SIGNING_SECRET.removeprefix("whsec_")
+            key_bytes = base64.b64decode(secret_b64)
+            # Signed content: {msg_id}.{timestamp}.{body}
+            signed_content = f"{msg_id}.{timestamp}.".encode() + body
+            expected = base64.b64encode(
+                hmac.new(key_bytes, signed_content, hashlib.sha256).digest()
+            ).decode()
             verified = hmac.compare_digest(signature[3:], expected)
 
         payload = json.loads(body) if body else {}
         status = "VERIFIED" if verified else ("UNVERIFIED" if SIGNING_SECRET else "NO_SECRET")
 
         print(f"[{status}] event_type={event_type} event_id={event_id} "
-              f"delivery_id={delivery_id} payload={json.dumps(payload)}")
+              f"msg_id={msg_id} payload={json.dumps(payload)}")
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

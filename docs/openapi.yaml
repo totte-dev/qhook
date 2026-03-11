@@ -8,7 +8,7 @@ info:
     configured handlers with retry and dead-letter support.
 
     All responses include an `X-API-Version` header indicating the current API version.
-  version: 0.4.0
+  version: 0.4.2
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -34,6 +34,8 @@ tags:
     description: Workflow callback endpoint
   - name: Management
     description: Event and job inspection endpoints
+  - name: Outbound
+    description: Outbound webhook endpoint and subscription management
   - name: Operations
     description: Health check and metrics
 
@@ -570,6 +572,232 @@ paths:
               example:
                 error: job not found
 
+  /api/outbound/endpoints:
+    post:
+      tags: [Outbound]
+      summary: Create an outbound endpoint
+      description: |
+        Registers a new customer webhook endpoint. Returns a unique signing secret
+        (`whsec_` prefix) for Standard Webhooks signature verification.
+      operationId: createEndpoint
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                source:
+                  type: string
+                  description: Source name this endpoint receives events from
+                url:
+                  type: string
+                  format: uri
+                  description: Customer's webhook URL
+                description:
+                  type: string
+                  description: Human-readable description
+              required: [source, url]
+            example:
+              source: my-saas
+              url: https://customer.com/webhook
+              description: Customer A
+      responses:
+        "201":
+          description: Endpoint created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OutboundEndpoint"
+        "401":
+          description: Missing or invalid Bearer token
+    get:
+      tags: [Outbound]
+      summary: List outbound endpoints
+      operationId: listEndpoints
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: source
+          in: query
+          description: Filter by source name
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of endpoints
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/OutboundEndpoint"
+
+  /api/outbound/endpoints/{endpoint_id}:
+    get:
+      tags: [Outbound]
+      summary: Get endpoint details
+      operationId: getEndpoint
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/endpoint_id"
+      responses:
+        "200":
+          description: Endpoint details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OutboundEndpoint"
+        "404":
+          description: Endpoint not found
+    put:
+      tags: [Outbound]
+      summary: Update an endpoint
+      operationId: updateEndpoint
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/endpoint_id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url:
+                  type: string
+                  format: uri
+                description:
+                  type: string
+                status:
+                  type: string
+                  enum: [active, disabled]
+      responses:
+        "200":
+          description: Endpoint updated
+        "404":
+          description: Endpoint not found
+    delete:
+      tags: [Outbound]
+      summary: Delete an endpoint
+      description: Deletes the endpoint and all its subscriptions.
+      operationId: deleteEndpoint
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/endpoint_id"
+      responses:
+        "200":
+          description: Endpoint deleted
+        "404":
+          description: Endpoint not found
+
+  /api/outbound/endpoints/{endpoint_id}/rotate-secret:
+    post:
+      tags: [Outbound]
+      summary: Rotate signing secret
+      description: Generates a new signing secret for the endpoint. The old secret is immediately invalidated.
+      operationId: rotateSecret
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/endpoint_id"
+      responses:
+        "200":
+          description: Secret rotated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  signing_secret:
+                    type: string
+                    description: New signing secret (whsec_ prefix)
+                    example: whsec_dGhpcyBpcyBhIHRlc3Q=
+        "404":
+          description: Endpoint not found
+
+  /api/outbound/endpoints/{endpoint_id}/subscriptions:
+    post:
+      tags: [Outbound]
+      summary: Subscribe to event types
+      operationId: createSubscriptions
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/endpoint_id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event_types:
+                  type: array
+                  items:
+                    type: string
+                  description: "Event types to subscribe to. Use '*' for all events."
+              required: [event_types]
+            example:
+              event_types: [order.created, payment.completed]
+      responses:
+        "201":
+          description: Subscriptions created
+        "404":
+          description: Endpoint not found
+    get:
+      tags: [Outbound]
+      summary: List subscriptions
+      operationId: listSubscriptions
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/endpoint_id"
+      responses:
+        "200":
+          description: List of subscriptions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    endpoint_id:
+                      type: string
+                    event_type:
+                      type: string
+                    created_at:
+                      type: string
+
+  /api/outbound/endpoints/{endpoint_id}/subscriptions/{subscription_id}:
+    delete:
+      tags: [Outbound]
+      summary: Delete a subscription
+      operationId: deleteSubscription
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/endpoint_id"
+        - name: subscription_id
+          in: path
+          required: true
+          description: Subscription ID (ULID)
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Subscription deleted
+        "404":
+          description: Subscription not found
+
   /health:
     get:
       tags: [Operations]
@@ -666,6 +894,14 @@ components:
       schema:
         type: string
       example: github
+    endpoint_id:
+      name: endpoint_id
+      in: path
+      required: true
+      description: Outbound endpoint ID (ULID)
+      schema:
+        type: string
+      example: 01JEXAMPLE00000000000000000
 
   schemas:
     SnsMessage:
@@ -702,6 +938,33 @@ components:
           format: uri
           description: Present only for SubscriptionConfirmation
       required: [Type, MessageId, TopicArn, Message, Timestamp]
+
+    OutboundEndpoint:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Endpoint ULID
+        source:
+          type: string
+          description: Source name
+        url:
+          type: string
+          format: uri
+          description: Customer's webhook URL
+        description:
+          type: string
+        signing_secret:
+          type: string
+          description: "HMAC signing secret (whsec_ prefix, only returned on create and rotate)"
+        status:
+          type: string
+          enum: [active, disabled]
+        created_at:
+          type: string
+        updated_at:
+          type: string
+      required: [id, source, url, signing_secret, status, created_at, updated_at]
 
     Error:
       type: object

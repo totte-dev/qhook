@@ -79,6 +79,8 @@ worker:
   stale_threshold_secs: 300         # recover stuck jobs after N seconds (default: 300)
   retention_hours: 72               # purge completed/dead records after N hours (default: 72)
   drain_timeout_secs: 30            # max wait for in-flight deliveries on shutdown (default: 30)
+  max_concurrency: 10               # max parallel delivery workers (default: 10)
+  batch_size: 10                    # jobs fetched per poll cycle (default: 10)
 
 sources:
   stripe:
@@ -196,6 +198,8 @@ workflows:
 | `stale_threshold_secs` | integer | `300` | Jobs stuck in `running` longer than this are recovered |
 | `retention_hours` | integer | `72` | Completed/dead records older than this are purged |
 | `drain_timeout_secs` | integer | `30` | Max seconds to wait for in-flight deliveries on shutdown |
+| `max_concurrency` | integer | `10` | Max parallel delivery workers. Increase for high-throughput deployments |
+| `batch_size` | integer | `10` | Number of jobs fetched per poll cycle. Match to `max_concurrency` for optimal throughput |
 
 ### sources
 

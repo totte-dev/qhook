@@ -1,6 +1,6 @@
 [package]
 name = "qhook"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 rust-version = "1.85"
 description = "Lightweight webhook gateway and workflow engine with queue, retry, and signature verification."
