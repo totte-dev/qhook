@@ -354,6 +354,7 @@ pub async fn serve(state: AppState, config_path: String) -> Result<()> {
         .route("/_echo", axum::routing::any(handle_echo))
         .route("/health", axum::routing::get(handle_health))
         .route("/metrics", axum::routing::get(handle_metrics))
+        .layer(tower_http::compression::CompressionLayer::new())
         .layer(security_headers)
         .layer(concurrency_limit)
         .layer(tower_http::limit::RequestBodyLimitLayer::new(body_limit))
@@ -1771,70 +1772,26 @@ pub fn validate_event_schema(payload: &str, schema: &str) -> Result<()> {
     let payload_val: Value =
         serde_json::from_str(payload).map_err(|e| anyhow::anyhow!("invalid payload JSON: {e}"))?;
 
-    validate_value_against_schema(&payload_val, &schema_val, "$")
-}
+    let validator = jsonschema::validator_for(&schema_val)
+        .map_err(|e| anyhow::anyhow!("invalid JSON Schema: {e}"))?;
 
-fn validate_value_against_schema(value: &Value, schema: &Value, path: &str) -> Result<()> {
-    // Check "type"
-    if let Some(expected_type) = schema.get("type").and_then(|t| t.as_str()) {
-        let actual_type = match value {
-            Value::Object(_) => "object",
-            Value::Array(_) => "array",
-            Value::String(_) => "string",
-            Value::Number(n) => {
-                if n.is_i64() || n.is_u64() {
-                    if expected_type == "number" {
-                        "number"
-                    } else {
-                        "integer"
-                    }
-                } else {
-                    "number"
-                }
+    let errors: Vec<String> = validator
+        .iter_errors(&payload_val)
+        .map(|e| {
+            let path = e.instance_path.to_string();
+            if path.is_empty() {
+                format!("schema validation failed: {e}")
+            } else {
+                format!("schema validation failed at {path}: {e}")
             }
-            Value::Bool(_) => "boolean",
-            Value::Null => "null",
-        };
-        if actual_type != expected_type {
-            anyhow::bail!(
-                "schema validation failed at {path}: expected type '{expected_type}', got '{actual_type}'"
-            );
-        }
-    }
+        })
+        .collect();
 
-    // Check "required" (only for objects)
-    if let (Some(required), Some(obj)) = (
-        schema.get("required").and_then(|r| r.as_array()),
-        value.as_object(),
-    ) {
-        for field in required {
-            if let Some(field_name) = field.as_str() {
-                if !obj.contains_key(field_name) {
-                    anyhow::bail!(
-                        "schema validation failed at {path}: missing required field '{field_name}'"
-                    );
-                }
-            }
-        }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("{}", errors.join("; "))
     }
-
-    // Check "properties" (recursive type check)
-    if let (Some(props), Some(obj)) = (
-        schema.get("properties").and_then(|p| p.as_object()),
-        value.as_object(),
-    ) {
-        for (prop_name, prop_schema) in props {
-            if let Some(prop_value) = obj.get(prop_name) {
-                validate_value_against_schema(
-                    prop_value,
-                    prop_schema,
-                    &format!("{path}.{prop_name}"),
-                )?;
-            }
-        }
-    }
-
-    Ok(())
 }
 
 /// Apply a JSON template transformation to a payload.
@@ -2893,6 +2850,43 @@ mod tests {
     fn test_validate_schema_no_schema() {
         // When no schema is configured, any payload is valid
         assert!(validate_event_schema(r#"{"anything": true}"#, "").is_ok());
+    }
+
+    #[test]
+    fn test_validate_schema_enum() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["active", "disabled"]}
+            }
+        }"#;
+        assert!(validate_event_schema(r#"{"status": "active"}"#, schema).is_ok());
+        assert!(validate_event_schema(r#"{"status": "unknown"}"#, schema).is_err());
+    }
+
+    #[test]
+    fn test_validate_schema_min_max_length() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "minLength": 2, "maxLength": 10}
+            }
+        }"#;
+        assert!(validate_event_schema(r#"{"name": "ok"}"#, schema).is_ok());
+        assert!(validate_event_schema(r#"{"name": "x"}"#, schema).is_err());
+        assert!(validate_event_schema(r#"{"name": "this is way too long"}"#, schema).is_err());
+    }
+
+    #[test]
+    fn test_validate_schema_pattern() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "email": {"type": "string", "pattern": "^.+@.+\\..+$"}
+            }
+        }"#;
+        assert!(validate_event_schema(r#"{"email": "user@example.com"}"#, schema).is_ok());
+        assert!(validate_event_schema(r#"{"email": "not-an-email"}"#, schema).is_err());
     }
 
     #[tokio::test]

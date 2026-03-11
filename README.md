@@ -138,9 +138,10 @@ qhook jobs list --status dead      # List dead-letter jobs
 qhook jobs retry                   # Retry all dead jobs
 qhook start --env production       # Config overlay (merges qhook.production.yaml)
 qhook tail                         # Stream events and jobs in real time
-qhook export events > events.jsonl # Export events as JSONL
-qhook events list                  # List received events
-qhook events replay --source stripe # Replay events for matching handlers
+qhook export events > events.jsonl   # Export events as JSONL
+qhook replay-local events.jsonl      # Replay exported events to a running server
+qhook events list                    # List received events
+qhook events replay --source stripe  # Replay events for matching handlers
 qhook workflow-runs list           # List workflow runs
 qhook workflow-runs redrive <ID>   # Redrive a failed workflow
 ```

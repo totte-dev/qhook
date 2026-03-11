@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- **Gzip compression**: HTTP responses are now gzip-compressed via `tower-http` `CompressionLayer`, reducing bandwidth for API and metrics responses.
+- **Full JSON Schema validation**: Replaced manual schema validation with the `jsonschema` crate (Draft 2020-12). Now supports `enum`, `pattern`, `minLength`, `maxLength`, and all standard JSON Schema keywords.
+- **Local replay mode**: `qhook replay-local <file.jsonl>` replays exported events (from `qhook export events`) to a running server. Supports `--target`, `--token`, and stdin (`-`).
+
+### Changed
+- **Per-destination rate limiting**: Switched from semaphore-hold to GCRA-based rate limiting via the `governor` crate. Provides smoother, more accurate per-handler rate limiting.
+
 ## [0.4.2] - 2026-03-11
 
 ### Added

@@ -97,7 +97,7 @@ src/
   metrics.rs    — Prometheus metrics (atomic counters, no deps)
   queue.rs      — Job worker (poll, deliver, retry, DLQ)
   verify.rs     — Signature verification (GitHub, Stripe, Shopify, HMAC, SNS X.509)
-  cli.rs        — CLI commands (start, init, validate, send, inspect, doctor, tail, export, jobs, events, replay)
+  cli.rs        — CLI commands (start, init, validate, send, inspect, doctor, tail, export, jobs, events, replay, replay-local)
   alert.rs      — Alert system (Slack, Discord, generic webhook)
   templates/    — Config templates (default, github, stripe, sns, cron, local overlay)
 tests/
