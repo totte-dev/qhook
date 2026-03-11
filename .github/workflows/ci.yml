@@ -18,9 +18,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: clippy, rustfmt, llvm-tools-preview
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Security check (advisories + licenses + bans + sources)
         uses: EmbarkStudios/cargo-deny-action@v2
@@ -34,8 +37,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets
 
-      - name: Tests (unit + E2E + scenarios)
-        run: cargo test
+      - name: Tests with coverage
+        run: cargo llvm-cov --lcov --output-path lcov.info
 
       - name: Build release
         run: cargo build --release

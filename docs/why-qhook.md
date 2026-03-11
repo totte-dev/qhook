@@ -376,6 +376,54 @@ workflows:
 
 ---
 
+## Cost Comparison
+
+Self-hosting qhook replaces paid webhook and workflow services. Here's what the numbers look like at typical scale.
+
+### Outbound Webhooks (vs Svix)
+
+| | Svix Starter | Svix Business | qhook (self-hosted) |
+|---|---|---|---|
+| **Monthly cost** | $490/mo | $1,290/mo | ~$7–15/mo |
+| **Messages/mo** | 500K | 2M | Unlimited |
+| **Endpoints** | 1,000 | 10,000 | Unlimited |
+| **Retention** | 90 days | 90 days | Configurable |
+| **Infrastructure** | Managed | Managed | 1 VM (t3.small or equivalent) |
+
+### Inbound Webhooks (vs Hookdeck)
+
+| | Hookdeck Starter | Hookdeck Growth | qhook (self-hosted) |
+|---|---|---|---|
+| **Monthly cost** | $0 (5K/mo) | $100+ | ~$7–15/mo |
+| **At 100K events/mo** | $100/mo | $100/mo | ~$7–15/mo |
+| **At 1M events/mo** | N/A | ~$500/mo | ~$15–30/mo |
+| **Verification** | Limited | Full | 9 providers built-in |
+| **Infrastructure** | Managed | Managed | 1 VM + Postgres |
+
+### Workflow Orchestration (vs AWS Step Functions)
+
+| | Step Functions Standard | Step Functions Express | qhook (self-hosted) |
+|---|---|---|---|
+| **Pricing model** | $0.025/1K transitions | Duration-based | Fixed infra cost |
+| **100K workflows/mo (5 steps)** | $12.50/mo | ~$5/mo | ~$7–15/mo |
+| **1M workflows/mo (5 steps)** | $125/mo | ~$50/mo | ~$15–30/mo |
+| **10M workflows/mo** | $1,250/mo | ~$500/mo | ~$30–60/mo |
+| **Vendor lock-in** | Yes (AWS) | Yes (AWS) | None |
+
+### Infrastructure Estimates
+
+| Setup | Monthly cost | Handles |
+|---|---|---|
+| **Minimal** (t3.small, SQLite) | ~$7/mo | Up to 100K events/mo |
+| **Standard** (t3.medium, RDS Postgres) | ~$30/mo | Up to 1M events/mo |
+| **Scale** (2x t3.medium, RDS) | ~$60/mo | Up to 10M events/mo |
+
+**Break-even point**: qhook pays for itself compared to Svix at ~10K messages/month, compared to Hookdeck at ~50K events/month, and compared to Step Functions at ~5M transitions/month.
+
+> These estimates assume on-demand AWS pricing. Reserved instances or spot reduce costs further. qhook's single-binary design means no Redis, no message broker, no Elasticsearch — just compute + database.
+
+---
+
 ## Where qhook Fits
 
 qhook is purpose-built for one pattern: **event arrives → execute HTTP actions reliably**.

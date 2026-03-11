@@ -2,7 +2,9 @@
 
 mod common;
 
-use common::{QhookProcess, count_path, hmac_sha256, http, wait_for_mock};
+use common::{
+    QhookProcess, count_path, hmac_sha256, http, verify_standard_webhook_sig, wait_for_mock,
+};
 use serde_json::Value;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -673,27 +675,28 @@ sources:
         "Customer B should NOT receive order.created"
     );
 
-    // Verify Customer A's delivery has valid HMAC-SHA256 signature
+    // Verify Customer A's delivery has valid Standard Webhooks signature
     let sig = reqs_a[0]
         .headers
-        .get("X-Qhook-Signature")
+        .get("webhook-signature")
         .unwrap()
         .to_str()
         .unwrap();
     let ts = reqs_a[0]
         .headers
-        .get("X-Qhook-Timestamp")
+        .get("webhook-timestamp")
         .unwrap()
         .to_str()
         .unwrap();
-    assert!(sig.starts_with("v1="));
-    let expected_sig = hmac_sha256(
-        &secret_a,
-        &format!("{}.{}", ts, std::str::from_utf8(&reqs_a[0].body).unwrap()),
-    );
-    assert_eq!(
-        &sig[3..],
-        expected_sig,
+    let msg_id = reqs_a[0]
+        .headers
+        .get("webhook-id")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(sig.starts_with("v1,"));
+    assert!(
+        verify_standard_webhook_sig(&secret_a, msg_id, ts, &reqs_a[0].body, sig),
         "Customer A signature must be verifiable with their secret"
     );
 
@@ -802,27 +805,23 @@ sources:
     let reqs_b = mock_b.received_requests().await.unwrap();
     assert_eq!(reqs_b.len(), 3);
 
-    // Verify the latest delivery uses the rotated secret
+    // Verify the latest delivery uses the rotated secret (Standard Webhooks format)
     let latest = &reqs_b[2];
     let sig = latest
         .headers
-        .get("X-Qhook-Signature")
+        .get("webhook-signature")
         .unwrap()
         .to_str()
         .unwrap();
     let ts = latest
         .headers
-        .get("X-Qhook-Timestamp")
+        .get("webhook-timestamp")
         .unwrap()
         .to_str()
         .unwrap();
-    let expected_sig = hmac_sha256(
-        &new_secret_b,
-        &format!("{}.{}", ts, std::str::from_utf8(&latest.body).unwrap()),
-    );
-    assert_eq!(
-        &sig[3..],
-        expected_sig,
+    let msg_id = latest.headers.get("webhook-id").unwrap().to_str().unwrap();
+    assert!(
+        verify_standard_webhook_sig(&new_secret_b, msg_id, ts, &latest.body, sig),
         "Latest delivery must use the rotated secret"
     );
 

@@ -50,14 +50,14 @@ curl -X POST http://localhost:8888/events/my-saas/order.created \
 The customer receiver logs:
 
 ```
-[VERIFIED] event_type=order.created event_id=01JXXXX delivery_id=01JYYYY payload={"order_id": "ord_001", "customer": "alice", "amount": 4999}
+[VERIFIED] event_type=order.created event_id=01JXXXX msg_id=01JYYYY payload={"order_id": "ord_001", "customer": "alice", "amount": 4999}
 ```
 
 ## What This Shows
 
 - **Dynamic endpoint registration** via Management API
 - **Per-endpoint signing secrets** with `whsec_` prefix
-- **HMAC-SHA256 signed delivery** with `X-Qhook-Signature: v1=...`
+- **Standard Webhooks compliant** signing with `webhook-signature: v1,...` headers
 - **Subscription-based routing** -- only subscribed event types are delivered
 - **Automatic retry** with exponential backoff on failure
 

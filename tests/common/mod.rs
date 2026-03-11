@@ -116,3 +116,37 @@ pub fn hmac_sha256(key: &str, data: &str) -> String {
     mac.update(data.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
+
+/// Verify a Standard Webhooks signature.
+/// Returns true if the signature matches the expected HMAC-SHA256.
+pub fn verify_standard_webhook_sig(
+    signing_secret: &str,
+    msg_id: &str,
+    timestamp: &str,
+    body: &[u8],
+    signature_header: &str,
+) -> bool {
+    use base64::Engine;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let sig_b64 = match signature_header.strip_prefix("v1,") {
+        Some(s) => s,
+        None => return false,
+    };
+    let key_bytes = base64::engine::general_purpose::STANDARD
+        .decode(
+            signing_secret
+                .strip_prefix("whsec_")
+                .unwrap_or(signing_secret),
+        )
+        .unwrap();
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key_bytes).unwrap();
+    mac.update(msg_id.as_bytes());
+    mac.update(b".");
+    mac.update(timestamp.as_bytes());
+    mac.update(b".");
+    mac.update(body);
+    let expected = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+    sig_b64 == expected
+}
