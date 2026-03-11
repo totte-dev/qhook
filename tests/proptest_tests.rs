@@ -334,7 +334,7 @@ fn arb_json_object() -> impl Strategy<Value = serde_json::Value> {
         Just(serde_json::Value::Null),
         any::<bool>().prop_map(serde_json::Value::Bool),
         any::<i32>().prop_map(|n| serde_json::json!(n)),
-        "[a-zA-Z0-9 _\\-]{0,50}".prop_map(|s| serde_json::Value::String(s)),
+        "[a-zA-Z0-9 _\\-]{0,50}".prop_map(serde_json::Value::String),
     ];
 
     leaf.prop_recursive(
