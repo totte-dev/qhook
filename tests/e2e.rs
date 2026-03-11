@@ -808,3 +808,105 @@ handlers:
 
     server.stop().await;
 }
+
+// Test 13: IP allowlist — localhost (127.0.0.1) is allowed
+
+#[tokio::test]
+async fn ip_allowlist_allowed() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/jobs/allowed"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock)
+        .await;
+
+    let yaml = format!(
+        r#"
+database:
+  driver: sqlite
+  url: "sqlite:__DB_PATH__?mode=rwc"
+server:
+  port: __PORT__
+  allow_private_urls: true
+sources:
+  test-source:
+    type: webhook
+    verify: hmac
+    secret: "test-secret"
+    allowed_ips:
+      - "127.0.0.1/8"
+handlers:
+  handler:
+    source: test-source
+    url: "{}/jobs/allowed"
+"#,
+        mock.uri()
+    );
+
+    let server = QhookProcess::start(&yaml, 19723).await;
+    let client = http();
+
+    let payload = r#"{"test": true}"#;
+    let sig = hmac_sha256("test-secret", payload);
+
+    let resp = client
+        .post(server.url("/webhooks/test-source"))
+        .header("Content-Type", "application/json")
+        .header("X-Webhook-Signature", &sig)
+        .body(payload)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+
+    wait_for_mock(&mock, 1, 5).await;
+    server.stop().await;
+}
+
+// Test 14: IP allowlist — request from non-allowed IP is rejected
+
+#[tokio::test]
+async fn ip_allowlist_rejected() {
+    let yaml = r#"
+database:
+  driver: sqlite
+  url: "sqlite:__DB_PATH__?mode=rwc"
+server:
+  port: __PORT__
+  allow_private_urls: true
+  trust_proxy: true
+sources:
+  restricted:
+    type: webhook
+    verify: hmac
+    secret: "test-secret"
+    allowed_ips:
+      - "10.0.0.0/8"
+handlers:
+  handler:
+    source: restricted
+    url: "http://localhost:9999/unused"
+"#;
+
+    let server = QhookProcess::start(yaml, 19724).await;
+    let client = http();
+
+    let payload = r#"{"test": true}"#;
+    let sig = hmac_sha256("test-secret", payload);
+
+    // Request from a non-allowed IP via X-Forwarded-For
+    let resp = client
+        .post(server.url("/webhooks/restricted"))
+        .header("Content-Type", "application/json")
+        .header("X-Webhook-Signature", &sig)
+        .header("X-Forwarded-For", "203.0.113.1")
+        .body(payload)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 403);
+
+    server.stop().await;
+}
