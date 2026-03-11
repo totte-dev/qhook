@@ -1,0 +1,14 @@
+# Outbound webhook example -- send webhooks to your customers
+database:
+  driver: sqlite
+
+server:
+  port: 8888
+  allow_private_urls: true
+
+api:
+  auth_token: ${QHOOK_API_TOKEN:-my-secret-token}
+
+sources:
+  my-saas:
+    type: outbound

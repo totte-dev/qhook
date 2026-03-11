@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-03-11
+
+### Added
+- **Outbound webhooks**: Send webhooks to your customers with per-endpoint HMAC-SHA256 signatures. New `type: outbound` source with dynamic endpoint management via REST API.
+  - `POST/GET /api/outbound/endpoints` — create and list customer endpoints
+  - `GET/PUT/DELETE /api/outbound/endpoints/:id` — manage individual endpoints
+  - `POST /api/outbound/endpoints/:id/rotate-secret` — rotate signing secret
+  - `POST/GET/DELETE /api/outbound/endpoints/:id/subscriptions` — event type subscriptions
+  - Per-endpoint signing secret (`whsec_` prefix) with `X-Qhook-Signature: v1=<hmac>` and `X-Qhook-Timestamp` headers
+  - Wildcard (`*`) subscriptions, fan-out to multiple endpoints, disable/enable toggle
+  - Reuses existing retry, DLQ, and circuit breaker infrastructure
+- **Example**: `examples/outbound-webhook/` — customer webhook receiver with signature verification
+- 10 outbound E2E tests + 1 full lifecycle scenario test (endpoint → subscribe → deliver → verify signature → disable → rotate secret)
+- TypeScript and Python SDK generation from OpenAPI spec (`sdks/generate.sh`)
+
 ## [0.4.0] - 2026-03-11
 
 ### Added
