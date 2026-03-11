@@ -1,0 +1,61 @@
+# qhook
+
+> Lightweight webhook gateway and workflow engine written in Rust. Single binary, zero external dependencies — no Redis, no RabbitMQ. SQLite for dev, Postgres for production. Receive webhooks with signature verification (11 providers), send outbound webhooks (Standard Webhooks), execute HTTP actions with retry, DLQ, and multi-step workflow orchestration.
+
+qhook handles the full lifecycle of webhook and event processing: receive events from external webhooks or internal APIs, route them to handlers or multi-step workflows, and deliver HTTP actions reliably with automatic retry, circuit breaker, and dead letter queue. Configuration is a single YAML file. Install via `cargo install qhook` or Docker (`ghcr.io/totte-dev/qhook`).
+
+Key capabilities:
+- Inbound webhook verification: GitHub, Stripe, Shopify, PagerDuty, Grafana, Terraform Cloud, GitLab, Linear, Standard Webhooks (Clerk/Resend/etc.), HMAC, AWS SNS X.509
+- Outbound webhooks with Standard Webhooks compliant signatures, dynamic endpoint management, and subscription-based routing
+- Workflow orchestration: multi-step pipelines with branching, parallelism, catch/rollback, and timeouts
+- Built-in queue with configurable retry (exponential backoff, jitter), dead letter queue, and stale job recovery
+- Event filtering with JSONPath expressions and payload transformation
+- Circuit breaker, rate limiting, and IP allowlisting per source
+- Prometheus metrics, health checks, Slack/Discord alerts, OpenTelemetry tracing
+- CLI tools: start, init, validate, send, inspect, doctor, tail, export, replay-local
+- CloudEvents support (binary and structured mode)
+- Cron triggers for periodic event generation
+
+## Documentation
+
+- [Home](https://totte-dev.github.io/qhook/): Overview, quick start, and documentation index
+- [Getting Started](https://totte-dev.github.io/qhook/getting-started): Installation, first config, first event
+- [Configuration Reference](https://totte-dev.github.io/qhook/configuration): Full YAML config reference (sources, handlers, workflows, database, alerting)
+- [CLI Reference](https://totte-dev.github.io/qhook/cli): All CLI commands, flags, and environment variables
+- [OpenAPI Specification](https://totte-dev.github.io/qhook/openapi.yaml): OpenAPI 3.1 spec for all HTTP endpoints
+- [Why qhook?](https://totte-dev.github.io/qhook/why-qhook): Use cases, comparisons, and positioning
+
+## Guides
+
+- [Webhook Verification](https://totte-dev.github.io/qhook/guides/webhook-verification): Setup for all 11 supported providers
+- [CloudEvents](https://totte-dev.github.io/qhook/guides/cloudevents): Binary and structured mode support
+- [AWS SNS](https://totte-dev.github.io/qhook/guides/sns): Receive events from SNS topics
+- [Workflows](https://totte-dev.github.io/qhook/guides/workflows): Multi-step pipelines with error routing and rollback
+- [Filtering & Transformation](https://totte-dev.github.io/qhook/guides/filtering): Event filtering and payload reshaping
+- [Monitoring](https://totte-dev.github.io/qhook/guides/monitoring): Prometheus metrics, health checks, and alerts
+- [Security](https://totte-dev.github.io/qhook/guides/security): Security features and best practices
+- [Local Development](https://totte-dev.github.io/qhook/guides/local-development): Dev mode, echo endpoint, test events, tunnels
+- [Database Schema](https://totte-dev.github.io/qhook/guides/database-schema): Tables, columns, indexes, and conventions
+- [Error Reference](https://totte-dev.github.io/qhook/guides/error-reference): HTTP status codes and error messages
+
+## Deployment
+
+- [AWS (ECS / EC2)](https://totte-dev.github.io/qhook/deploy/aws): Deploy on AWS with ECS or EC2
+- [Fly.io](https://totte-dev.github.io/qhook/deploy/flyio): Deploy on Fly.io
+- [Railway](https://totte-dev.github.io/qhook/deploy/railway): Deploy on Railway
+- [Render](https://totte-dev.github.io/qhook/deploy/render): Deploy on Render
+
+## Examples
+
+- [Quickstart](https://github.com/totte-dev/qhook/tree/main/examples/quickstart): Minimal setup, no Docker needed
+- [GitHub Webhook](https://github.com/totte-dev/qhook/tree/main/examples/github-webhook): GitHub push/PR with signature verification and fan-out
+- [Filter & Transform](https://github.com/totte-dev/qhook/tree/main/examples/filter-transform): Event filtering and payload transformation
+- [Stripe Checkout](https://github.com/totte-dev/qhook/tree/main/examples/stripe-checkout): Stripe checkout with dual handlers
+- [Workflow](https://github.com/totte-dev/qhook/tree/main/examples/workflow): Multi-step pipeline with catch routing
+- [Tenant Provisioning](https://github.com/totte-dev/qhook/tree/main/examples/tenant-provision): Tenant provisioning with rollback and auth headers
+- [Alert Remediation](https://github.com/totte-dev/qhook/tree/main/examples/alert-remediation): PagerDuty alert triage, remediate, and escalate
+
+## Optional
+
+- [GitHub Repository](https://github.com/totte-dev/qhook): Source code, issues, and discussions
+- [crates.io](https://crates.io/crates/qhook): Rust package registry listing

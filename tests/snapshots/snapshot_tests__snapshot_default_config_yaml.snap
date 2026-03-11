@@ -1,0 +1,64 @@
+---
+source: tests/snapshot_tests.rs
+expression: default_yaml
+---
+# yaml-language-server: $schema=https://totte-dev.github.io/qhook/schema.json
+# qhook.yaml
+
+database:
+  driver: sqlite  # sqlite (default) / postgres / mysql
+  # url: ${DATABASE_URL}
+
+server:
+  port: 8888
+  # allow_private_urls: true   # Allow localhost/private IPs in handler URLs (dev only)
+  # trust_proxy: true          # Trust X-Forwarded-For for rate limiting (behind reverse proxy)
+  # ip_rate_limit: 100         # Per-IP requests/sec (0 = disabled)
+
+# api:
+#   auth_token: ${QHOOK_API_TOKEN}
+
+delivery:
+  # signing_secret: ${QHOOK_SIGNING_SECRET}
+  timeout: 30s
+  default_retry:
+    max: 5
+    backoff: exponential
+    interval: 30s
+
+sources:
+  # stripe:
+  #   type: webhook
+  #   verify: stripe
+  #   secret: ${STRIPE_WEBHOOK_SECRET}
+  app:
+    type: event
+
+handlers: {}
+  # payment-success:
+  #   source: stripe
+  #   events: [checkout.session.completed, invoice.paid]
+  #   url: http://localhost:3000/jobs/payment
+  #   retry: { max: 5 }
+  #   idempotency_key: "$.id"
+  #   type: http
+  #   filter: "$.status == paid"
+  #   transform: '{"event_id": "{{$.id}}", "amount": {{$.data.amount}}}'
+
+# workflows:
+#   order-pipeline:
+#     source: app
+#     events: [order.created]
+#     steps:
+#       - name: validate
+#         url: http://localhost:3000/validate
+#       - name: fulfill
+#         url: http://localhost:3000/fulfill
+#       - name: notify
+#         url: http://localhost:3000/notify
+#         end: true
+
+# alerts:
+#   url: ${SLACK_WEBHOOK_URL}
+#   type: slack  # slack / discord / generic
+#   on: [dlq, verification_failure]

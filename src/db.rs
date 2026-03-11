@@ -56,6 +56,10 @@ impl Database {
                 .url
                 .clone()
                 .context("database.url is required for postgres")?,
+            "mysql" => config
+                .url
+                .clone()
+                .context("database.url is required for mysql")?,
             other => anyhow::bail!("Unsupported database driver: {other}"),
         };
 
@@ -112,95 +116,173 @@ impl Database {
             current_version
         };
 
-        let migrations: &[(i32, &str, &[&str])] = &[
+        let is_mysql = self.driver == "mysql";
+
+        // MySQL requires VARCHAR for primary keys and indexed columns (TEXT cannot be indexed).
+        // SQLite and PostgreSQL use TEXT for all string columns.
+        let migrations: Vec<(i32, &str, Vec<String>)> = vec![
             // v1: Core tables (events, jobs, job_attempts)
             (
                 1,
                 "Core tables",
-                &[
-                    "CREATE TABLE IF NOT EXISTS events (
-                    id TEXT PRIMARY KEY, source TEXT NOT NULL, event_type TEXT NOT NULL,
-                    payload TEXT NOT NULL, headers TEXT, unique_key TEXT, created_at TEXT NOT NULL
-                )",
-                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_unique ON events (source, unique_key)",
-                    "CREATE TABLE IF NOT EXISTS jobs (
-                    id TEXT PRIMARY KEY, event_id TEXT NOT NULL, handler TEXT NOT NULL,
-                    url TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'available',
-                    attempt INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL DEFAULT 5,
-                    scheduled_at TEXT NOT NULL, started_at TEXT, completed_at TEXT,
-                    created_at TEXT NOT NULL, last_error TEXT
-                )",
-                    "CREATE INDEX IF NOT EXISTS idx_jobs_fetch ON jobs (status, scheduled_at)",
-                    "CREATE TABLE IF NOT EXISTS job_attempts (
-                    id TEXT PRIMARY KEY, job_id TEXT NOT NULL, attempt INTEGER NOT NULL,
-                    status_code INTEGER, response_body TEXT, error TEXT,
-                    duration_ms INTEGER, created_at TEXT NOT NULL
-                )",
-                ],
+                if is_mysql {
+                    vec![
+                        "CREATE TABLE IF NOT EXISTS events (
+                        id VARCHAR(255) PRIMARY KEY, source VARCHAR(255) NOT NULL, event_type VARCHAR(255) NOT NULL,
+                        payload TEXT NOT NULL, headers TEXT, unique_key VARCHAR(255), created_at VARCHAR(255) NOT NULL
+                    )".into(),
+                        "CREATE UNIQUE INDEX idx_events_unique ON events (source, unique_key)".into(),
+                        "CREATE TABLE IF NOT EXISTS jobs (
+                        id VARCHAR(255) PRIMARY KEY, event_id VARCHAR(255) NOT NULL, handler VARCHAR(255) NOT NULL,
+                        url TEXT NOT NULL, status VARCHAR(255) NOT NULL DEFAULT 'available',
+                        attempt INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL DEFAULT 5,
+                        scheduled_at VARCHAR(255) NOT NULL, started_at VARCHAR(255), completed_at VARCHAR(255),
+                        created_at VARCHAR(255) NOT NULL, last_error TEXT
+                    )".into(),
+                        "CREATE INDEX idx_jobs_fetch ON jobs (status, scheduled_at)".into(),
+                        "CREATE TABLE IF NOT EXISTS job_attempts (
+                        id VARCHAR(255) PRIMARY KEY, job_id VARCHAR(255) NOT NULL, attempt INTEGER NOT NULL,
+                        status_code INTEGER, response_body TEXT, error TEXT,
+                        duration_ms INTEGER, created_at VARCHAR(255) NOT NULL
+                    )".into(),
+                    ]
+                } else {
+                    vec![
+                        "CREATE TABLE IF NOT EXISTS events (
+                        id TEXT PRIMARY KEY, source TEXT NOT NULL, event_type TEXT NOT NULL,
+                        payload TEXT NOT NULL, headers TEXT, unique_key TEXT, created_at TEXT NOT NULL
+                    )".into(),
+                        "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_unique ON events (source, unique_key)".into(),
+                        "CREATE TABLE IF NOT EXISTS jobs (
+                        id TEXT PRIMARY KEY, event_id TEXT NOT NULL, handler TEXT NOT NULL,
+                        url TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'available',
+                        attempt INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL DEFAULT 5,
+                        scheduled_at TEXT NOT NULL, started_at TEXT, completed_at TEXT,
+                        created_at TEXT NOT NULL, last_error TEXT
+                    )".into(),
+                        "CREATE INDEX IF NOT EXISTS idx_jobs_fetch ON jobs (status, scheduled_at)".into(),
+                        "CREATE TABLE IF NOT EXISTS job_attempts (
+                        id TEXT PRIMARY KEY, job_id TEXT NOT NULL, attempt INTEGER NOT NULL,
+                        status_code INTEGER, response_body TEXT, error TEXT,
+                        duration_ms INTEGER, created_at TEXT NOT NULL
+                    )".into(),
+                    ]
+                },
             ),
             // v2: Workflow engine
             (
                 2,
                 "Workflow tables",
-                &[
-                    "CREATE TABLE IF NOT EXISTS workflow_runs (
-                    id TEXT PRIMARY KEY, workflow TEXT NOT NULL, event_id TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'running', current_step TEXT,
-                    created_at TEXT NOT NULL, completed_at TEXT
-                )",
-                    "CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs (status)",
-                    "ALTER TABLE jobs ADD COLUMN workflow_run_id TEXT",
-                    "ALTER TABLE jobs ADD COLUMN step_name TEXT",
-                    "ALTER TABLE jobs ADD COLUMN step_index INTEGER",
-                    "ALTER TABLE jobs ADD COLUMN step_input TEXT",
-                    "ALTER TABLE jobs ADD COLUMN step_output TEXT",
-                    "ALTER TABLE jobs ADD COLUMN branch_name TEXT",
-                ],
+                if is_mysql {
+                    vec![
+                        "CREATE TABLE IF NOT EXISTS workflow_runs (
+                        id VARCHAR(255) PRIMARY KEY, workflow VARCHAR(255) NOT NULL, event_id VARCHAR(255) NOT NULL,
+                        status VARCHAR(255) NOT NULL DEFAULT 'running', current_step VARCHAR(255),
+                        created_at VARCHAR(255) NOT NULL, completed_at VARCHAR(255)
+                    )".into(),
+                        "CREATE INDEX idx_workflow_runs_status ON workflow_runs (status)".into(),
+                        "ALTER TABLE jobs ADD COLUMN workflow_run_id VARCHAR(255)".into(),
+                        "ALTER TABLE jobs ADD COLUMN step_name VARCHAR(255)".into(),
+                        "ALTER TABLE jobs ADD COLUMN step_index INTEGER".into(),
+                        "ALTER TABLE jobs ADD COLUMN step_input TEXT".into(),
+                        "ALTER TABLE jobs ADD COLUMN step_output TEXT".into(),
+                        "ALTER TABLE jobs ADD COLUMN branch_name VARCHAR(255)".into(),
+                    ]
+                } else {
+                    vec![
+                        "CREATE TABLE IF NOT EXISTS workflow_runs (
+                        id TEXT PRIMARY KEY, workflow TEXT NOT NULL, event_id TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'running', current_step TEXT,
+                        created_at TEXT NOT NULL, completed_at TEXT
+                    )".into(),
+                        "CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs (status)".into(),
+                        "ALTER TABLE jobs ADD COLUMN workflow_run_id TEXT".into(),
+                        "ALTER TABLE jobs ADD COLUMN step_name TEXT".into(),
+                        "ALTER TABLE jobs ADD COLUMN step_index INTEGER".into(),
+                        "ALTER TABLE jobs ADD COLUMN step_input TEXT".into(),
+                        "ALTER TABLE jobs ADD COLUMN step_output TEXT".into(),
+                        "ALTER TABLE jobs ADD COLUMN branch_name TEXT".into(),
+                    ]
+                },
             ),
             // v3: Workflow extensions (parallel, timeout, sub-workflow, callback)
             (
                 3,
                 "Workflow extensions",
-                &[
-                    "ALTER TABLE workflow_runs ADD COLUMN parallel_step TEXT",
-                    "ALTER TABLE workflow_runs ADD COLUMN parallel_count INTEGER DEFAULT 0",
-                    "ALTER TABLE workflow_runs ADD COLUMN parallel_completed INTEGER DEFAULT 0",
-                    "ALTER TABLE workflow_runs ADD COLUMN timeout_at TEXT",
-                    "ALTER TABLE workflow_runs ADD COLUMN parent_run_id TEXT",
-                    "ALTER TABLE workflow_runs ADD COLUMN parent_step_index INTEGER",
-                    "ALTER TABLE jobs ADD COLUMN callback_token TEXT",
-                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_callback_token ON jobs (callback_token)",
-                ],
+                if is_mysql {
+                    vec![
+                        "ALTER TABLE workflow_runs ADD COLUMN parallel_step VARCHAR(255)".into(),
+                        "ALTER TABLE workflow_runs ADD COLUMN parallel_count INTEGER DEFAULT 0"
+                            .into(),
+                        "ALTER TABLE workflow_runs ADD COLUMN parallel_completed INTEGER DEFAULT 0"
+                            .into(),
+                        "ALTER TABLE workflow_runs ADD COLUMN timeout_at VARCHAR(255)".into(),
+                        "ALTER TABLE workflow_runs ADD COLUMN parent_run_id VARCHAR(255)".into(),
+                        "ALTER TABLE workflow_runs ADD COLUMN parent_step_index INTEGER".into(),
+                        "ALTER TABLE jobs ADD COLUMN callback_token VARCHAR(255)".into(),
+                        "CREATE UNIQUE INDEX idx_jobs_callback_token ON jobs (callback_token)"
+                            .into(),
+                    ]
+                } else {
+                    vec![
+                        "ALTER TABLE workflow_runs ADD COLUMN parallel_step TEXT".into(),
+                        "ALTER TABLE workflow_runs ADD COLUMN parallel_count INTEGER DEFAULT 0".into(),
+                        "ALTER TABLE workflow_runs ADD COLUMN parallel_completed INTEGER DEFAULT 0".into(),
+                        "ALTER TABLE workflow_runs ADD COLUMN timeout_at TEXT".into(),
+                        "ALTER TABLE workflow_runs ADD COLUMN parent_run_id TEXT".into(),
+                        "ALTER TABLE workflow_runs ADD COLUMN parent_step_index INTEGER".into(),
+                        "ALTER TABLE jobs ADD COLUMN callback_token TEXT".into(),
+                        "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_callback_token ON jobs (callback_token)".into(),
+                    ]
+                },
             ),
             // v4: Outbound webhooks
             (
                 4,
                 "Outbound webhooks",
-                &[
-                    "CREATE TABLE IF NOT EXISTS outbound_endpoints (
-                    id TEXT PRIMARY KEY, source TEXT NOT NULL, url TEXT NOT NULL,
-                    description TEXT, signing_secret TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'active',
-                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-                )",
-                    "CREATE TABLE IF NOT EXISTS outbound_subscriptions (
-                    id TEXT PRIMARY KEY, endpoint_id TEXT NOT NULL,
-                    event_type TEXT NOT NULL, created_at TEXT NOT NULL
-                )",
-                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_outbound_sub_unique ON outbound_subscriptions (endpoint_id, event_type)",
-                    "CREATE INDEX IF NOT EXISTS idx_outbound_endpoints_source ON outbound_endpoints (source, status)",
-                ],
+                if is_mysql {
+                    vec![
+                        "CREATE TABLE IF NOT EXISTS outbound_endpoints (
+                        id VARCHAR(255) PRIMARY KEY, source VARCHAR(255) NOT NULL, url TEXT NOT NULL,
+                        description TEXT, signing_secret VARCHAR(255) NOT NULL,
+                        status VARCHAR(255) NOT NULL DEFAULT 'active',
+                        created_at VARCHAR(255) NOT NULL, updated_at VARCHAR(255) NOT NULL
+                    )".into(),
+                        "CREATE TABLE IF NOT EXISTS outbound_subscriptions (
+                        id VARCHAR(255) PRIMARY KEY, endpoint_id VARCHAR(255) NOT NULL,
+                        event_type VARCHAR(255) NOT NULL, created_at VARCHAR(255) NOT NULL
+                    )".into(),
+                        "CREATE UNIQUE INDEX idx_outbound_sub_unique ON outbound_subscriptions (endpoint_id, event_type)".into(),
+                        "CREATE INDEX idx_outbound_endpoints_source ON outbound_endpoints (source, status)".into(),
+                    ]
+                } else {
+                    vec![
+                        "CREATE TABLE IF NOT EXISTS outbound_endpoints (
+                        id TEXT PRIMARY KEY, source TEXT NOT NULL, url TEXT NOT NULL,
+                        description TEXT, signing_secret TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'active',
+                        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                    )".into(),
+                        "CREATE TABLE IF NOT EXISTS outbound_subscriptions (
+                        id TEXT PRIMARY KEY, endpoint_id TEXT NOT NULL,
+                        event_type TEXT NOT NULL, created_at TEXT NOT NULL
+                    )".into(),
+                        "CREATE UNIQUE INDEX IF NOT EXISTS idx_outbound_sub_unique ON outbound_subscriptions (endpoint_id, event_type)".into(),
+                        "CREATE INDEX IF NOT EXISTS idx_outbound_endpoints_source ON outbound_endpoints (source, status)".into(),
+                    ]
+                },
             ),
         ];
 
-        for (version, name, queries) in migrations {
+        for (version, name, queries) in &migrations {
             if *version <= effective_version {
                 continue;
             }
             tracing::info!(version, name, "Applying migration");
-            for sql in *queries {
+            for sql in queries {
                 // ALTER TABLE ADD COLUMN may fail if column already exists — that's OK
-                if sql.contains("ALTER TABLE") {
+                // MySQL CREATE INDEX (without IF NOT EXISTS) may also fail if index exists
+                if sql.contains("ALTER TABLE") || (is_mysql && sql.contains("CREATE INDEX")) {
                     sqlx::query(sql).execute(&self.pool).await.ok();
                 } else {
                     sqlx::query(sql).execute(&self.pool).await?;
@@ -233,20 +315,36 @@ impl Database {
 
         // Try insert; if unique_key conflicts, return false (duplicate)
         if unique_key.is_some() {
-            let result = sqlx::query(
-                "INSERT INTO events (id, source, event_type, payload, headers, unique_key, created_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7) \
-                 ON CONFLICT (source, unique_key) DO NOTHING",
-            )
-            .bind(id)
-            .bind(source)
-            .bind(event_type)
-            .bind(payload)
-            .bind(headers)
-            .bind(unique_key)
-            .bind(&now)
-            .execute(&self.pool)
-            .await?;
+            let result = if self.driver == "mysql" {
+                sqlx::query(
+                    "INSERT IGNORE INTO events (id, source, event_type, payload, headers, unique_key, created_at) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                )
+                .bind(id)
+                .bind(source)
+                .bind(event_type)
+                .bind(payload)
+                .bind(headers)
+                .bind(unique_key)
+                .bind(&now)
+                .execute(&self.pool)
+                .await?
+            } else {
+                sqlx::query(
+                    "INSERT INTO events (id, source, event_type, payload, headers, unique_key, created_at) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                     ON CONFLICT (source, unique_key) DO NOTHING",
+                )
+                .bind(id)
+                .bind(source)
+                .bind(event_type)
+                .bind(payload)
+                .bind(headers)
+                .bind(unique_key)
+                .bind(&now)
+                .execute(&self.pool)
+                .await?
+            };
 
             Ok(result.rows_affected() > 0)
         } else {
@@ -296,6 +394,7 @@ impl Database {
 
     /// Fetch jobs ready for processing.
     /// For Postgres: uses FOR UPDATE SKIP LOCKED + immediate status update in one query.
+    /// For MySQL: uses FOR UPDATE SKIP LOCKED but without RETURNING (separate SELECT).
     /// For SQLite: plain SELECT (use mark_job_running separately).
     pub async fn fetch_available_jobs(&self, limit: i32) -> Result<Vec<JobRow>> {
         let now = format_now();
@@ -343,7 +442,7 @@ impl Database {
         Ok(rows)
     }
 
-    /// Mark a job as running (SQLite only — Postgres does this in fetch_available_jobs).
+    /// Mark a job as running (SQLite/MySQL only — Postgres does this in fetch_available_jobs).
     pub async fn mark_job_running(&self, job_id: &str) -> Result<bool> {
         let now = format_now();
 
@@ -946,8 +1045,9 @@ impl Database {
             .await?;
             Ok(row)
         } else {
-            // SQLite: single writer guarantees atomicity, but use a subquery to read
-            // the updated values in one statement to avoid TOCTOU.
+            // SQLite: single writer guarantees atomicity.
+            // MySQL: no RETURNING clause, so use UPDATE + SELECT.
+            // For MySQL, callers should use appropriate locking at the application level.
             sqlx::query(
                 "UPDATE workflow_runs SET parallel_completed = parallel_completed + 1 WHERE id = $1",
             )
@@ -955,8 +1055,6 @@ impl Database {
             .execute(&self.pool)
             .await?;
 
-            // SQLite is single-writer, so no concurrent UPDATE can interleave here.
-            // The WAL journal mode serializes all writes.
             let row: (i32, i32) = sqlx::query_as(
                 "SELECT parallel_completed, parallel_count FROM workflow_runs WHERE id = $1",
             )
@@ -1528,17 +1626,30 @@ impl Database {
         let mut created = Vec::new();
         for event_type in event_types {
             let id = ulid::Ulid::new().to_string();
-            let result = sqlx::query(
-                "INSERT INTO outbound_subscriptions (id, endpoint_id, event_type, created_at) \
-                 VALUES ($1, $2, $3, $4) \
-                 ON CONFLICT (endpoint_id, event_type) DO NOTHING",
-            )
-            .bind(&id)
-            .bind(endpoint_id)
-            .bind(event_type)
-            .bind(&now)
-            .execute(&self.pool)
-            .await?;
+            let result = if self.driver == "mysql" {
+                sqlx::query(
+                    "INSERT IGNORE INTO outbound_subscriptions (id, endpoint_id, event_type, created_at) \
+                     VALUES ($1, $2, $3, $4)",
+                )
+                .bind(&id)
+                .bind(endpoint_id)
+                .bind(event_type)
+                .bind(&now)
+                .execute(&self.pool)
+                .await?
+            } else {
+                sqlx::query(
+                    "INSERT INTO outbound_subscriptions (id, endpoint_id, event_type, created_at) \
+                     VALUES ($1, $2, $3, $4) \
+                     ON CONFLICT (endpoint_id, event_type) DO NOTHING",
+                )
+                .bind(&id)
+                .bind(endpoint_id)
+                .bind(event_type)
+                .bind(&now)
+                .execute(&self.pool)
+                .await?
+            };
             if result.rows_affected() > 0 {
                 created.push(SubscriptionRow {
                     id,

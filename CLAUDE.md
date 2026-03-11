@@ -96,7 +96,7 @@ src/
   db.rs         — SQLite/Postgres via sqlx AnyPool
   metrics.rs    — Prometheus metrics (atomic counters, no deps)
   queue.rs      — Job worker (poll, deliver, retry, DLQ)
-  verify.rs     — Signature verification (GitHub, Stripe, Shopify, HMAC, SNS X.509)
+  verify.rs     — Signature verification (GitHub, Stripe, Shopify, Twilio, Paddle, HMAC, SNS X.509)
   cli.rs        — CLI commands (start, init, validate, send, inspect, doctor, tail, export, jobs, events, replay, replay-local)
   alert.rs      — Alert system (Slack, Discord, generic webhook)
   templates/    — Config templates (default, github, stripe, sns, cron, local overlay)
@@ -136,7 +136,7 @@ docs/               — GitHub Pages user guide (Jekyll, Cayman theme)
 - **Language**: Code, comments, and all documentation in English. Exception: `docs/private/` may be in Japanese. User communication in Japanese.
 - **Source type strings**: `webhook`, `event`, `sns`, `cron` (in config YAML and source_type field).
 - **Event type extraction order**: CloudEvents `ce-type` header → structured mode `type` field → provider-specific logic.
-- **Database**: SQLite for dev/testing, Postgres for production. Both via sqlx AnyPool.
+- **Database**: SQLite for dev/testing, Postgres or MySQL for production. All via sqlx AnyPool.
 - **IDs**: ULID for event_id and job_id.
 - **Timestamps**: UTC, format `%Y-%m-%dT%H:%M:%S%.3f` stored as TEXT.
 - **Config env vars**: `${VAR}` or `${VAR:-default}` syntax.

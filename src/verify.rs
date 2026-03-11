@@ -22,6 +22,8 @@ pub fn verify_signature(
         "gitlab" => verify_gitlab(secret, payload, headers),
         "standard-webhooks" => verify_standard_webhooks(secret, payload, headers),
         "linear" => verify_linear(secret, payload, headers),
+        "twilio" => verify_twilio(secret, payload, headers),
+        "paddle" => verify_paddle(secret, payload, headers),
         _ => anyhow::bail!("Unknown verification provider: {provider}"),
     }
 }
@@ -262,6 +264,76 @@ fn verify_linear(secret: &str, payload: &[u8], headers: &axum::http::HeaderMap) 
 
     let expected = compute_hmac_sha256_hex(secret.as_bytes(), payload);
     Ok(constant_time_eq(&expected, sig_header))
+}
+
+fn verify_twilio(secret: &str, payload: &[u8], headers: &axum::http::HeaderMap) -> Result<bool> {
+    use base64::Engine;
+
+    let sig_header = headers
+        .get("X-Twilio-Signature")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if sig_header.is_empty() {
+        return Ok(false);
+    }
+
+    // Twilio uses HMAC-SHA1(auth_token, body) → base64
+    type HmacSha1 = Hmac<sha1::Sha1>;
+    let mut mac =
+        HmacSha1::new_from_slice(secret.as_bytes()).expect("HMAC-SHA1 accepts any key length");
+    mac.update(payload);
+    let expected = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+    Ok(constant_time_eq(&expected, sig_header))
+}
+
+fn verify_paddle(secret: &str, payload: &[u8], headers: &axum::http::HeaderMap) -> Result<bool> {
+    let sig_header = headers
+        .get("Paddle-Signature")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    // Parse ts=...;h1=... format
+    let mut timestamp = "";
+    let mut signature = "";
+    for part in sig_header.split(';') {
+        let part = part.trim();
+        if let Some(t) = part.strip_prefix("ts=") {
+            timestamp = t;
+        } else if let Some(h) = part.strip_prefix("h1=") {
+            signature = h;
+        }
+    }
+
+    if timestamp.is_empty() || signature.is_empty() {
+        return Ok(false);
+    }
+
+    // Reject signatures older than 5 minutes to prevent replay attacks
+    const TOLERANCE_SECS: i64 = 300;
+    if let Ok(ts) = timestamp.parse::<i64>() {
+        let now = chrono::Utc::now().timestamp();
+        if (now - ts).abs() > TOLERANCE_SECS {
+            tracing::warn!(
+                timestamp = ts,
+                now = now,
+                "Paddle signature timestamp too old or too far in the future"
+            );
+            return Ok(false);
+        }
+    } else {
+        return Ok(false);
+    }
+
+    // Paddle signs: HMAC-SHA256(secret, "timestamp:body") → hex
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key length");
+    mac.update(timestamp.as_bytes());
+    mac.update(b":");
+    mac.update(payload);
+    let expected = hex::encode(mac.finalize().into_bytes());
+
+    Ok(constant_time_eq(&expected, signature))
 }
 
 fn compute_hmac_sha256_hex(key: &[u8], data: &[u8]) -> String {
@@ -1233,6 +1305,156 @@ mod tests {
         headers.insert("Linear-Signature", sig.parse().unwrap());
 
         assert!(verify_signature("linear", secret, payload, &headers).unwrap());
+    }
+
+    // --- Twilio verification ---
+
+    #[test]
+    fn test_twilio_signature_valid() {
+        use base64::Engine;
+        let secret = "twilio_auth_token";
+        let payload = b"{\"AccountSid\":\"AC123\",\"Body\":\"Hello\"}";
+
+        // Compute HMAC-SHA1(secret, payload) -> base64
+        type HmacSha1 = Hmac<sha1::Sha1>;
+        let mut mac = HmacSha1::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(payload);
+        let expected =
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Twilio-Signature", expected.parse().unwrap());
+
+        assert!(verify_twilio(secret, payload, &headers).unwrap());
+    }
+
+    #[test]
+    fn test_twilio_signature_invalid() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Twilio-Signature",
+            "aW52YWxpZHNpZ25hdHVyZQ==".parse().unwrap(),
+        );
+        assert!(!verify_twilio("secret", b"payload", &headers).unwrap());
+    }
+
+    #[test]
+    fn test_twilio_signature_missing() {
+        let headers = HeaderMap::new();
+        assert!(!verify_twilio("secret", b"payload", &headers).unwrap());
+    }
+
+    #[test]
+    fn test_verify_signature_dispatches_twilio() {
+        use base64::Engine;
+        let secret = "twilio_key";
+        let payload = b"test";
+
+        type HmacSha1 = Hmac<sha1::Sha1>;
+        let mut mac = HmacSha1::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(payload);
+        let sig = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Twilio-Signature", sig.parse().unwrap());
+
+        assert!(verify_signature("twilio", secret, payload, &headers).unwrap());
+    }
+
+    // --- Paddle verification ---
+
+    #[test]
+    fn test_paddle_signature_valid() {
+        let secret = "pdl_ntfset_abc123_secret";
+        let payload = b"{\"event_type\":\"subscription.created\",\"data\":{}}";
+        let timestamp = chrono::Utc::now().timestamp().to_string();
+
+        // Paddle signs: HMAC-SHA256(secret, timestamp + ":" + body) -> hex
+        let signed = format!("{}:{}", timestamp, String::from_utf8_lossy(payload));
+        let expected = compute_hmac_sha256_hex(secret.as_bytes(), signed.as_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Paddle-Signature",
+            format!("ts={};h1={}", timestamp, expected).parse().unwrap(),
+        );
+
+        assert!(verify_paddle(secret, payload, &headers).unwrap());
+    }
+
+    #[test]
+    fn test_paddle_signature_invalid() {
+        let timestamp = chrono::Utc::now().timestamp().to_string();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Paddle-Signature",
+            format!(
+                "ts={};h1=0000000000000000000000000000000000000000000000000000000000000000",
+                timestamp
+            )
+            .parse()
+            .unwrap(),
+        );
+        assert!(!verify_paddle("secret", b"payload", &headers).unwrap());
+    }
+
+    #[test]
+    fn test_paddle_signature_missing() {
+        let headers = HeaderMap::new();
+        assert!(!verify_paddle("secret", b"payload", &headers).unwrap());
+    }
+
+    #[test]
+    fn test_paddle_signature_expired() {
+        let secret = "pdl_secret";
+        let payload = b"{}";
+        // 10 minutes ago — should be rejected
+        let timestamp = (chrono::Utc::now().timestamp() - 600).to_string();
+
+        let signed = format!("{}:{}", timestamp, String::from_utf8_lossy(payload));
+        let expected = compute_hmac_sha256_hex(secret.as_bytes(), signed.as_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Paddle-Signature",
+            format!("ts={};h1={}", timestamp, expected).parse().unwrap(),
+        );
+
+        assert!(!verify_paddle(secret, payload, &headers).unwrap());
+    }
+
+    #[test]
+    fn test_paddle_signature_no_h1_prefix() {
+        let secret = "pdl_secret";
+        let payload = b"data";
+        let timestamp = chrono::Utc::now().timestamp().to_string();
+        let signed = format!("{}:{}", timestamp, String::from_utf8_lossy(payload));
+        let sig = compute_hmac_sha256_hex(secret.as_bytes(), signed.as_bytes());
+
+        let mut headers = HeaderMap::new();
+        // Missing h1= prefix in header — should fail
+        headers.insert(
+            "Paddle-Signature",
+            format!("ts={};{}", timestamp, sig).parse().unwrap(),
+        );
+        assert!(!verify_paddle(secret, payload, &headers).unwrap());
+    }
+
+    #[test]
+    fn test_verify_signature_dispatches_paddle() {
+        let secret = "pdl_key";
+        let payload = b"test";
+        let timestamp = chrono::Utc::now().timestamp().to_string();
+        let signed = format!("{}:{}", timestamp, String::from_utf8_lossy(payload));
+        let sig = compute_hmac_sha256_hex(secret.as_bytes(), signed.as_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Paddle-Signature",
+            format!("ts={};h1={}", timestamp, sig).parse().unwrap(),
+        );
+
+        assert!(verify_signature("paddle", secret, payload, &headers).unwrap());
     }
 
     // --- Outbound signing ---

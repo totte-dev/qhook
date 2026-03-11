@@ -1,6 +1,6 @@
 # qhook
 
-**Lightweight workflow engine with built-in queue and retry.** Receive webhooks and API events, execute HTTP actions reliably — single binary, zero infrastructure.
+**Queue-first webhook gateway with built-in retry and workflow engine.** Verify, enqueue, ACK — then deliver reliably. Single binary, zero infrastructure.
 
 <!-- badges -->
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
@@ -13,11 +13,18 @@
 
 ## What qhook Does
 
-1. **Receive** events from two entry points:
-   - **Webhooks** (external) — Stripe, GitHub, PagerDuty, etc. with signature verification
-   - **API** (internal) — your apps, IDP, CI/CD trigger events via `POST /events/{source}/{event_type}` (or `POST /events/{event_type}` with default source)
-2. **Execute** HTTP actions reliably — one call or a multi-step pipeline
-3. **Handle** failures — retry, error routing, rollback, Dead Letter Queue
+Every incoming webhook or API event follows the same reliable path:
+
+```
+  verify → enqueue → ACK (< 500ms) → deliver → retry/DLQ
+```
+
+1. **Verify** — signature validation for 13+ providers (Stripe, GitHub, Shopify, Twilio, Paddle, Standard Webhooks, etc.)
+2. **Enqueue** — persist to SQLite/Postgres/MySQL before responding. No event is lost.
+3. **ACK** — return 200/202 immediately. Your webhook source never times out.
+4. **Deliver** — POST to your handlers with retry, backoff, circuit breaker, and DLQ.
+
+This is the [queue-first architecture](https://totte-dev.github.io/qhook/why-qhook) recommended by every production webhook guide — built into qhook by default.
 
 ```
 Simple:                           Multi-step:
@@ -28,8 +35,8 @@ Simple:                           Multi-step:
 
 ## Why qhook?
 
-- **Zero infrastructure.** Single binary, SQLite for dev, Postgres for production. No Redis, no message broker.
-- **Webhook verification built in.** GitHub, Stripe, Shopify, PagerDuty, Grafana, Terraform Cloud, GitLab, Linear, Standard Webhooks (Clerk/Resend/etc.), HMAC, AWS SNS X.509. IP allowlisting per source.
+- **Zero infrastructure.** Single binary, SQLite for dev, Postgres or MySQL for production. No Redis, no message broker.
+- **Webhook verification built in.** GitHub, Stripe, Shopify, Twilio, Paddle, PagerDuty, Grafana, Terraform Cloud, GitLab, Linear, Standard Webhooks (Clerk/Resend/etc.), HMAC, AWS SNS X.509. IP allowlisting per source.
 - **Outbound webhooks.** Send webhooks to your customers with [Standard Webhooks](https://www.standardwebhooks.com/) compliant signatures. Dynamic endpoint management, subscription-based routing, per-endpoint signing secrets.
 - **From one action to a pipeline.** Start with a single HTTP call; grow into multi-step workflows with branching, parallelism, and rollback — same YAML, same engine.
 - **Production ready.** Prometheus metrics, health checks, Slack/Discord alerts, rate limiting, circuit breaker, OpenTelemetry tracing, structured logging.
@@ -188,6 +195,7 @@ Full documentation at **[totte-dev.github.io/qhook](https://totte-dev.github.io/
 | Filtering & Transformation | [guides/filtering](https://totte-dev.github.io/qhook/guides/filtering) |
 | Monitoring & Alerts | [guides/monitoring](https://totte-dev.github.io/qhook/guides/monitoring) |
 | Security | [guides/security](https://totte-dev.github.io/qhook/guides/security) |
+| Compliance & Audit Trail | [guides/compliance](https://totte-dev.github.io/qhook/guides/compliance) |
 | Deployment | [deploy](https://totte-dev.github.io/qhook/deploy) |
 | Why qhook? | [why-qhook](https://totte-dev.github.io/qhook/why-qhook) |
 

@@ -88,6 +88,8 @@ hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 ulid = "1"
+proptest = "1"
+insta = { version = "1", features = ["json", "yaml"] }
 
 [features]
 default = []

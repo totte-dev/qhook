@@ -1,0 +1,5 @@
+---
+source: tests/snapshot_tests.rs
+expression: config_error(yaml)
+---
+workflow 'empty-flow' has no steps

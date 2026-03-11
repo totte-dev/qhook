@@ -5,12 +5,13 @@ title: Home
 
 # qhook
 
-**Lightweight workflow engine with built-in queue and retry.** Receive webhooks and API events, execute HTTP actions reliably — single binary, zero infrastructure.
+**Queue-first webhook gateway with built-in retry and workflow engine.** Verify, enqueue, ACK — then deliver reliably. Single binary, zero infrastructure.
 
-- **Two entry points.** Receive external webhooks (with signature verification for 9 providers) and internal API events (`POST /events/:source/:type`) through the same engine.
-- **Zero infrastructure.** Single binary, SQLite for dev, Postgres for production. No Redis, no message broker.
+- **Queue-first by default.** Every event is persisted before acknowledgment — no event is lost, even if downstream is down.
+- **Zero infrastructure.** Single binary, SQLite for dev, Postgres or MySQL for production. No Redis, no message broker.
+- **11+ provider signature verification.** GitHub, Stripe, Shopify, PagerDuty, Linear, Standard Webhooks, and more.
 - **From one action to a pipeline.** Single HTTP call or multi-step workflow with branching, parallelism, and rollback.
-- **Production ready.** Prometheus metrics, health checks, alerts, Management API for tracking events and jobs, CloudEvents.
+- **Production ready.** Prometheus metrics, health checks, alerts, Management API, full audit trail for compliance.
 
 ## Quick Start
 
@@ -94,6 +95,7 @@ qhook start
 | [Local Development](guides/local-development.md) | Dev mode, echo endpoint, test events, tunnels |
 | [Database Schema](guides/database-schema.md) | Tables, columns, indexes, and conventions |
 | [Error Reference](guides/error-reference.md) | HTTP status codes and error messages |
+| [Compliance & Audit Trail](guides/compliance.md) | PCI DSS 4.0, SOC 2 compliance framing |
 | [API Spec](openapi.yaml) | OpenAPI 3.1 specification |
 
 ### Deployment

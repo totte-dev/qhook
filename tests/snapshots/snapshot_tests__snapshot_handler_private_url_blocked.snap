@@ -1,0 +1,5 @@
+---
+source: tests/snapshot_tests.rs
+expression: config_error(yaml)
+---
+handler 'local-handler' URL 'http://127.0.0.1:3000/hook' points to a private/loopback address. Set server.allow_private_urls: true to allow this (dev only)
