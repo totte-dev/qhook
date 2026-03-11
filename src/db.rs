@@ -76,193 +76,147 @@ impl Database {
     }
 
     pub async fn migrate(&self) -> Result<()> {
-        // Create tables if they don't exist
+        // Create migration tracking table
         sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS events (
-                id          TEXT PRIMARY KEY,
-                source      TEXT NOT NULL,
-                event_type  TEXT NOT NULL,
-                payload     TEXT NOT NULL,
-                headers     TEXT,
-                unique_key  TEXT,
-                created_at  TEXT NOT NULL
-            )
-            "#,
+            "CREATE TABLE IF NOT EXISTS _migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
         )
         .execute(&self.pool)
         .await?;
 
-        // Unique constraint on (source, unique_key) where unique_key is not null
-        // SQLite and Postgres both support CREATE UNIQUE INDEX IF NOT EXISTS
-        sqlx::query(
-            r#"
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_events_unique
-            ON events (source, unique_key)
-            "#,
-        )
-        .execute(&self.pool)
-        .await
-        .ok(); // Ignore if already exists with different definition
+        let current_version: i32 =
+            sqlx::query_as::<_, (i32,)>("SELECT COALESCE(MAX(version), 0) FROM _migrations")
+                .fetch_one(&self.pool)
+                .await
+                .map(|r| r.0)
+                .unwrap_or(0);
 
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS jobs (
-                id           TEXT PRIMARY KEY,
-                event_id     TEXT NOT NULL,
-                handler      TEXT NOT NULL,
-                url          TEXT NOT NULL,
-                status       TEXT NOT NULL DEFAULT 'available',
-                attempt      INTEGER NOT NULL DEFAULT 0,
-                max_attempts INTEGER NOT NULL DEFAULT 5,
-                scheduled_at TEXT NOT NULL,
-                started_at   TEXT,
-                completed_at TEXT,
-                created_at   TEXT NOT NULL,
-                last_error   TEXT
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
+        // Detect if tables exist but migration tracking is new (upgrade from pre-migration)
+        let has_events_table = sqlx::query("SELECT 1 FROM events LIMIT 0")
+            .execute(&self.pool)
+            .await
+            .is_ok();
 
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_jobs_fetch
-            ON jobs (status, scheduled_at)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
+        let effective_version = if current_version == 0 && has_events_table {
+            // Pre-existing database without migration tracking — mark all existing migrations as applied
+            tracing::info!("Pre-existing database detected, initializing migration tracking");
+            for v in 1..=4i32 {
+                sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES ($1, $2)")
+                    .bind(v)
+                    .bind(format_now())
+                    .execute(&self.pool)
+                    .await
+                    .ok();
+            }
+            4
+        } else {
+            current_version
+        };
 
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS job_attempts (
-                id            TEXT PRIMARY KEY,
-                job_id        TEXT NOT NULL,
-                attempt       INTEGER NOT NULL,
-                status_code   INTEGER,
-                response_body TEXT,
-                error         TEXT,
-                duration_ms   INTEGER,
-                created_at    TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
+        let migrations: &[(i32, &str, &[&str])] = &[
+            // v1: Core tables (events, jobs, job_attempts)
+            (
+                1,
+                "Core tables",
+                &[
+                    "CREATE TABLE IF NOT EXISTS events (
+                    id TEXT PRIMARY KEY, source TEXT NOT NULL, event_type TEXT NOT NULL,
+                    payload TEXT NOT NULL, headers TEXT, unique_key TEXT, created_at TEXT NOT NULL
+                )",
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_unique ON events (source, unique_key)",
+                    "CREATE TABLE IF NOT EXISTS jobs (
+                    id TEXT PRIMARY KEY, event_id TEXT NOT NULL, handler TEXT NOT NULL,
+                    url TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'available',
+                    attempt INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL DEFAULT 5,
+                    scheduled_at TEXT NOT NULL, started_at TEXT, completed_at TEXT,
+                    created_at TEXT NOT NULL, last_error TEXT
+                )",
+                    "CREATE INDEX IF NOT EXISTS idx_jobs_fetch ON jobs (status, scheduled_at)",
+                    "CREATE TABLE IF NOT EXISTS job_attempts (
+                    id TEXT PRIMARY KEY, job_id TEXT NOT NULL, attempt INTEGER NOT NULL,
+                    status_code INTEGER, response_body TEXT, error TEXT,
+                    duration_ms INTEGER, created_at TEXT NOT NULL
+                )",
+                ],
+            ),
+            // v2: Workflow engine
+            (
+                2,
+                "Workflow tables",
+                &[
+                    "CREATE TABLE IF NOT EXISTS workflow_runs (
+                    id TEXT PRIMARY KEY, workflow TEXT NOT NULL, event_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'running', current_step TEXT,
+                    created_at TEXT NOT NULL, completed_at TEXT
+                )",
+                    "CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs (status)",
+                    "ALTER TABLE jobs ADD COLUMN workflow_run_id TEXT",
+                    "ALTER TABLE jobs ADD COLUMN step_name TEXT",
+                    "ALTER TABLE jobs ADD COLUMN step_index INTEGER",
+                    "ALTER TABLE jobs ADD COLUMN step_input TEXT",
+                    "ALTER TABLE jobs ADD COLUMN step_output TEXT",
+                    "ALTER TABLE jobs ADD COLUMN branch_name TEXT",
+                ],
+            ),
+            // v3: Workflow extensions (parallel, timeout, sub-workflow, callback)
+            (
+                3,
+                "Workflow extensions",
+                &[
+                    "ALTER TABLE workflow_runs ADD COLUMN parallel_step TEXT",
+                    "ALTER TABLE workflow_runs ADD COLUMN parallel_count INTEGER DEFAULT 0",
+                    "ALTER TABLE workflow_runs ADD COLUMN parallel_completed INTEGER DEFAULT 0",
+                    "ALTER TABLE workflow_runs ADD COLUMN timeout_at TEXT",
+                    "ALTER TABLE workflow_runs ADD COLUMN parent_run_id TEXT",
+                    "ALTER TABLE workflow_runs ADD COLUMN parent_step_index INTEGER",
+                    "ALTER TABLE jobs ADD COLUMN callback_token TEXT",
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_callback_token ON jobs (callback_token)",
+                ],
+            ),
+            // v4: Outbound webhooks
+            (
+                4,
+                "Outbound webhooks",
+                &[
+                    "CREATE TABLE IF NOT EXISTS outbound_endpoints (
+                    id TEXT PRIMARY KEY, source TEXT NOT NULL, url TEXT NOT NULL,
+                    description TEXT, signing_secret TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                )",
+                    "CREATE TABLE IF NOT EXISTS outbound_subscriptions (
+                    id TEXT PRIMARY KEY, endpoint_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL, created_at TEXT NOT NULL
+                )",
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_outbound_sub_unique ON outbound_subscriptions (endpoint_id, event_type)",
+                    "CREATE INDEX IF NOT EXISTS idx_outbound_endpoints_source ON outbound_endpoints (source, status)",
+                ],
+            ),
+        ];
 
-        // --- v0.2: Workflow tables ---
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS workflow_runs (
-                id           TEXT PRIMARY KEY,
-                workflow     TEXT NOT NULL,
-                event_id     TEXT NOT NULL,
-                status       TEXT NOT NULL DEFAULT 'running',
-                current_step TEXT,
-                created_at   TEXT NOT NULL,
-                completed_at TEXT
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_workflow_runs_status
-            ON workflow_runs (status)
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Add workflow columns to jobs (idempotent — ignore if already exist)
-        for col in [
-            "ALTER TABLE jobs ADD COLUMN workflow_run_id TEXT",
-            "ALTER TABLE jobs ADD COLUMN step_name TEXT",
-            "ALTER TABLE jobs ADD COLUMN step_index INTEGER",
-            "ALTER TABLE jobs ADD COLUMN step_input TEXT",
-            "ALTER TABLE jobs ADD COLUMN step_output TEXT",
-            "ALTER TABLE jobs ADD COLUMN branch_name TEXT",
-        ] {
-            sqlx::query(col).execute(&self.pool).await.ok();
+        for (version, name, queries) in migrations {
+            if *version <= effective_version {
+                continue;
+            }
+            tracing::info!(version, name, "Applying migration");
+            for sql in *queries {
+                // ALTER TABLE ADD COLUMN may fail if column already exists — that's OK
+                if sql.contains("ALTER TABLE") {
+                    sqlx::query(sql).execute(&self.pool).await.ok();
+                } else {
+                    sqlx::query(sql).execute(&self.pool).await?;
+                }
+            }
+            sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES ($1, $2)")
+                .bind(*version)
+                .bind(format_now())
+                .execute(&self.pool)
+                .await?;
         }
 
-        // Add parallel tracking and sub-workflow columns to workflow_runs
-        for col in [
-            "ALTER TABLE workflow_runs ADD COLUMN parallel_step TEXT",
-            "ALTER TABLE workflow_runs ADD COLUMN parallel_count INTEGER DEFAULT 0",
-            "ALTER TABLE workflow_runs ADD COLUMN parallel_completed INTEGER DEFAULT 0",
-            "ALTER TABLE workflow_runs ADD COLUMN timeout_at TEXT",
-            "ALTER TABLE workflow_runs ADD COLUMN parent_run_id TEXT",
-            "ALTER TABLE workflow_runs ADD COLUMN parent_step_index INTEGER",
-        ] {
-            sqlx::query(col).execute(&self.pool).await.ok();
-        }
-
-        // Add callback token column to jobs
-        for col in ["ALTER TABLE jobs ADD COLUMN callback_token TEXT"] {
-            sqlx::query(col).execute(&self.pool).await.ok();
-        }
-
-        // Index for callback token lookup
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_callback_token ON jobs (callback_token)",
-        )
-        .execute(&self.pool)
-        .await
-        .ok();
-
-        // --- v0.5: Outbound webhook tables ---
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS outbound_endpoints (
-                id             TEXT PRIMARY KEY,
-                source         TEXT NOT NULL,
-                url            TEXT NOT NULL,
-                description    TEXT,
-                signing_secret TEXT NOT NULL,
-                status         TEXT NOT NULL DEFAULT 'active',
-                created_at     TEXT NOT NULL,
-                updated_at     TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS outbound_subscriptions (
-                id           TEXT PRIMARY KEY,
-                endpoint_id  TEXT NOT NULL,
-                event_type   TEXT NOT NULL,
-                created_at   TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_outbound_sub_unique \
-             ON outbound_subscriptions (endpoint_id, event_type)",
-        )
-        .execute(&self.pool)
-        .await
-        .ok();
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_outbound_endpoints_source \
-             ON outbound_endpoints (source, status)",
-        )
-        .execute(&self.pool)
-        .await
-        .ok();
-
-        tracing::info!("Database migrated");
+        tracing::info!(
+            version = migrations.last().map(|m| m.0).unwrap_or(0),
+            "Database migrated"
+        );
         Ok(())
     }
 

@@ -474,51 +474,66 @@ async fn outbound_signed_delivery() {
     assert_eq!(delivered["order_id"], "ord_123");
     assert_eq!(delivered["amount"], 5000);
 
-    // Verify signature headers
+    // Verify Standard Webhooks headers
     let sig_header = reqs[0]
         .headers
-        .get("X-Qhook-Signature")
-        .expect("X-Qhook-Signature header must be present")
+        .get("webhook-signature")
+        .expect("webhook-signature header must be present")
         .to_str()
         .unwrap();
     assert!(
-        sig_header.starts_with("v1="),
-        "Signature must have v1= prefix, got: {}",
+        sig_header.starts_with("v1,"),
+        "Signature must have v1, prefix, got: {}",
         sig_header
     );
 
     let timestamp_header = reqs[0]
         .headers
-        .get("X-Qhook-Timestamp")
-        .expect("X-Qhook-Timestamp header must be present")
+        .get("webhook-timestamp")
+        .expect("webhook-timestamp header must be present")
         .to_str()
         .unwrap();
     let timestamp: i64 = timestamp_header.parse().expect("Timestamp must be numeric");
     assert!(timestamp > 0);
 
-    // Verify the signature is valid HMAC-SHA256
-    let sig_hex = sig_header.strip_prefix("v1=").unwrap();
+    let msg_id = reqs[0]
+        .headers
+        .get("webhook-id")
+        .expect("webhook-id header must be present")
+        .to_str()
+        .unwrap();
+
+    // Verify the signature is valid HMAC-SHA256 per Standard Webhooks spec
+    let sig_b64 = sig_header.strip_prefix("v1,").unwrap();
     let payload_bytes = reqs[0].body.as_ref();
     let expected_sig = {
+        use base64::Engine;
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
-        let mut mac = Hmac::<Sha256>::new_from_slice(signing_secret.as_bytes()).unwrap();
+        // Decode the whsec_ secret to raw key bytes
+        let key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(signing_secret.strip_prefix("whsec_").unwrap())
+            .unwrap();
+        let mut mac = Hmac::<Sha256>::new_from_slice(&key_bytes).unwrap();
+        // Standard Webhooks signed content: {msg_id}.{timestamp}.{body}
+        mac.update(msg_id.as_bytes());
+        mac.update(b".");
         mac.update(timestamp_header.as_bytes());
         mac.update(b".");
         mac.update(payload_bytes);
-        hex::encode(mac.finalize().into_bytes())
+        base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
     };
     assert_eq!(
-        sig_hex,
+        sig_b64,
         expected_sig,
-        "Signature must match HMAC-SHA256 of '{}.{}'",
+        "Signature must match Standard Webhooks HMAC-SHA256 of '{}.{}.{}'",
+        msg_id,
         timestamp_header,
         std::str::from_utf8(payload_bytes).unwrap_or("<binary>")
     );
 
-    // Verify other headers
+    // Verify supplementary headers
     assert!(reqs[0].headers.get("X-Qhook-Event-ID").is_some());
-    assert!(reqs[0].headers.get("X-Qhook-Delivery-ID").is_some());
     assert_eq!(
         reqs[0]
             .headers

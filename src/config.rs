@@ -191,6 +191,12 @@ pub struct WorkerConfig {
     /// Seconds to wait for in-flight deliveries during shutdown (default: 30).
     #[serde(default = "default_drain_timeout")]
     pub drain_timeout_secs: u64,
+    /// Max concurrent deliveries per worker (default: 10).
+    #[serde(default = "default_max_concurrency")]
+    pub max_concurrency: usize,
+    /// Number of jobs to fetch per poll cycle (default: 10).
+    #[serde(default = "default_batch_size")]
+    pub batch_size: i32,
 }
 
 impl Default for WorkerConfig {
@@ -199,6 +205,8 @@ impl Default for WorkerConfig {
             stale_threshold_secs: default_stale_threshold(),
             retention_hours: default_retention_hours(),
             drain_timeout_secs: default_drain_timeout(),
+            max_concurrency: default_max_concurrency(),
+            batch_size: default_batch_size(),
         }
     }
 }
@@ -211,6 +219,12 @@ fn default_retention_hours() -> i64 {
 }
 fn default_drain_timeout() -> u64 {
     30
+}
+fn default_max_concurrency() -> usize {
+    10
+}
+fn default_batch_size() -> i32 {
+    10
 }
 
 #[derive(Debug, Deserialize, Clone)]

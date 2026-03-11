@@ -131,6 +131,58 @@ Checks the `X-Webhook-Signature` header using HMAC-SHA256 (hex-encoded). Use thi
 | Custom | `hmac` | HMAC-SHA256 | `X-Webhook-Signature` |
 | AWS SNS | (automatic) | X.509 RSA | (in body) |
 
+## Outbound Webhook Signing (Standard Webhooks)
+
+When using `type: outbound` sources, qhook signs outgoing deliveries using the [Standard Webhooks](https://www.standardwebhooks.com/) specification. Each delivery includes three headers:
+
+| Header | Description |
+|--------|-------------|
+| `webhook-id` | Unique message identifier (ULID) |
+| `webhook-timestamp` | Unix timestamp (seconds since epoch) |
+| `webhook-signature` | `v1,{base64-encoded HMAC-SHA256}` |
+
+**Signed content format:** `{msg_id}.{timestamp}.{body}`
+
+Each endpoint gets a unique signing secret (starts with `whsec_`). The `whsec_` prefix is stripped and the remaining value is base64-decoded to get the raw HMAC key bytes.
+
+### Verifying in Your Application
+
+```python
+import hmac, hashlib, base64
+
+def verify(secret: str, webhook_id: str, timestamp: str, body: bytes, signature: str) -> bool:
+    # Strip whsec_ prefix and base64-decode to get raw key
+    key = base64.b64decode(secret.removeprefix("whsec_"))
+    # Build signed content: msg_id.timestamp.body
+    signed_content = f"{webhook_id}.{timestamp}.".encode() + body
+    expected = base64.b64encode(
+        hmac.new(key, signed_content, hashlib.sha256).digest()
+    ).decode()
+    # Compare against v1,{signature} format
+    return hmac.compare_digest(signature.removeprefix("v1,"), expected)
+```
+
+### Managing Outbound Endpoints
+
+```bash
+# Register a customer endpoint
+curl -X POST http://localhost:8888/api/outbound/endpoints \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"source": "my-saas", "url": "https://customer.com/webhook"}'
+# → {"id": "01J...", "signing_secret": "whsec_..."}
+
+# Subscribe to event types
+curl -X POST http://localhost:8888/api/outbound/endpoints/{id}/subscriptions \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"event_types": ["order.created", "payment.completed"]}'
+
+# Rotate signing secret
+curl -X POST http://localhost:8888/api/outbound/endpoints/{id}/rotate-secret \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+> See the [outbound webhook example](https://github.com/totte-dev/qhook/tree/main/examples/outbound-webhook) for a complete walkthrough.
+
 ## Security Notes
 
 - All signature comparisons use **constant-time equality** (`subtle::ct_eq`) to prevent timing attacks.

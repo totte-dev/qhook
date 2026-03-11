@@ -102,6 +102,57 @@ Tracks the state of workflow executions.
 **Indexes:**
 - `idx_workflow_runs_status` — on `status`
 
+### outbound_endpoints
+
+Registered customer webhook endpoints for outbound delivery.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | TEXT PK | ULID |
+| `source` | TEXT NOT NULL | Source name this endpoint receives events from |
+| `url` | TEXT NOT NULL | Customer's webhook URL |
+| `description` | TEXT | Human-readable description |
+| `signing_secret` | TEXT NOT NULL | Per-endpoint HMAC secret (`whsec_` prefix, base64-encoded key) |
+| `status` | TEXT NOT NULL | `active` or `disabled` |
+| `created_at` | TEXT NOT NULL | Creation timestamp |
+| `updated_at` | TEXT NOT NULL | Last update timestamp |
+
+**Indexes:**
+- `idx_outbound_endpoints_source` — on `(source, status)` for fan-out lookups
+
+### outbound_subscriptions
+
+Event type subscriptions for outbound endpoints. Only subscribed event types are delivered.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | TEXT PK | ULID |
+| `endpoint_id` | TEXT NOT NULL | FK to `outbound_endpoints.id` |
+| `event_type` | TEXT NOT NULL | Subscribed event type (or `*` for all) |
+| `created_at` | TEXT NOT NULL | Creation timestamp |
+
+**Indexes:**
+- `idx_outbound_sub_unique` — UNIQUE on `(endpoint_id, event_type)` to prevent duplicate subscriptions
+
+### _migrations
+
+Tracks applied database migrations for safe schema upgrades across versions.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `version` | INTEGER PK | Migration version number |
+| `name` | TEXT NOT NULL | Human-readable migration name |
+| `applied_at` | TEXT NOT NULL | When the migration was applied |
+
+**Current migrations:**
+
+| Version | Name | Description |
+|---------|------|-------------|
+| 1 | Core tables | `events`, `jobs`, `job_attempts` tables and indexes |
+| 2 | Workflow engine | `workflow_runs` table |
+| 3 | Workflow extensions | `parallel_step`, `parallel_count`, `parallel_completed`, `timeout_at`, `parent_run_id`, `parent_step_index` columns |
+| 4 | Outbound webhooks | `outbound_endpoints`, `outbound_subscriptions` tables |
+
 ## Conventions
 
 - **IDs**: ULID format (lexicographically sortable, unique)
