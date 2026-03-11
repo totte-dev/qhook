@@ -398,6 +398,35 @@ pub struct SourceConfig {
     /// JSON Schema for validating incoming event payloads.
     /// Events that fail validation are rejected with 400.
     pub schema: Option<String>,
+    /// IP allowlist for this source. If set, only requests from these IPs/CIDRs are accepted.
+    /// Supports individual IPs and CIDR notation (e.g., "3.18.12.63/32", "192.168.0.0/16").
+    #[serde(default)]
+    pub allowed_ips: Vec<String>,
+}
+
+impl SourceConfig {
+    /// Check if a given IP address is allowed by this source's allowlist.
+    /// Returns true if the allowlist is empty (no restriction) or if the IP matches.
+    pub fn is_ip_allowed(&self, ip: std::net::IpAddr) -> bool {
+        if self.allowed_ips.is_empty() {
+            return true;
+        }
+        for entry in &self.allowed_ips {
+            // Try parsing as a network (CIDR)
+            if let Ok(net) = entry.parse::<ipnet::IpNet>() {
+                if net.contains(&ip) {
+                    return true;
+                }
+            }
+            // Try parsing as a single IP
+            if let Ok(single) = entry.parse::<std::net::IpAddr>() {
+                if single == ip {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1151,6 +1180,7 @@ mod tests {
                 schedule: None,
                 timezone: None,
                 schema: None,
+                allowed_ips: vec![],
             },
         );
         let mut handlers = HashMap::new();
@@ -1188,6 +1218,7 @@ mod tests {
                 schedule: None,
                 timezone: None,
                 schema: None,
+                allowed_ips: vec![],
             },
         );
         let mut handlers = HashMap::new();
@@ -1251,6 +1282,7 @@ mod tests {
                 schedule: None,
                 timezone: None,
                 schema: None,
+                allowed_ips: vec![],
             },
         );
         let config = make_config(HashMap::new(), sources);
@@ -1270,6 +1302,7 @@ mod tests {
                 schedule: None,
                 timezone: None,
                 schema: None,
+                allowed_ips: vec![],
             },
         );
         let mut handlers = HashMap::new();
@@ -1309,6 +1342,7 @@ mod tests {
                 schedule: None,
                 timezone: None,
                 schema: None,
+                allowed_ips: vec![],
             },
         );
         let mut handlers = HashMap::new();
@@ -1347,6 +1381,7 @@ mod tests {
                 schedule: None,
                 timezone: None,
                 schema: None,
+                allowed_ips: vec![],
             },
         );
         let mut handlers = HashMap::new();
@@ -1385,6 +1420,7 @@ mod tests {
                 schedule: None,
                 timezone: None,
                 schema: None,
+                allowed_ips: vec![],
             },
         );
         let mut handlers = HashMap::new();
@@ -1434,6 +1470,7 @@ mod tests {
                 schedule: None,
                 timezone: None,
                 schema: None,
+                allowed_ips: vec![],
             },
         );
         let config = make_config(HashMap::new(), sources);
@@ -1454,6 +1491,7 @@ mod tests {
                 schedule: None,
                 timezone: None,
                 schema: None,
+                allowed_ips: vec![],
             },
         );
         let config = make_config(HashMap::new(), sources);
@@ -1473,6 +1511,7 @@ mod tests {
                 schedule: None,
                 timezone: None,
                 schema: None,
+                allowed_ips: vec![],
             },
         );
         let mut handlers = HashMap::new();
@@ -2858,5 +2897,95 @@ handlers: {}
         // Cleanup
         let _ = std::fs::remove_file(&env_file);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    // --- IP allowlist ---
+
+    #[test]
+    fn test_ip_allowlist_empty_allows_all() {
+        let source = SourceConfig {
+            source_type: "webhook".into(),
+            verify: None,
+            secret: None,
+            skip_verify: false,
+            schedule: None,
+            timezone: None,
+            schema: None,
+            allowed_ips: vec![],
+        };
+        assert!(source.is_ip_allowed("1.2.3.4".parse().unwrap()));
+        assert!(source.is_ip_allowed("::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_ip_allowlist_single_ip() {
+        let source = SourceConfig {
+            source_type: "webhook".into(),
+            verify: None,
+            secret: None,
+            skip_verify: false,
+            schedule: None,
+            timezone: None,
+            schema: None,
+            allowed_ips: vec!["3.18.12.63".into()],
+        };
+        assert!(source.is_ip_allowed("3.18.12.63".parse().unwrap()));
+        assert!(!source.is_ip_allowed("3.18.12.64".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_ip_allowlist_cidr() {
+        let source = SourceConfig {
+            source_type: "webhook".into(),
+            verify: None,
+            secret: None,
+            skip_verify: false,
+            schedule: None,
+            timezone: None,
+            schema: None,
+            allowed_ips: vec!["192.168.1.0/24".into()],
+        };
+        assert!(source.is_ip_allowed("192.168.1.1".parse().unwrap()));
+        assert!(source.is_ip_allowed("192.168.1.254".parse().unwrap()));
+        assert!(!source.is_ip_allowed("192.168.2.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_ip_allowlist_multiple_entries() {
+        let source = SourceConfig {
+            source_type: "webhook".into(),
+            verify: None,
+            secret: None,
+            skip_verify: false,
+            schedule: None,
+            timezone: None,
+            schema: None,
+            allowed_ips: vec![
+                "3.18.12.63/32".into(),
+                "3.130.192.0/24".into(),
+                "10.0.0.1".into(),
+            ],
+        };
+        assert!(source.is_ip_allowed("3.18.12.63".parse().unwrap()));
+        assert!(source.is_ip_allowed("3.130.192.100".parse().unwrap()));
+        assert!(source.is_ip_allowed("10.0.0.1".parse().unwrap()));
+        assert!(!source.is_ip_allowed("10.0.0.2".parse().unwrap()));
+        assert!(!source.is_ip_allowed("1.1.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_ip_allowlist_ipv6() {
+        let source = SourceConfig {
+            source_type: "webhook".into(),
+            verify: None,
+            secret: None,
+            skip_verify: false,
+            schedule: None,
+            timezone: None,
+            schema: None,
+            allowed_ips: vec!["2600:1f18::/32".into()],
+        };
+        assert!(source.is_ip_allowed("2600:1f18::1".parse().unwrap()));
+        assert!(!source.is_ip_allowed("2600:1f19::1".parse().unwrap()));
     }
 }
