@@ -547,3 +547,284 @@ workflows:
 
     server.stop().await;
 }
+
+// Scenario 7: Outbound webhook full lifecycle
+// Simulates a SaaS sending webhooks to two customers:
+//   1. Register two customer endpoints
+//   2. Customer A subscribes to all events (wildcard)
+//   3. Customer B subscribes to payment.completed only
+//   4. Send order.created → only Customer A receives (with valid signature)
+//   5. Send payment.completed → both customers receive
+//   6. Disable Customer A → send payment.completed → only Customer B receives
+//   7. Rotate Customer B's secret → verify new signature
+
+#[tokio::test]
+async fn scenario_outbound_webhook_lifecycle() {
+    let mock_a = MockServer::start().await;
+    let mock_b = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/hook"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock_a)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/hook"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock_b)
+        .await;
+
+    let yaml = r#"
+database:
+  driver: sqlite
+  url: "sqlite:__DB_PATH__?mode=rwc"
+server:
+  port: __PORT__
+  allow_private_urls: true
+api:
+  auth_token: "scenario-token"
+sources:
+  my-saas:
+    type: outbound
+"#;
+
+    let server = QhookProcess::start(yaml, 19850).await;
+    let client = http();
+    let auth = "Bearer scenario-token";
+
+    // --- Step 1: Register two customer endpoints ---
+
+    let resp = client
+        .post(server.url("/api/outbound/endpoints"))
+        .header("Authorization", auth)
+        .json(&serde_json::json!({
+            "source": "my-saas",
+            "url": format!("{}/hook", mock_a.uri()),
+            "description": "Customer A"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: Value = resp.json().await.unwrap();
+    let ep_a = body["id"].as_str().unwrap().to_string();
+    let secret_a = body["signing_secret"].as_str().unwrap().to_string();
+
+    let resp = client
+        .post(server.url("/api/outbound/endpoints"))
+        .header("Authorization", auth)
+        .json(&serde_json::json!({
+            "source": "my-saas",
+            "url": format!("{}/hook", mock_b.uri()),
+            "description": "Customer B"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: Value = resp.json().await.unwrap();
+    let ep_b = body["id"].as_str().unwrap().to_string();
+
+    // --- Step 2: Customer A subscribes to all events (wildcard) ---
+
+    client
+        .post(server.url(&format!("/api/outbound/endpoints/{}/subscriptions", ep_a)))
+        .header("Authorization", auth)
+        .json(&serde_json::json!({"event_types": ["*"]}))
+        .send()
+        .await
+        .unwrap();
+
+    // --- Step 3: Customer B subscribes to payment.completed only ---
+
+    client
+        .post(server.url(&format!("/api/outbound/endpoints/{}/subscriptions", ep_b)))
+        .header("Authorization", auth)
+        .json(&serde_json::json!({"event_types": ["payment.completed"]}))
+        .send()
+        .await
+        .unwrap();
+
+    // --- Step 4: Send order.created → only Customer A receives ---
+
+    let resp = client
+        .post(server.url("/events/my-saas/order.created"))
+        .header("Authorization", auth)
+        .json(&serde_json::json!({"order_id": "ord_001", "amount": 2500}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["jobs_created"], 1,
+        "Only Customer A is subscribed to order.created"
+    );
+
+    wait_for_mock(&mock_a, 1, 10).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let reqs_a = mock_a.received_requests().await.unwrap();
+    let reqs_b = mock_b.received_requests().await.unwrap();
+    assert_eq!(reqs_a.len(), 1, "Customer A should receive order.created");
+    assert_eq!(
+        reqs_b.len(),
+        0,
+        "Customer B should NOT receive order.created"
+    );
+
+    // Verify Customer A's delivery has valid HMAC-SHA256 signature
+    let sig = reqs_a[0]
+        .headers
+        .get("X-Qhook-Signature")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let ts = reqs_a[0]
+        .headers
+        .get("X-Qhook-Timestamp")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(sig.starts_with("v1="));
+    let expected_sig = hmac_sha256(
+        &secret_a,
+        &format!("{}.{}", ts, std::str::from_utf8(&reqs_a[0].body).unwrap()),
+    );
+    assert_eq!(
+        &sig[3..],
+        expected_sig,
+        "Customer A signature must be verifiable with their secret"
+    );
+
+    // Verify payload integrity
+    let payload: Value = serde_json::from_slice(&reqs_a[0].body).unwrap();
+    assert_eq!(payload["order_id"], "ord_001");
+    assert_eq!(payload["amount"], 2500);
+
+    // Verify event type header
+    assert_eq!(
+        reqs_a[0]
+            .headers
+            .get("X-Qhook-Event-Type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "order.created"
+    );
+
+    // --- Step 5: Send payment.completed → both receive ---
+
+    let resp = client
+        .post(server.url("/events/my-saas/payment.completed"))
+        .header("Authorization", auth)
+        .json(&serde_json::json!({"payment_id": "pay_001", "status": "succeeded"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["jobs_created"], 2,
+        "Both customers subscribed to payment.completed"
+    );
+
+    wait_for_mock(&mock_a, 2, 10).await;
+    wait_for_mock(&mock_b, 1, 10).await;
+
+    let reqs_a = mock_a.received_requests().await.unwrap();
+    let reqs_b = mock_b.received_requests().await.unwrap();
+    assert_eq!(
+        reqs_a.len(),
+        2,
+        "Customer A: order.created + payment.completed"
+    );
+    assert_eq!(reqs_b.len(), 1, "Customer B: payment.completed only");
+
+    let payload_b: Value = serde_json::from_slice(&reqs_b[0].body).unwrap();
+    assert_eq!(payload_b["payment_id"], "pay_001");
+
+    // --- Step 6: Disable Customer A → send another payment → only B receives ---
+
+    client
+        .put(server.url(&format!("/api/outbound/endpoints/{}", ep_a)))
+        .header("Authorization", auth)
+        .json(&serde_json::json!({"status": "disabled"}))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(server.url("/events/my-saas/payment.completed"))
+        .header("Authorization", auth)
+        .json(&serde_json::json!({"payment_id": "pay_002"}))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["jobs_created"], 1, "Only Customer B (A is disabled)");
+
+    wait_for_mock(&mock_b, 2, 10).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let reqs_a = mock_a.received_requests().await.unwrap();
+    let reqs_b = mock_b.received_requests().await.unwrap();
+    assert_eq!(
+        reqs_a.len(),
+        2,
+        "Customer A still at 2 (disabled, no new delivery)"
+    );
+    assert_eq!(reqs_b.len(), 2, "Customer B received second payment");
+
+    // --- Step 7: Rotate Customer B's secret → verify new signature works ---
+
+    let resp = client
+        .post(server.url(&format!("/api/outbound/endpoints/{}/rotate-secret", ep_b)))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let new_secret_b = body["signing_secret"].as_str().unwrap().to_string();
+
+    // Send another event — should use the new secret
+    client
+        .post(server.url("/events/my-saas/payment.completed"))
+        .header("Authorization", auth)
+        .json(&serde_json::json!({"payment_id": "pay_003"}))
+        .send()
+        .await
+        .unwrap();
+
+    wait_for_mock(&mock_b, 3, 10).await;
+
+    let reqs_b = mock_b.received_requests().await.unwrap();
+    assert_eq!(reqs_b.len(), 3);
+
+    // Verify the latest delivery uses the rotated secret
+    let latest = &reqs_b[2];
+    let sig = latest
+        .headers
+        .get("X-Qhook-Signature")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let ts = latest
+        .headers
+        .get("X-Qhook-Timestamp")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let expected_sig = hmac_sha256(
+        &new_secret_b,
+        &format!("{}.{}", ts, std::str::from_utf8(&latest.body).unwrap()),
+    );
+    assert_eq!(
+        &sig[3..],
+        expected_sig,
+        "Latest delivery must use the rotated secret"
+    );
+
+    server.stop().await;
+}
