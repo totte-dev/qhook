@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.5.0] - 2026-03-12
 
 ### Added
 - **Gzip compression**: HTTP responses are now gzip-compressed via `tower-http` `CompressionLayer`, reducing bandwidth for API and metrics responses.
