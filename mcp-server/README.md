@@ -69,8 +69,8 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 | `send_event` | Send an event to a configured source | `POST /events/{source}/{event_type}` |
 | `get_event` | Get event details with jobs and workflow runs | `GET /api/events/{event_id}` |
 | `get_job` | Get job details with delivery attempts | `GET /api/jobs/{job_id}` |
-| `list_events` | Look up an event by ID | `GET /api/events/{event_id}` |
-| `list_jobs` | List jobs for a given event | `GET /api/events/{event_id}` (jobs field) |
+| `list_events` | List events with optional filters | `GET /api/events` |
+| `list_jobs` | List jobs with optional filters | `GET /api/jobs` |
 | `retry_job` | Retry a failed job (CLI only, not available via REST) | _N/A_ |
 
 ### Tool Details
@@ -91,14 +91,16 @@ No inputs required. Returns server status and current queue depth.
 - `include_attempts` (optional, default: `true`) — Include delivery attempt history
 
 #### `list_events`
-- `event_id` (required) — Event ID (ULID) to look up
-
-> **Note:** qhook does not currently have a list/search endpoint for events. This tool retrieves a single event by ID. A full list endpoint may be added in a future release.
+- `source` (optional) — Filter by source name
+- `event_type` (optional) — Filter by event type
+- `since` (optional) — Filter events created after this timestamp (ISO 8601)
+- `until` (optional) — Filter events created before this timestamp
+- `limit` (optional) — Max results (default: 50, max: 1000)
 
 #### `list_jobs`
-- `event_id` (required) — Event ID (ULID) whose jobs to list
-
-> **Note:** Jobs are retrieved from the event's response. There is no standalone jobs list endpoint.
+- `status` (optional) — Filter by status (available, running, completed, dead)
+- `handler` (optional) — Filter by handler name
+- `limit` (optional) — Max results (default: 50, max: 1000)
 
 #### `retry_job`
 - `job_id` (required) — Job ID (ULID) to retry
