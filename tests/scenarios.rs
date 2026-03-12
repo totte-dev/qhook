@@ -1134,3 +1134,192 @@ handlers:
 
     server.stop().await;
 }
+
+// Scenario: Event inspection API
+
+#[tokio::test]
+async fn scenario_event_inspection_api() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/handler-a"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/handler-b"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock)
+        .await;
+
+    let yaml = format!(
+        r#"
+database:
+  driver: sqlite
+  url: "sqlite:__DB_PATH__?mode=rwc"
+server:
+  port: __PORT__
+  allow_private_urls: true
+api:
+  auth_token: test-token-inspect
+sources:
+  app:
+    type: event
+  github:
+    type: webhook
+handlers:
+  handler-a:
+    source: app
+    events: [user.created]
+    url: {mock_url}/handler-a
+    retry:
+      max: 0
+  handler-b:
+    source: app
+    events: [user.created]
+    url: {mock_url}/handler-b
+    retry:
+      max: 0
+"#,
+        mock_url = mock.uri()
+    );
+
+    let server = QhookProcess::start(&yaml, 19728).await;
+    let c = http();
+    let auth = "Bearer test-token-inspect";
+
+    // Create two events
+    let resp = c
+        .post(server.url("/events/app/user.created"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", auth)
+        .json(&serde_json::json!({"name": "alice"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let body1: Value = resp.json().await.unwrap();
+    let event_id_1 = body1["event_id"].as_str().unwrap().to_string();
+    assert_eq!(body1["jobs_created"], 2);
+
+    let resp = c
+        .post(server.url("/events/app/user.created"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", auth)
+        .json(&serde_json::json!({"name": "bob"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+
+    wait_for_mock(&mock, 4, 10).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Test 1: GET /api/events
+    let resp = c
+        .get(server.url("/api/events"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let events = body["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events[0].get("payload").is_none(), "No payload in list");
+    assert_eq!(body["has_more"], false);
+
+    // Test 2: Source filter
+    let resp = c
+        .get(server.url("/api/events?source=nonexistent"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["events"].as_array().unwrap().len(), 0);
+
+    // Test 3: Pagination
+    let resp = c
+        .get(server.url("/api/events?limit=1"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["events"].as_array().unwrap().len(), 1);
+    assert_eq!(body["has_more"], true);
+
+    // Test 4: Event jobs
+    let resp = c
+        .get(server.url(&format!("/api/events/{}/jobs", event_id_1)))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["jobs"].as_array().unwrap().len(), 2);
+
+    // Test 5: GET /api/jobs
+    let resp = c
+        .get(server.url("/api/jobs"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["jobs"].as_array().unwrap().len(), 4);
+
+    // Test 6: Jobs status filter
+    let resp = c
+        .get(server.url("/api/jobs?status=dead"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["jobs"].as_array().unwrap().len(), 0);
+
+    // Test 7: Job attempts
+    let resp = c
+        .get(server.url(&format!("/api/events/{}/jobs", event_id_1)))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let job_id = body["jobs"][0]["id"].as_str().unwrap().to_string();
+
+    let resp = c
+        .get(server.url(&format!("/api/jobs/{}/attempts", job_id)))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let attempts = body["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["attempt"], 1);
+    assert_eq!(attempts[0]["status_code"], 200);
+
+    // Test 8: Auth required
+    assert_eq!(
+        c.get(server.url("/api/events"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        c.get(server.url("/api/jobs"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+
+    server.stop().await;
+}

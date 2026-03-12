@@ -17,6 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Compliance documentation**: PCI DSS 4.0 and SOC 2 compliance framing guide (`docs/guides/compliance.md`) with audit trail mapping tables.
 - **proptest property-based tests**: 29 property-based tests covering config parsing robustness, retry backoff invariants, filter evaluation safety, and ULID generation properties.
 - **insta snapshot tests**: 21 snapshot tests for config validation error messages, default config template, Prometheus metrics format, and API response formats.
+- **Event inspection API**: `GET /api/events`, `GET /api/events/{id}/jobs`, `GET /api/jobs`, `GET /api/jobs/{id}/attempts` with filtering, cursor-based pagination, and `has_more` support.
+- **Filtered replay**: `replay-local` now supports `--source`, `--event-type`, `--since`, `--until`, `--status` filters. Event type supports prefix matching with `*`.
+- **Benchmark suite**: criterion-based benchmarks for config parsing, filter evaluation, ULID generation, signature verification, and SQLite event insertion.
+- **MCP server**: TypeScript MCP server (`mcp-server/`) wrapping qhook's REST API for AI agent integration (Claude Code, Claude Desktop).
 
 ### Changed
 - **Per-destination rate limiting**: Switched from semaphore-hold to GCRA-based rate limiting via the `governor` crate. Provides smoother, more accurate per-handler rate limiting.

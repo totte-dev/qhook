@@ -410,7 +410,7 @@ impl Database {
                      LIMIT $2 \
                      FOR UPDATE SKIP LOCKED \
                  ) \
-                 RETURNING id, event_id, handler, url, status, attempt - 1 AS attempt, max_attempts, scheduled_at, last_error",
+                 RETURNING id, event_id, handler, url, status, attempt - 1 AS attempt, max_attempts, scheduled_at, last_error, created_at",
             )
             .bind(&now)
             .bind(limit)
@@ -418,7 +418,7 @@ impl Database {
             .await?
         } else {
             sqlx::query_as::<_, JobRow>(
-                "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
+                "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
                  FROM jobs \
                  WHERE status IN ('available', 'retryable') AND scheduled_at <= $1 \
                  ORDER BY scheduled_at ASC \
@@ -568,7 +568,7 @@ impl Database {
     pub async fn list_jobs(&self, status: Option<&str>, limit: i32) -> Result<Vec<JobRow>> {
         let rows = if let Some(status) = status {
             sqlx::query_as::<_, JobRow>(
-                "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
+                "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
                  FROM jobs WHERE status = $1 ORDER BY scheduled_at DESC LIMIT $2",
             )
             .bind(status)
@@ -577,7 +577,7 @@ impl Database {
             .await?
         } else {
             sqlx::query_as::<_, JobRow>(
-                "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
+                "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
                  FROM jobs ORDER BY scheduled_at DESC LIMIT $1",
             )
             .bind(limit)
@@ -722,7 +722,7 @@ impl Database {
         let rows = match (after_id, status) {
             (Some(id), Some(st)) => {
                 sqlx::query_as::<_, JobRow>(
-                    "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
+                    "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
                      FROM jobs WHERE id > $1 AND status = $2 ORDER BY id ASC LIMIT $3",
                 )
                 .bind(id)
@@ -733,7 +733,7 @@ impl Database {
             }
             (Some(id), None) => {
                 sqlx::query_as::<_, JobRow>(
-                    "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
+                    "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
                      FROM jobs WHERE id > $1 AND status IN ('completed', 'dead', 'retryable') ORDER BY id ASC LIMIT $2",
                 )
                 .bind(id)
@@ -743,7 +743,7 @@ impl Database {
             }
             (None, Some(st)) => {
                 sqlx::query_as::<_, JobRow>(
-                    "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
+                    "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
                      FROM jobs WHERE status = $1 ORDER BY id DESC LIMIT $2",
                 )
                 .bind(st)
@@ -753,7 +753,7 @@ impl Database {
             }
             (None, None) => {
                 sqlx::query_as::<_, JobRow>(
-                    "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
+                    "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
                      FROM jobs WHERE status IN ('completed', 'dead', 'retryable') ORDER BY id DESC LIMIT $1",
                 )
                 .bind(limit)
@@ -1249,7 +1249,7 @@ impl Database {
     /// Get callback job data for advancing the workflow after callback.
     pub async fn get_callback_job(&self, token: &str) -> Result<Option<JobRow>> {
         let row = sqlx::query_as::<_, JobRow>(
-            "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
+            "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
              FROM jobs WHERE callback_token = $1",
         )
         .bind(token)
@@ -1362,6 +1362,7 @@ pub struct JobRow {
     pub max_attempts: i32,
     pub scheduled_at: String,
     pub last_error: Option<String>,
+    pub created_at: String,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1411,6 +1412,7 @@ pub struct JobAttemptRow {
     pub status_code: Option<i32>,
     pub error: Option<String>,
     pub duration_ms: Option<i32>,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
@@ -1445,7 +1447,7 @@ impl Database {
     /// Get a single job by ID.
     pub async fn get_job_by_id(&self, job_id: &str) -> Result<Option<JobRow>> {
         let row = sqlx::query_as::<_, JobRow>(
-            "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
+            "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
              FROM jobs WHERE id = $1",
         )
         .bind(job_id)
@@ -1469,7 +1471,7 @@ impl Database {
     /// List jobs for a specific event.
     pub async fn list_jobs_by_event(&self, event_id: &str) -> Result<Vec<JobRow>> {
         let rows = sqlx::query_as::<_, JobRow>(
-            "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error \
+            "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
              FROM jobs WHERE event_id = $1 ORDER BY created_at",
         )
         .bind(event_id)
@@ -1481,7 +1483,7 @@ impl Database {
     /// List attempts for a specific job.
     pub async fn list_job_attempts(&self, job_id: &str) -> Result<Vec<JobAttemptRow>> {
         let rows = sqlx::query_as::<_, JobAttemptRow>(
-            "SELECT attempt, status_code, error, duration_ms \
+            "SELECT attempt, status_code, error, duration_ms, created_at \
              FROM job_attempts WHERE job_id = $1 ORDER BY attempt",
         )
         .bind(job_id)
@@ -1499,6 +1501,124 @@ impl Database {
         .bind(event_id)
         .fetch_all(&self.pool)
         .await?;
+        Ok(rows)
+    }
+
+    /// List events for the inspection API (no payload, with cursor pagination).
+    pub async fn list_events_for_api(
+        &self,
+        source: Option<&str>,
+        event_type: Option<&str>,
+        since: Option<&str>,
+        until: Option<&str>,
+        limit: i32,
+        after: Option<&str>,
+    ) -> Result<Vec<EventRow>> {
+        let mut conditions = Vec::new();
+        let mut param_idx = 1;
+
+        if after.is_some() {
+            conditions.push(format!("id > ${param_idx}"));
+            param_idx += 1;
+        }
+        if source.is_some() {
+            conditions.push(format!("source = ${param_idx}"));
+            param_idx += 1;
+        }
+        if event_type.is_some() {
+            conditions.push(format!("event_type = ${param_idx}"));
+            param_idx += 1;
+        }
+        if since.is_some() {
+            conditions.push(format!("created_at >= ${param_idx}"));
+            param_idx += 1;
+        }
+        if until.is_some() {
+            conditions.push(format!("created_at <= ${param_idx}"));
+            param_idx += 1;
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+
+        let sql = format!(
+            "SELECT id, source, event_type, unique_key, created_at \
+             FROM events{where_clause} ORDER BY id ASC LIMIT ${param_idx}"
+        );
+
+        let mut query = sqlx::query_as::<_, EventRow>(&sql);
+        if let Some(v) = after {
+            query = query.bind(v.to_string());
+        }
+        if let Some(v) = source {
+            query = query.bind(v.to_string());
+        }
+        if let Some(v) = event_type {
+            query = query.bind(v.to_string());
+        }
+        if let Some(v) = since {
+            query = query.bind(v.to_string());
+        }
+        if let Some(v) = until {
+            query = query.bind(v.to_string());
+        }
+        query = query.bind(limit);
+
+        let rows = query.fetch_all(&self.pool).await?;
+        Ok(rows)
+    }
+
+    /// List jobs with optional filters and cursor pagination for the inspection API.
+    pub async fn list_jobs_filtered(
+        &self,
+        status: Option<&str>,
+        handler: Option<&str>,
+        limit: i32,
+        after: Option<&str>,
+    ) -> Result<Vec<JobRow>> {
+        let mut conditions = Vec::new();
+        let mut param_idx = 1;
+
+        if after.is_some() {
+            conditions.push(format!("id > ${param_idx}"));
+            param_idx += 1;
+        }
+        if status.is_some() {
+            conditions.push(format!("status = ${param_idx}"));
+            param_idx += 1;
+        }
+        if handler.is_some() {
+            conditions.push(format!("handler = ${param_idx}"));
+            param_idx += 1;
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+
+        let sql = format!(
+            "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
+             FROM jobs{where_clause} ORDER BY id ASC LIMIT ${param_idx}"
+        );
+
+        let mut query = sqlx::query_as::<_, JobRow>(&sql);
+        if let Some(v) = after {
+            query = query.bind(v.to_string());
+        }
+        if let Some(v) = status {
+            query = query.bind(v.to_string());
+        }
+        if let Some(v) = handler {
+            query = query.bind(v.to_string());
+        }
+        query = query.bind(limit);
+
+        let rows = query.fetch_all(&self.pool).await?;
         Ok(rows)
     }
 
