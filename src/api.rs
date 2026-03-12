@@ -326,8 +326,12 @@ pub async fn serve(state: AppState, config_path: String) -> Result<()> {
         .route("/events/{source}/{event_type}", post(handle_event))
         .route("/sns/{source}", post(handle_sns))
         .route("/callback/{token}", post(handle_callback))
+        .route("/api/events", get(handle_list_events))
         .route("/api/events/{event_id}", get(handle_get_event))
+        .route("/api/events/{event_id}/jobs", get(handle_list_event_jobs))
+        .route("/api/jobs", get(handle_list_jobs))
         .route("/api/jobs/{job_id}", get(handle_get_job))
+        .route("/api/jobs/{job_id}/attempts", get(handle_list_job_attempts))
         // Outbound webhook management
         .route(
             "/api/outbound/endpoints",
@@ -1207,6 +1211,170 @@ fn check_api_auth(state: &AppState, headers: &HeaderMap) -> Option<axum::respons
         }
     }
     None
+}
+
+async fn handle_list_events(
+    State(state): State<SharedState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Some(resp) = check_api_auth(&state, &headers) {
+        return resp;
+    }
+
+    let source = params.get("source").map(|s| s.as_str());
+    let event_type = params.get("event_type").map(|s| s.as_str());
+    let since = params.get("since").map(|s| s.as_str());
+    let until = params.get("until").map(|s| s.as_str());
+    let after = params.get("after").map(|s| s.as_str());
+    let limit: i32 = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50)
+        .min(1000);
+
+    // Fetch limit+1 to determine has_more
+    let events = match state
+        .db
+        .list_events_for_api(source, event_type, since, until, limit + 1, after)
+        .await
+    {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to list events");
+            let body = serde_json::json!({"error": "internal error"});
+            return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response();
+        }
+    };
+
+    let has_more = events.len() > limit as usize;
+    let events: Vec<_> = events.into_iter().take(limit as usize).collect();
+
+    let body = serde_json::json!({
+        "events": events.iter().map(|e| serde_json::json!({
+            "id": e.id,
+            "source": e.source,
+            "event_type": e.event_type,
+            "unique_key": e.unique_key,
+            "created_at": e.created_at,
+        })).collect::<Vec<_>>(),
+        "has_more": has_more,
+    });
+    (StatusCode::OK, axum::Json(body)).into_response()
+}
+
+async fn handle_list_event_jobs(
+    State(state): State<SharedState>,
+    Path(event_id): Path<String>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Some(resp) = check_api_auth(&state, &headers) {
+        return resp;
+    }
+
+    let jobs = match state.db.list_jobs_by_event(&event_id).await {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to list jobs for event");
+            let body = serde_json::json!({"error": "internal error"});
+            return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response();
+        }
+    };
+
+    let body = serde_json::json!({
+        "jobs": jobs.iter().map(|j| serde_json::json!({
+            "id": j.id,
+            "handler": j.handler,
+            "status": j.status,
+            "attempt": j.attempt,
+            "max_attempts": j.max_attempts,
+            "scheduled_at": j.scheduled_at,
+            "last_error": j.last_error,
+            "created_at": j.created_at,
+        })).collect::<Vec<_>>(),
+    });
+    (StatusCode::OK, axum::Json(body)).into_response()
+}
+
+async fn handle_list_jobs(
+    State(state): State<SharedState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Some(resp) = check_api_auth(&state, &headers) {
+        return resp;
+    }
+
+    let status = params.get("status").map(|s| s.as_str());
+    let handler = params.get("handler").map(|s| s.as_str());
+    let after = params.get("after").map(|s| s.as_str());
+    let limit: i32 = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50)
+        .min(1000);
+
+    let jobs = match state
+        .db
+        .list_jobs_filtered(status, handler, limit + 1, after)
+        .await
+    {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to list jobs");
+            let body = serde_json::json!({"error": "internal error"});
+            return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response();
+        }
+    };
+
+    let has_more = jobs.len() > limit as usize;
+    let jobs: Vec<_> = jobs.into_iter().take(limit as usize).collect();
+
+    let body = serde_json::json!({
+        "jobs": jobs.iter().map(|j| serde_json::json!({
+            "id": j.id,
+            "event_id": j.event_id,
+            "handler": j.handler,
+            "status": j.status,
+            "attempt": j.attempt,
+            "max_attempts": j.max_attempts,
+            "scheduled_at": j.scheduled_at,
+            "last_error": j.last_error,
+            "created_at": j.created_at,
+        })).collect::<Vec<_>>(),
+        "has_more": has_more,
+    });
+    (StatusCode::OK, axum::Json(body)).into_response()
+}
+
+async fn handle_list_job_attempts(
+    State(state): State<SharedState>,
+    Path(job_id): Path<String>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Some(resp) = check_api_auth(&state, &headers) {
+        return resp;
+    }
+
+    let attempts = match state.db.list_job_attempts(&job_id).await {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to list job attempts");
+            let body = serde_json::json!({"error": "internal error"});
+            return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response();
+        }
+    };
+
+    let body = serde_json::json!({
+        "attempts": attempts.iter().map(|a| serde_json::json!({
+            "attempt": a.attempt,
+            "status_code": a.status_code,
+            "error": a.error,
+            "duration_ms": a.duration_ms,
+            "created_at": a.created_at,
+        })).collect::<Vec<_>>(),
+    });
+    (StatusCode::OK, axum::Json(body)).into_response()
 }
 
 async fn handle_get_event(

@@ -1024,3 +1024,375 @@ handlers:
     let _ = std::fs::remove_file(&config_path);
     server.stop().await;
 }
+
+// Test 16: replay-local with filters — only replay matching events
+
+#[tokio::test]
+async fn replay_local_filters() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/jobs/replay-filter"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock)
+        .await;
+
+    let yaml = format!(
+        r#"
+database:
+  driver: sqlite
+  url: "sqlite:__DB_PATH__?mode=rwc"
+server:
+  port: __PORT__
+  allow_private_urls: true
+api:
+  auth_token: "test-token-filter"
+sources:
+  stripe:
+    type: event
+  github:
+    type: event
+handlers:
+  on-filter:
+    source: stripe
+    events: ["*"]
+    url: {mock_url}/jobs/replay-filter
+    retry:
+      max: 0
+  on-filter-gh:
+    source: github
+    events: ["*"]
+    url: {mock_url}/jobs/replay-filter
+    retry:
+      max: 0
+"#,
+        mock_url = mock.uri()
+    );
+
+    let server = QhookProcess::start(&yaml, 19729).await;
+
+    let id = ulid::Ulid::new();
+    let jsonl_path = format!("/tmp/qhook_test_replay_filter_{}.jsonl", id);
+    let config_path = format!("/tmp/qhook_test_replay_filter_{}.yaml", id);
+
+    // Create JSONL with mixed events: different sources, event types, timestamps, statuses
+    let jsonl_content = [
+        r#"{"id":"evt_f1","source":"stripe","event_type":"payment.created","payload":{"amount":100},"created_at":"2026-01-15T10:00:00.000","status":"completed"}"#,
+        r#"{"id":"evt_f2","source":"stripe","event_type":"payment.refunded","payload":{"amount":50},"created_at":"2026-02-20T12:00:00.000","status":"failed"}"#,
+        r#"{"id":"evt_f3","source":"github","event_type":"push","payload":{"ref":"main"},"created_at":"2026-03-01T08:00:00.000","status":"completed"}"#,
+        r#"{"id":"evt_f4","source":"stripe","event_type":"payment.created","payload":{"amount":200},"created_at":"2026-03-10T14:00:00.000","status":"completed"}"#,
+        r#"{"id":"evt_f5","source":"github","event_type":"pull_request.opened","payload":{"pr":1},"created_at":"2026-03-15T16:00:00.000","status":"completed"}"#,
+    ]
+    .join("\n");
+    std::fs::write(&jsonl_path, &jsonl_content).unwrap();
+
+    std::fs::write(
+        &config_path,
+        "database:\n  driver: sqlite\n  url: \"sqlite:/tmp/unused.db?mode=rwc\"\nserver:\n  port: 19729\nsources:\n  stripe:\n    type: event\n  github:\n    type: event\nhandlers: {}\n",
+    )
+    .unwrap();
+
+    // Test A: filter by --source stripe (should get 3 events: evt_f1, evt_f2, evt_f4)
+    let output_a = tokio::process::Command::new(env!("CARGO_BIN_EXE_qhook"))
+        .args([
+            "replay-local",
+            &jsonl_path,
+            "--target",
+            &server.base_url,
+            "--token",
+            "test-token-filter",
+            "-y",
+            "--config",
+            &config_path,
+            "--source",
+            "stripe",
+        ])
+        .output()
+        .await
+        .unwrap();
+
+    let stdout_a = String::from_utf8_lossy(&output_a.stdout);
+    assert!(
+        stdout_a.contains("3 ok"),
+        "Source filter: expected 3 ok, got stdout: {}, stderr: {}",
+        stdout_a,
+        String::from_utf8_lossy(&output_a.stderr),
+    );
+    assert!(
+        stdout_a.contains("Replaying 3 of 5 events"),
+        "Source filter: expected 'Replaying 3 of 5 events' in stdout: {}",
+        stdout_a,
+    );
+
+    wait_for_mock(&mock, 3, 10).await;
+
+    // Verify exactly 3 requests made for source filter
+    let reqs_a = mock.received_requests().await.unwrap();
+    assert_eq!(
+        reqs_a.len(),
+        3,
+        "Source filter: expected 3 requests, got {}",
+        reqs_a.len()
+    );
+
+    // Reset mock for next test (re-mount because reset() clears mounts too)
+    mock.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/jobs/replay-filter"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock)
+        .await;
+
+    // Test B: filter by --event-type with prefix wildcard "payment.*"
+    let output_b = tokio::process::Command::new(env!("CARGO_BIN_EXE_qhook"))
+        .args([
+            "replay-local",
+            &jsonl_path,
+            "--target",
+            &server.base_url,
+            "--token",
+            "test-token-filter",
+            "-y",
+            "--config",
+            &config_path,
+            "--event-type",
+            "payment.*",
+        ])
+        .output()
+        .await
+        .unwrap();
+
+    let stdout_b = String::from_utf8_lossy(&output_b.stdout);
+    assert!(
+        stdout_b.contains("3 ok"),
+        "Event type prefix filter: expected 3 ok, got stdout: {}, stderr: {}",
+        stdout_b,
+        String::from_utf8_lossy(&output_b.stderr),
+    );
+    assert!(
+        stdout_b.contains("Replaying 3 of 5 events"),
+        "Event type prefix filter: expected 'Replaying 3 of 5 events' in stdout: {}",
+        stdout_b,
+    );
+
+    wait_for_mock(&mock, 3, 10).await;
+    let reqs_b = mock.received_requests().await.unwrap();
+    assert_eq!(
+        reqs_b.len(),
+        3,
+        "Event type prefix filter: expected 3 requests, got {}",
+        reqs_b.len()
+    );
+
+    mock.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/jobs/replay-filter"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock)
+        .await;
+
+    // Test C: filter by --since and --until (March 2026 only: evt_f3, evt_f4, evt_f5)
+    let output_c = tokio::process::Command::new(env!("CARGO_BIN_EXE_qhook"))
+        .args([
+            "replay-local",
+            &jsonl_path,
+            "--target",
+            &server.base_url,
+            "--token",
+            "test-token-filter",
+            "-y",
+            "--config",
+            &config_path,
+            "--since",
+            "2026-03-01T00:00:00",
+            "--until",
+            "2026-03-31T23:59:59",
+        ])
+        .output()
+        .await
+        .unwrap();
+
+    let stdout_c = String::from_utf8_lossy(&output_c.stdout);
+    assert!(
+        stdout_c.contains("3 ok"),
+        "Time range filter: expected 3 ok, got stdout: {}, stderr: {}",
+        stdout_c,
+        String::from_utf8_lossy(&output_c.stderr),
+    );
+    assert!(
+        stdout_c.contains("Replaying 3 of 5 events"),
+        "Time range filter: expected 'Replaying 3 of 5 events' in stdout: {}",
+        stdout_c,
+    );
+
+    wait_for_mock(&mock, 3, 10).await;
+    let reqs_c = mock.received_requests().await.unwrap();
+    assert_eq!(
+        reqs_c.len(),
+        3,
+        "Time range filter: expected 3 requests, got {}",
+        reqs_c.len()
+    );
+
+    mock.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/jobs/replay-filter"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock)
+        .await;
+
+    // Test D: filter by --status failed (only evt_f2)
+    let output_d = tokio::process::Command::new(env!("CARGO_BIN_EXE_qhook"))
+        .args([
+            "replay-local",
+            &jsonl_path,
+            "--target",
+            &server.base_url,
+            "--token",
+            "test-token-filter",
+            "-y",
+            "--config",
+            &config_path,
+            "--status",
+            "failed",
+        ])
+        .output()
+        .await
+        .unwrap();
+
+    let stdout_d = String::from_utf8_lossy(&output_d.stdout);
+    assert!(
+        stdout_d.contains("1 ok"),
+        "Status filter: expected 1 ok, got stdout: {}, stderr: {}",
+        stdout_d,
+        String::from_utf8_lossy(&output_d.stderr),
+    );
+    assert!(
+        stdout_d.contains("Replaying 1 of 5 events"),
+        "Status filter: expected 'Replaying 1 of 5 events' in stdout: {}",
+        stdout_d,
+    );
+
+    wait_for_mock(&mock, 1, 10).await;
+    let reqs_d = mock.received_requests().await.unwrap();
+    assert_eq!(
+        reqs_d.len(),
+        1,
+        "Status filter: expected 1 request, got {}",
+        reqs_d.len()
+    );
+    // Verify the correct event was sent (the refunded one)
+    let body_d: Value = serde_json::from_slice(&reqs_d[0].body).unwrap();
+    assert_eq!(
+        body_d["amount"].as_i64().unwrap(),
+        50,
+        "Status filter: expected amount=50 for the failed event"
+    );
+
+    mock.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/jobs/replay-filter"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock)
+        .await;
+
+    // Test E: combined filters --source stripe --since 2026-03-01T00:00:00 (only evt_f4)
+    let output_e = tokio::process::Command::new(env!("CARGO_BIN_EXE_qhook"))
+        .args([
+            "replay-local",
+            &jsonl_path,
+            "--target",
+            &server.base_url,
+            "--token",
+            "test-token-filter",
+            "-y",
+            "--config",
+            &config_path,
+            "--source",
+            "stripe",
+            "--since",
+            "2026-03-01T00:00:00",
+        ])
+        .output()
+        .await
+        .unwrap();
+
+    let stdout_e = String::from_utf8_lossy(&output_e.stdout);
+    assert!(
+        stdout_e.contains("1 ok"),
+        "Combined filter: expected 1 ok, got stdout: {}, stderr: {}",
+        stdout_e,
+        String::from_utf8_lossy(&output_e.stderr),
+    );
+    assert!(
+        stdout_e.contains("Replaying 1 of 5 events"),
+        "Combined filter: expected 'Replaying 1 of 5 events' in stdout: {}",
+        stdout_e,
+    );
+
+    wait_for_mock(&mock, 1, 10).await;
+    let reqs_e = mock.received_requests().await.unwrap();
+    assert_eq!(
+        reqs_e.len(),
+        1,
+        "Combined filter: expected 1 request, got {}",
+        reqs_e.len()
+    );
+    let body_e: Value = serde_json::from_slice(&reqs_e[0].body).unwrap();
+    assert_eq!(
+        body_e["amount"].as_i64().unwrap(),
+        200,
+        "Combined filter: expected amount=200 for stripe+march event"
+    );
+
+    // Test F: no filters — should replay all 5 events (backwards compatible)
+    mock.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/jobs/replay-filter"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock)
+        .await;
+
+    let output_f = tokio::process::Command::new(env!("CARGO_BIN_EXE_qhook"))
+        .args([
+            "replay-local",
+            &jsonl_path,
+            "--target",
+            &server.base_url,
+            "--token",
+            "test-token-filter",
+            "-y",
+            "--config",
+            &config_path,
+        ])
+        .output()
+        .await
+        .unwrap();
+
+    let stdout_f = String::from_utf8_lossy(&output_f.stdout);
+    assert!(
+        stdout_f.contains("5 ok"),
+        "No filter: expected 5 ok, got stdout: {}, stderr: {}",
+        stdout_f,
+        String::from_utf8_lossy(&output_f.stderr),
+    );
+    // When no filters, should NOT show "Replaying X of Y" but just "Loaded 5 event(s)"
+    assert!(
+        !stdout_f.contains("Replaying"),
+        "No filter: should not show filtered message, got stdout: {}",
+        stdout_f,
+    );
+
+    wait_for_mock(&mock, 5, 10).await;
+    let reqs_f = mock.received_requests().await.unwrap();
+    assert_eq!(
+        reqs_f.len(),
+        5,
+        "No filter: expected 5 requests, got {}",
+        reqs_f.len()
+    );
+
+    // Cleanup
+    let _ = std::fs::remove_file(&jsonl_path);
+    let _ = std::fs::remove_file(&config_path);
+    server.stop().await;
+}
