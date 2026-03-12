@@ -122,6 +122,12 @@ qhook start
 | [alert-remediation](https://github.com/totte-dev/qhook/tree/main/examples/alert-remediation) | PagerDuty alert → triage → remediate → escalate |
 | [outbound-webhook](https://github.com/totte-dev/qhook/tree/main/examples/outbound-webhook) | Send webhooks to customers with Standard Webhooks signatures |
 
+### Integrations
+
+| Integration | Description |
+|-------------|-------------|
+| [MCP Server](https://github.com/totte-dev/qhook/tree/main/mcp-server) | AI agent integration via Model Context Protocol (Claude Code, Claude Desktop) |
+
 ### Other
 
 | Page | Description |
