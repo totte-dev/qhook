@@ -314,6 +314,8 @@ workflows:
 | GitHub | HMAC-SHA256 | `X-Hub-Signature-256` |
 | Stripe | HMAC-SHA256 + timestamp | `Stripe-Signature` |
 | Shopify | HMAC-SHA256 (base64) | `X-Shopify-Hmac-SHA256` |
+| Twilio | HMAC-SHA1 (base64) | `X-Twilio-Signature` |
+| Paddle | HMAC-SHA256 + timestamp | `Paddle-Signature` |
 | PagerDuty | HMAC-SHA256 | `X-PagerDuty-Signature` |
 | Grafana | HMAC-SHA256 | `X-Grafana-Alerting-Signature` |
 | Terraform Cloud | HMAC-SHA512 | `X-TFE-Notification-Signature` |
@@ -335,7 +337,7 @@ workflows:
 | **Error routing** | DIY | `catch` → rollback steps |
 | **Dead Letter Queue** | None | Built-in |
 | **Monitoring** | DIY | Prometheus metrics, alerts |
-| **Webhook verification** | DIY | Built-in (9 providers) |
+| **Webhook verification** | DIY | Built-in (13 providers) |
 
 ### vs CI/CD Tools (GitHub Actions, etc.)
 
@@ -352,7 +354,7 @@ workflows:
 | | K8s tools (Argo Events, etc.) | qhook |
 |---|---|---|
 | **Requires Kubernetes** | Yes | No |
-| **Webhook verification** | Limited | Built-in (9 providers) |
+| **Webhook verification** | Limited | Built-in (13 providers) |
 | **Setup** | K8s cluster + CRDs | Single binary |
 | **Post-deploy hooks** | K8s Jobs only | Any HTTP service |
 
@@ -399,7 +401,7 @@ Self-hosting qhook replaces paid webhook and workflow services. Here's what the 
 | **Monthly cost** | $0 (5K/mo) | $100+ | ~$7–15/mo |
 | **At 100K events/mo** | $100/mo | $100/mo | ~$7–15/mo |
 | **At 1M events/mo** | N/A | ~$500/mo | ~$15–30/mo |
-| **Verification** | Limited | Full | 9 providers built-in |
+| **Verification** | Limited | Full | 13 providers built-in |
 | **Infrastructure** | Managed | Managed | 1 VM + Postgres |
 
 ### Workflow Orchestration (vs AWS Step Functions)
@@ -450,8 +452,9 @@ It **is** the right choice when:
 | Capability | qhook |
 |---|---|
 | **Deployment** | Single binary, zero external deps |
-| **Database** | SQLite (dev) / Postgres (prod) |
-| **Input** | Webhooks (9 providers verified), SNS, internal API (`POST /events/{source}/{type}` or `POST /events/{type}`) |
+| **Database** | SQLite (dev) / Postgres or MySQL (prod) |
+| **Input** | Webhooks (13 providers verified), SNS, internal API (`POST /events/{source}/{type}`) |
+| **Outbound Webhooks** | Standard Webhooks compliant, per-endpoint signing secrets, subscription-based routing |
 | **Actions** | HTTP with custom headers for authentication |
 | **Management API** | Track events, jobs, and workflow runs programmatically |
 | **Reliability** | Retry (exponential backoff), error routing, DLQ |

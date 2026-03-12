@@ -19,7 +19,7 @@ Every incoming webhook or API event follows the same reliable path:
   verify → enqueue → ACK (< 500ms) → deliver → retry/DLQ
 ```
 
-1. **Verify** — signature validation for 13+ providers (Stripe, GitHub, Shopify, Twilio, Paddle, Standard Webhooks, etc.)
+1. **Verify** — signature validation for 13 providers (Stripe, GitHub, Shopify, Twilio, Paddle, Standard Webhooks, etc.)
 2. **Enqueue** — persist to SQLite/Postgres/MySQL before responding. No event is lost.
 3. **ACK** — return 200/202 immediately. Your webhook source never times out.
 4. **Deliver** — POST to your handlers with retry, backoff, circuit breaker, and DLQ.
@@ -211,6 +211,12 @@ Full documentation at **[totte-dev.github.io/qhook](https://totte-dev.github.io/
 | [tenant-provision](./examples/tenant-provision/) | Tenant provisioning with rollback and auth headers |
 | [outbound-webhook](./examples/outbound-webhook/) | Send webhooks to customers with Standard Webhooks signatures |
 | [alert-remediation](./examples/alert-remediation/) | PagerDuty alert → triage → remediate → escalate |
+
+## MCP Server
+
+qhook includes an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server for AI agent integration. Send events, list jobs, and check health from Claude Code, Claude Desktop, or any MCP-compatible client.
+
+See [mcp-server/README.md](./mcp-server/README.md) for setup instructions.
 
 ## License
 
