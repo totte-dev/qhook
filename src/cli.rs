@@ -118,6 +118,21 @@ enum Command {
         /// Path to config file (used for default port and auth token)
         #[arg(short, long, default_value = "qhook.yaml")]
         config: PathBuf,
+        /// Filter by source name
+        #[arg(long)]
+        source: Option<String>,
+        /// Filter by event type (exact match or prefix with *)
+        #[arg(long)]
+        event_type: Option<String>,
+        /// Filter events created since this timestamp (ISO 8601, e.g. 2026-03-01T00:00:00)
+        #[arg(long)]
+        since: Option<String>,
+        /// Filter events created until this timestamp (ISO 8601)
+        #[arg(long)]
+        until: Option<String>,
+        /// Only replay events with matching status (for replaying failed deliveries)
+        #[arg(long)]
+        status: Option<String>,
     },
     /// Manage workflow runs
     #[command(name = "workflow-runs")]
@@ -922,6 +937,11 @@ impl Args {
                 token,
                 yes,
                 config,
+                source: source_filter,
+                event_type: event_type_filter,
+                since,
+                until,
+                status: status_filter,
             } => {
                 let cfg = Config::load(&config)?;
                 let base_url =
@@ -948,7 +968,7 @@ impl Args {
                 }
 
                 // Parse and validate all lines first
-                let mut events: Vec<serde_json::Value> = Vec::with_capacity(lines.len());
+                let mut all_events: Vec<serde_json::Value> = Vec::with_capacity(lines.len());
                 for (i, line) in lines.iter().enumerate() {
                     let val: serde_json::Value = serde_json::from_str(line)
                         .with_context(|| format!("Invalid JSON on line {}", i + 1))?;
@@ -958,15 +978,100 @@ impl Args {
                     if val.get("event_type").and_then(|v| v.as_str()).is_none() {
                         anyhow::bail!("Line {} missing 'event_type' field", i + 1);
                     }
-                    events.push(val);
+                    all_events.push(val);
                 }
 
-                println!(
-                    "Loaded {} event(s) from {}.",
-                    events.len(),
-                    if file == "-" { "stdin" } else { &file }
-                );
+                let total_count = all_events.len();
+
+                // Apply filters
+                let has_filters = source_filter.is_some()
+                    || event_type_filter.is_some()
+                    || since.is_some()
+                    || until.is_some()
+                    || status_filter.is_some();
+
+                let events: Vec<serde_json::Value> = all_events
+                    .into_iter()
+                    .filter(|event| {
+                        if let Some(ref src) = source_filter {
+                            if event["source"].as_str() != Some(src.as_str()) {
+                                return false;
+                            }
+                        }
+                        if let Some(ref et) = event_type_filter {
+                            let event_et = event["event_type"].as_str().unwrap_or("");
+                            if et.ends_with('*') {
+                                let prefix = &et[..et.len() - 1];
+                                if !event_et.starts_with(prefix) {
+                                    return false;
+                                }
+                            } else if event_et != et {
+                                return false;
+                            }
+                        }
+                        if let Some(ref s) = since {
+                            if let Some(created) = event["created_at"].as_str() {
+                                if created < s.as_str() {
+                                    return false;
+                                }
+                            }
+                        }
+                        if let Some(ref u) = until {
+                            if let Some(created) = event["created_at"].as_str() {
+                                if created > u.as_str() {
+                                    return false;
+                                }
+                            }
+                        }
+                        if let Some(ref st) = status_filter {
+                            if let Some(event_status) = event["status"].as_str() {
+                                if event_status != st.as_str() {
+                                    return false;
+                                }
+                            }
+                            // If event has no status field, skip the filter (include it)
+                        }
+                        true
+                    })
+                    .collect();
+
+                if has_filters {
+                    // Build filter description
+                    let mut filters = Vec::new();
+                    if let Some(ref src) = source_filter {
+                        filters.push(format!("source={}", src));
+                    }
+                    if let Some(ref et) = event_type_filter {
+                        filters.push(format!("event_type={}", et));
+                    }
+                    if let Some(ref s) = since {
+                        filters.push(format!("since={}", s));
+                    }
+                    if let Some(ref u) = until {
+                        filters.push(format!("until={}", u));
+                    }
+                    if let Some(ref st) = status_filter {
+                        filters.push(format!("status={}", st));
+                    }
+                    println!(
+                        "Replaying {} of {} events (filtered by {})",
+                        events.len(),
+                        total_count,
+                        filters.join(", ")
+                    );
+                } else {
+                    println!(
+                        "Loaded {} event(s) from {}.",
+                        events.len(),
+                        if file == "-" { "stdin" } else { &file }
+                    );
+                }
                 println!("Target: {}", base_url);
+
+                if events.is_empty() {
+                    println!("No events match the given filters.");
+                    return Ok(());
+                }
 
                 if !yes {
                     print!("Proceed? [y/N] ");

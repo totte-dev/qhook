@@ -572,6 +572,317 @@ paths:
               example:
                 error: job not found
 
+  /api/events:
+    get:
+      tags: [Management]
+      summary: List events
+      description: |
+        Returns a paginated list of events with optional filters.
+        Does not include event payload (use GET /api/events/{event_id} for full details).
+        Requires Bearer token authentication if `api.auth_token` is configured.
+      operationId: listEvents
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - name: source
+          in: query
+          required: false
+          description: Filter by source name
+          schema:
+            type: string
+        - name: event_type
+          in: query
+          required: false
+          description: Filter by event type
+          schema:
+            type: string
+        - name: since
+          in: query
+          required: false
+          description: Filter events created at or after this ISO timestamp
+          schema:
+            type: string
+        - name: until
+          in: query
+          required: false
+          description: Filter events created at or before this ISO timestamp
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of events to return (default 50, max 1000)
+          schema:
+            type: integer
+            default: 50
+            maximum: 1000
+        - name: after
+          in: query
+          required: false
+          description: Cursor for pagination (event ID to start after)
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          description: Event ULID
+                        source:
+                          type: string
+                          description: Source name
+                        event_type:
+                          type: string
+                          description: Event type
+                        unique_key:
+                          type: string
+                          nullable: true
+                          description: Deduplication key
+                        created_at:
+                          type: string
+                          description: Creation timestamp (UTC)
+                      required: [id, source, event_type, created_at]
+                  has_more:
+                    type: boolean
+                    description: Whether more events exist beyond this page
+                required: [events, has_more]
+        "401":
+          description: Missing or invalid Bearer token
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid token
+
+  /api/events/{event_id}/jobs:
+    get:
+      tags: [Management]
+      summary: List jobs for an event
+      description: |
+        Returns all jobs associated with a specific event.
+        Requires Bearer token authentication if `api.auth_token` is configured.
+      operationId: listEventJobs
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - name: event_id
+          in: path
+          required: true
+          description: Event ID (ULID)
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of jobs for the event
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          description: Job ULID
+                        handler:
+                          type: string
+                          description: Handler name
+                        status:
+                          type: string
+                          description: Job status
+                        attempt:
+                          type: integer
+                          description: Current attempt number
+                        max_attempts:
+                          type: integer
+                          description: Maximum retry attempts
+                        scheduled_at:
+                          type: string
+                          description: Next scheduled delivery time (UTC)
+                        last_error:
+                          type: string
+                          nullable: true
+                          description: Last delivery error message
+                        created_at:
+                          type: string
+                          description: Creation timestamp (UTC)
+                      required: [id, handler, status, attempt, max_attempts, scheduled_at, created_at]
+                required: [jobs]
+        "401":
+          description: Missing or invalid Bearer token
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid token
+
+  /api/jobs:
+    get:
+      tags: [Management]
+      summary: List jobs
+      description: |
+        Returns a paginated list of jobs with optional filters.
+        Requires Bearer token authentication if `api.auth_token` is configured.
+      operationId: listJobs
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Filter by job status (available, running, completed, dead)
+          schema:
+            type: string
+            enum: [available, running, completed, dead]
+        - name: handler
+          in: query
+          required: false
+          description: Filter by handler name
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of jobs to return (default 50, max 1000)
+          schema:
+            type: integer
+            default: 50
+            maximum: 1000
+        - name: after
+          in: query
+          required: false
+          description: Cursor for pagination (job ID to start after)
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          description: Job ULID
+                        event_id:
+                          type: string
+                          description: Associated event ULID
+                        handler:
+                          type: string
+                          description: Handler name
+                        status:
+                          type: string
+                          description: Job status
+                        attempt:
+                          type: integer
+                          description: Current attempt number
+                        max_attempts:
+                          type: integer
+                          description: Maximum retry attempts
+                        scheduled_at:
+                          type: string
+                          description: Next scheduled delivery time (UTC)
+                        last_error:
+                          type: string
+                          nullable: true
+                          description: Last delivery error message
+                        created_at:
+                          type: string
+                          description: Creation timestamp (UTC)
+                      required: [id, event_id, handler, status, attempt, max_attempts, scheduled_at, created_at]
+                  has_more:
+                    type: boolean
+                    description: Whether more jobs exist beyond this page
+                required: [jobs, has_more]
+        "401":
+          description: Missing or invalid Bearer token
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid token
+
+  /api/jobs/{job_id}/attempts:
+    get:
+      tags: [Management]
+      summary: List delivery attempts for a job
+      description: |
+        Returns all delivery attempts for a specific job.
+        Requires Bearer token authentication if `api.auth_token` is configured.
+      operationId: listJobAttempts
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: Job ID (ULID)
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of delivery attempts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  attempts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        attempt:
+                          type: integer
+                          description: Attempt number
+                        status_code:
+                          type: integer
+                          nullable: true
+                          description: HTTP status code from delivery
+                        error:
+                          type: string
+                          nullable: true
+                          description: Error message if delivery failed
+                        duration_ms:
+                          type: integer
+                          nullable: true
+                          description: Delivery duration in milliseconds
+                        created_at:
+                          type: string
+                          description: Attempt timestamp (UTC)
+                      required: [attempt, created_at]
+                required: [attempts]
+        "401":
+          description: Missing or invalid Bearer token
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid token
+
   /api/outbound/endpoints:
     post:
       tags: [Outbound]

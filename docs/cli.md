@@ -246,6 +246,15 @@ qhook replay-local events.jsonl                          # replay to localhost (
 qhook replay-local events.jsonl --target http://localhost:9999  # custom target
 qhook replay-local events.jsonl --token my-api-token -y  # with auth, skip confirmation
 cat events.jsonl | qhook replay-local -                  # read from stdin
+
+# Filtered replay
+qhook replay-local events.jsonl --source stripe                 # only stripe events
+qhook replay-local events.jsonl --event-type order.created      # exact event type match
+qhook replay-local events.jsonl --event-type payment.*          # prefix match (payment.created, payment.refunded, etc.)
+qhook replay-local events.jsonl --since 2026-03-01T00:00:00     # events after a timestamp
+qhook replay-local events.jsonl --until 2026-03-10T00:00:00     # events before a timestamp
+qhook replay-local events.jsonl --status failed                 # only failed deliveries
+qhook replay-local events.jsonl --source stripe --since 2026-03-01T00:00:00 -y  # combine filters
 ```
 
 **Options:**
@@ -256,11 +265,19 @@ cat events.jsonl | qhook replay-local -                  # read from stdin
 | `--token` | API auth token (overrides config `api.auth_token`) |
 | `-y`, `--yes` | Skip confirmation prompt |
 | `-c`, `--config` | Config file path (default: `qhook.yaml`) |
+| `--source` | Filter by source name (exact match) |
+| `--event-type` | Filter by event type (exact match, or prefix match with trailing `*`) |
+| `--since` | Only events created after this timestamp (ISO 8601) |
+| `--until` | Only events created before this timestamp (ISO 8601) |
+| `--status` | Only events with matching status (e.g. `failed`, `completed`) |
+
+When filters are applied, the confirmation prompt shows: `Replaying 15 of 100 events (filtered by source=stripe, since=2026-03-01)`.
 
 **Use cases:**
 - Reproduce production issues locally using real event data
 - Test new handler/filter configurations against historical events
 - Migration testing with actual payloads
+- Replay only failed deliveries after fixing a downstream service
 
 ## Management API
 
