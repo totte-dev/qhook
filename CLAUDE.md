@@ -147,7 +147,7 @@ docs/               — GitHub Pages user guide (Jekyll, Cayman theme)
 - **Timestamps**: UTC, format `%Y-%m-%dT%H:%M:%S%.3f` stored as TEXT.
 - **Config env vars**: `${VAR}` or `${VAR:-default}` syntax.
 - **Rust version**: 1.85+ (edition 2024). Use latest stable features (e.g., let chains).
-- **Version**: Currently v0.4.2. Update in Cargo.toml for releases.
+- **Version**: Currently v0.5.0. Update in Cargo.toml for releases.
 - **Docker image**: `ghcr.io/totte-dev/qhook`. Multi-stage build, ~119MB.
 
 ## Key Design Decisions
