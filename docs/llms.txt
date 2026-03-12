@@ -1,11 +1,11 @@
 # qhook
 
-> Lightweight webhook gateway and workflow engine written in Rust. Single binary, zero external dependencies — no Redis, no RabbitMQ. SQLite for dev, Postgres for production. Receive webhooks with signature verification (11 providers), send outbound webhooks (Standard Webhooks), execute HTTP actions with retry, DLQ, and multi-step workflow orchestration.
+> Lightweight webhook gateway and workflow engine written in Rust. Single binary, zero external dependencies — no Redis, no RabbitMQ. SQLite for dev, Postgres or MySQL for production. Receive webhooks with signature verification (13 providers), send outbound webhooks (Standard Webhooks), execute HTTP actions with retry, DLQ, and multi-step workflow orchestration.
 
 qhook handles the full lifecycle of webhook and event processing: receive events from external webhooks or internal APIs, route them to handlers or multi-step workflows, and deliver HTTP actions reliably with automatic retry, circuit breaker, and dead letter queue. Configuration is a single YAML file. Install via `cargo install qhook` or Docker (`ghcr.io/totte-dev/qhook`).
 
 Key capabilities:
-- Inbound webhook verification: GitHub, Stripe, Shopify, PagerDuty, Grafana, Terraform Cloud, GitLab, Linear, Standard Webhooks (Clerk/Resend/etc.), HMAC, AWS SNS X.509
+- Inbound webhook verification: GitHub, Stripe, Shopify, Twilio, Paddle, PagerDuty, Grafana, Terraform Cloud, GitLab, Linear, Standard Webhooks (Clerk/Resend/etc.), HMAC, AWS SNS X.509
 - Outbound webhooks with Standard Webhooks compliant signatures, dynamic endpoint management, and subscription-based routing
 - Workflow orchestration: multi-step pipelines with branching, parallelism, catch/rollback, and timeouts
 - Built-in queue with configurable retry (exponential backoff, jitter), dead letter queue, and stale job recovery
@@ -27,7 +27,7 @@ Key capabilities:
 
 ## Guides
 
-- [Webhook Verification](https://totte-dev.github.io/qhook/guides/webhook-verification): Setup for all 11 supported providers
+- [Webhook Verification](https://totte-dev.github.io/qhook/guides/webhook-verification): Setup for all 13 supported providers
 - [CloudEvents](https://totte-dev.github.io/qhook/guides/cloudevents): Binary and structured mode support
 - [AWS SNS](https://totte-dev.github.io/qhook/guides/sns): Receive events from SNS topics
 - [Workflows](https://totte-dev.github.io/qhook/guides/workflows): Multi-step pipelines with error routing and rollback
@@ -37,6 +37,7 @@ Key capabilities:
 - [Local Development](https://totte-dev.github.io/qhook/guides/local-development): Dev mode, echo endpoint, test events, tunnels
 - [Database Schema](https://totte-dev.github.io/qhook/guides/database-schema): Tables, columns, indexes, and conventions
 - [Error Reference](https://totte-dev.github.io/qhook/guides/error-reference): HTTP status codes and error messages
+- [Compliance & Audit Trail](https://totte-dev.github.io/qhook/guides/compliance): PCI DSS 4.0, SOC 2 compliance framing
 
 ## Deployment
 
@@ -54,6 +55,7 @@ Key capabilities:
 - [Workflow](https://github.com/totte-dev/qhook/tree/main/examples/workflow): Multi-step pipeline with catch routing
 - [Tenant Provisioning](https://github.com/totte-dev/qhook/tree/main/examples/tenant-provision): Tenant provisioning with rollback and auth headers
 - [Alert Remediation](https://github.com/totte-dev/qhook/tree/main/examples/alert-remediation): PagerDuty alert triage, remediate, and escalate
+- [Outbound Webhook](https://github.com/totte-dev/qhook/tree/main/examples/outbound-webhook): Send webhooks to customers with Standard Webhooks signatures
 
 ## Optional
 
