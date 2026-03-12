@@ -1946,7 +1946,7 @@ pub fn validate_event_schema(payload: &str, schema: &str) -> Result<()> {
     let errors: Vec<String> = validator
         .iter_errors(&payload_val)
         .map(|e| {
-            let path = e.instance_path.to_string();
+            let path = e.instance_path().to_string();
             if path.is_empty() {
                 format!("schema validation failed: {e}")
             } else {
