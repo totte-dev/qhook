@@ -164,22 +164,29 @@ server.tool(
 );
 
 // 5. list_events ──────────────────────────────────────────────────────────────
-// NOTE: qhook does not currently expose a GET /api/events endpoint.
-// The CLI `qhook events` command queries the database directly.
-// This tool fetches a single event by ID as a workaround. When a list
-// endpoint is added to the REST API, this tool should be updated.
 
 server.tool(
   "list_events",
-  "Look up events. Currently fetches a single event by ID (qhook REST API does not yet have a list endpoint). Provide event_id to retrieve event details.",
+  "List events with optional filters. Returns events without payload (lightweight).",
   {
-    event_id: z.string().describe("Event ID (ULID) to look up"),
+    source: z.string().optional().describe("Filter by source name"),
+    event_type: z.string().optional().describe("Filter by event type"),
+    since: z.string().optional().describe("Filter events created after this timestamp (ISO 8601)"),
+    until: z.string().optional().describe("Filter events created before this timestamp (ISO 8601)"),
+    limit: z.number().optional().describe("Max results (default: 50, max: 1000)"),
   },
-  async ({ event_id }) => {
-    const res = await qhookFetch(`/api/events/${encodeURIComponent(event_id)}`);
+  async ({ source, event_type, since, until, limit }) => {
+    const params = new URLSearchParams();
+    if (source) params.set("source", source);
+    if (event_type) params.set("event_type", event_type);
+    if (since) params.set("since", since);
+    if (until) params.set("until", until);
+    if (limit) params.set("limit", String(limit));
+    const query = params.toString();
+    const res = await qhookFetch(`/api/events${query ? `?${query}` : ""}`);
     if (!res.ok) {
       return errorResult(
-        `Failed to get event (HTTP ${res.status}): ${JSON.stringify(res.body)}`,
+        `Failed to list events (HTTP ${res.status}): ${JSON.stringify(res.body)}`,
       );
     }
     return textResult(res.body);
@@ -187,27 +194,28 @@ server.tool(
 );
 
 // 6. list_jobs ────────────────────────────────────────────────────────────────
-// NOTE: Like list_events, qhook does not expose a GET /api/jobs list endpoint.
-// Jobs are available nested inside event responses. This tool retrieves jobs
-// for a specific event.
 
 server.tool(
   "list_jobs",
-  "List jobs for a given event. Retrieves the event and returns its associated jobs.",
+  "List jobs with optional filters. Includes status, handler, attempt count.",
   {
-    event_id: z
-      .string()
-      .describe("Event ID (ULID) to list jobs for"),
+    status: z.string().optional().describe("Filter by status (available, running, completed, dead)"),
+    handler: z.string().optional().describe("Filter by handler name"),
+    limit: z.number().optional().describe("Max results (default: 50, max: 1000)"),
   },
-  async ({ event_id }) => {
-    const res = await qhookFetch(`/api/events/${encodeURIComponent(event_id)}`);
+  async ({ status, handler, limit }) => {
+    const params = new URLSearchParams();
+    if (status) params.set("status", status);
+    if (handler) params.set("handler", handler);
+    if (limit) params.set("limit", String(limit));
+    const query = params.toString();
+    const res = await qhookFetch(`/api/jobs${query ? `?${query}` : ""}`);
     if (!res.ok) {
       return errorResult(
-        `Failed to get jobs (HTTP ${res.status}): ${JSON.stringify(res.body)}`,
+        `Failed to list jobs (HTTP ${res.status}): ${JSON.stringify(res.body)}`,
       );
     }
-    const event = res.body as Record<string, unknown>;
-    return textResult(event.jobs ?? []);
+    return textResult(res.body);
   },
 );
 

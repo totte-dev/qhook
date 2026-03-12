@@ -96,7 +96,7 @@ src/
   db.rs         — SQLite/Postgres via sqlx AnyPool
   metrics.rs    — Prometheus metrics (atomic counters, no deps)
   queue.rs      — Job worker (poll, deliver, retry, DLQ)
-  verify.rs     — Signature verification (GitHub, Stripe, Shopify, Twilio, Paddle, HMAC, SNS X.509)
+  verify.rs     — Signature verification (13 providers: GitHub, Stripe, Shopify, PagerDuty, Grafana, Terraform Cloud, GitLab, Linear, Standard Webhooks, HMAC, Twilio, Paddle, SNS X.509)
   cli.rs        — CLI commands (start, init, validate, send, inspect, doctor, tail, export, jobs, events, replay, replay-local)
   alert.rs      — Alert system (Slack, Discord, generic webhook)
   templates/    — Config templates (default, github, stripe, sns, cron, local overlay)
@@ -104,7 +104,7 @@ tests/
   common/       — Shared test infrastructure (QhookProcess, helpers)
   e2e.rs        — E2E integration tests (12 tests, converted from e2e.sh)
   e2e_workflow.rs — Workflow E2E tests (12 tests, converted from e2e_workflow.sh)
-  scenarios.rs  — Scenario-based integration tests (6 tests)
+  scenarios.rs  — Scenario-based integration tests (11 tests)
   e2e_sns.sh    — SNS E2E tests with LocalStack (8 tests, shell)
   mock_server.py — Python mock HTTP server for SNS tests + benchmarks
   bench.sh      — Benchmark script (receive RPS + delivery throughput)
@@ -122,11 +122,17 @@ examples/
   github-webhook/   — GitHub push/PR with verification + fan-out
   filter-transform/ — Event filtering + payload transformation
   stripe-checkout/  — Stripe checkout with dual handlers
+  workflow/         — Multi-step pipeline with catch routing
+  tenant-provision/ — Tenant provisioning with rollback and auth headers
+  alert-remediation/ — PagerDuty alert → triage → remediate → escalate
+  outbound-webhook/ — Send webhooks to customers with Standard Webhooks signatures
+mcp-server/         — MCP server (TypeScript) for AI agent integration
+benches/            — Criterion benchmarks (config, filter, ULID, signature, DB)
 docs/               — GitHub Pages user guide (Jekyll, Cayman theme)
   openapi.yaml      — OpenAPI 3.1 spec (keep in sync with api.rs)
   index.md          — Top page with navigation
   getting-started.md, configuration.md, cli.md, examples.md
-  guides/           — Feature guides (webhook-verification, cloudevents, sns, filtering, monitoring, security, error-reference)
+  guides/           — Feature guides (webhook-verification, cloudevents, sns, filtering, monitoring, security, local-development, database-schema, error-reference, compliance)
   deploy/           — Platform deploy guides (aws, flyio, railway, render)
   why-qhook.md      — DIY vs qhook comparison
 ```

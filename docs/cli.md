@@ -322,6 +322,64 @@ curl -H "Authorization: Bearer $QHOOK_API_TOKEN" \
 
 Response includes job metadata (handler, status, attempt count, scheduled/completed timestamps). When `include_attempts=true`, each delivery attempt is included with status code, duration, and error details.
 
+### GET /api/events
+
+List events with optional filters. Returns events without payload for efficiency.
+
+```bash
+# List all events (default limit: 50)
+curl -H "Authorization: Bearer $QHOOK_API_TOKEN" \
+  http://localhost:8888/api/events
+
+# Filter by source and time range
+curl -H "Authorization: Bearer $QHOOK_API_TOKEN" \
+  "http://localhost:8888/api/events?source=stripe&since=2026-03-01T00:00:00&limit=100"
+
+# Cursor-based pagination
+curl -H "Authorization: Bearer $QHOOK_API_TOKEN" \
+  "http://localhost:8888/api/events?after=01JQ7X...&limit=50"
+```
+
+Query parameters: `source`, `event_type`, `since`, `until`, `limit` (max 1000), `after` (cursor).
+
+Response: `{"events": [...], "has_more": true/false}`
+
+### GET /api/events/:id/jobs
+
+List all jobs created for a specific event.
+
+```bash
+curl -H "Authorization: Bearer $QHOOK_API_TOKEN" \
+  http://localhost:8888/api/events/01JQ7X.../jobs
+```
+
+### GET /api/jobs
+
+List jobs with optional filters.
+
+```bash
+# List dead-letter jobs
+curl -H "Authorization: Bearer $QHOOK_API_TOKEN" \
+  "http://localhost:8888/api/jobs?status=dead"
+
+# Filter by handler
+curl -H "Authorization: Bearer $QHOOK_API_TOKEN" \
+  "http://localhost:8888/api/jobs?handler=deploy&limit=100"
+```
+
+Query parameters: `status`, `handler`, `limit` (max 1000), `after` (cursor).
+
+### GET /api/jobs/:id/attempts
+
+List delivery attempts for a specific job.
+
+```bash
+curl -H "Authorization: Bearer $QHOOK_API_TOKEN" \
+  http://localhost:8888/api/jobs/01JQ7X.../attempts
+```
+
+Each attempt includes: `attempt` number, `status_code`, `error`, `duration_ms`, `created_at`.
+
 ## Environment Variables
 
 | Variable | Description |

@@ -9,7 +9,7 @@ title: Home
 
 - **Queue-first by default.** Every event is persisted before acknowledgment — no event is lost, even if downstream is down.
 - **Zero infrastructure.** Single binary, SQLite for dev, Postgres or MySQL for production. No Redis, no message broker.
-- **11+ provider signature verification.** GitHub, Stripe, Shopify, PagerDuty, Linear, Standard Webhooks, and more.
+- **13 provider signature verification.** GitHub, Stripe, Shopify, PagerDuty, Grafana, Terraform Cloud, GitLab, Linear, Standard Webhooks, Twilio, Paddle, HMAC, and AWS SNS.
 - **From one action to a pipeline.** Single HTTP call or multi-step workflow with branching, parallelism, and rollback.
 - **Production ready.** Prometheus metrics, health checks, alerts, Management API, full audit trail for compliance.
 
@@ -85,7 +85,7 @@ qhook start
 | [Getting Started](getting-started.md) | Installation, first config, first event |
 | [Configuration](configuration.md) | Full YAML config reference |
 | [CLI Reference](cli.md) | All CLI commands and options |
-| [Webhook Verification](guides/webhook-verification.md) | GitHub, Stripe, Shopify, PagerDuty, Grafana, Terraform Cloud, GitLab, HMAC |
+| [Webhook Verification](guides/webhook-verification.md) | 13 providers: GitHub, Stripe, Shopify, Twilio, Paddle, and more |
 | [CloudEvents](guides/cloudevents.md) | Binary and structured mode support |
 | [AWS SNS](guides/sns.md) | Receive events from SNS topics |
 | [Workflows](guides/workflows.md) | Multi-step pipelines with error routing |
@@ -120,6 +120,7 @@ qhook start
 | [workflow](https://github.com/totte-dev/qhook/tree/main/examples/workflow) | Multi-step pipeline with catch routing |
 | [tenant-provision](https://github.com/totte-dev/qhook/tree/main/examples/tenant-provision) | Tenant provisioning with rollback and auth headers |
 | [alert-remediation](https://github.com/totte-dev/qhook/tree/main/examples/alert-remediation) | PagerDuty alert → triage → remediate → escalate |
+| [outbound-webhook](https://github.com/totte-dev/qhook/tree/main/examples/outbound-webhook) | Send webhooks to customers with Standard Webhooks signatures |
 
 ### Other
 
