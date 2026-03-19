@@ -25,6 +25,38 @@ qhook fills the gap: **lightweight, reliable event-to-action execution without i
 
 ---
 
+## Push vs Poll: A Different Architecture
+
+Most webhook infrastructure (Svix, Hookdeck, Convoy) uses a **push-based** model: events arrive and are immediately forwarded to your endpoint. This means your server must be publicly reachable, always available, and fast enough to respond before the sender times out.
+
+qhook takes a **poll-based** approach: events are received, verified, and persisted — then **your application pulls them when ready**.
+
+```
+Push-based (Svix, Hookdeck, Convoy):
+  Stripe → gateway → POST to your server (must be up, must respond fast)
+                      ↓ timeout?
+                   retry storm → your server overloaded
+
+Poll-based (qhook):
+  Stripe → qhook → ACK (< 500ms) → event stored
+                                     ↓
+                          your app polls when ready (no timeout pressure)
+```
+
+### Why poll-based matters
+
+| | Push-based | Poll-based (qhook) |
+|---|---|---|
+| **Public endpoint required** | Yes — your server must be internet-reachable | No — your app initiates the connection |
+| **Timeout pressure** | Sender times out if you're slow (Vercel 10s, Lambda 30s) | None — process at your own pace |
+| **Backpressure** | Sender controls the rate | Receiver controls the rate |
+| **Scaling** | Must scale to handle spikes instantly | Pull at your capacity |
+| **Firewall-friendly** | Requires inbound rules | Outbound only |
+
+> **Mental model:** With push, the webhook sender controls your infrastructure. With poll, **you** control when and how fast you process events. Webhooks are controlled by the receiver, not the sender.
+
+---
+
 ## How It Works
 
 ```
@@ -425,6 +457,32 @@ Self-hosting qhook replaces paid webhook and workflow services. Here's what the 
 **Break-even point**: qhook pays for itself compared to Svix at ~10K messages/month, compared to Hookdeck at ~50K events/month, and compared to Step Functions at ~5M transitions/month.
 
 > These estimates assume on-demand AWS pricing. Reserved instances or spot reduce costs further. qhook's single-binary design means no Redis, no message broker, no Elasticsearch — just compute + database.
+
+---
+
+## Feature Comparison: qhook vs Svix vs Hookdeck vs Convoy
+
+| Feature | qhook | Svix | Hookdeck | Convoy |
+|---------|-------|------|----------|--------|
+| **Architecture** | Poll-based | Push-based | Push-based | Push-based |
+| **Direction** | Inbound + Outbound | Outbound only | Inbound (+ Outpost) | Inbound + Outbound |
+| **Language** | Rust | Rust/Python | Node.js/Go | Go |
+| **OSS** | Apache 2.0 | MIT (core) | Partial (Outpost) | MPL-2.0 |
+| **Self-host** | Single binary | Docker Compose | Docker (Outpost) | Docker Compose |
+| **Webhook verification** | 13 providers | N/A (sending side) | Limited | Limited |
+| **Workflow engine** | Built-in (YAML) | No | No | No |
+| **Retry + DLQ** | Built-in | Built-in | Built-in | Built-in |
+| **Pricing (Cloud)** | Free / $19 / $49 | Free / $10 / $490 | Free / $15~ | Free (self-host) / $99~ |
+| **Predictable cost** | Fixed tiers | Overage after limit | Per-event overage | Fixed tiers |
+| **Runtime** | Cloudflare Workers | AWS/GCP | AWS | AWS/GCP |
+| **Egress cost** | $0 (Cloudflare) | Standard | Standard | Standard |
+
+### Key takeaways
+
+- **Price gap**: qhook's $19 Starter and $49 Pro fill the gap between Svix $10 (limited) and $490 (enterprise), and sit below Convoy's $99 cloud minimum.
+- **Poll-based is unique**: Every competitor uses push-based delivery. qhook is the only poll-based gateway — eliminating timeout issues (Vercel 10s, Lambda 30s) and giving receivers full control.
+- **Workflow engine included**: qhook is the only option with a built-in multi-step workflow engine (branching, parallelism, rollback) — no need for a separate orchestrator.
+- **Zero egress**: Cloudflare Workers have no egress charges, unlike AWS/GCP-hosted competitors.
 
 ---
 
