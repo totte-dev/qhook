@@ -1,6 +1,6 @@
 # qhook
 
-**Queue-first webhook gateway with built-in retry and workflow engine.** Verify, enqueue, ACK — then deliver reliably. Single binary, zero infrastructure.
+**Queue-first, poll-based webhook gateway with built-in retry and workflow engine.** Verify, enqueue, ACK — then deliver reliably. Your app pulls events when ready — no public endpoint needed. Single binary, zero infrastructure.
 
 <!-- badges -->
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
@@ -35,6 +35,7 @@ Simple:                           Multi-step:
 
 ## Why qhook?
 
+- **Poll-based architecture.** Your app pulls events when ready — no public endpoint needed, no timeout pressure. Webhooks are controlled by the receiver, not the sender.
 - **Zero infrastructure.** Single binary, SQLite for dev, Postgres or MySQL for production. No Redis, no message broker.
 - **Webhook verification built in.** GitHub, Stripe, Shopify, Twilio, Paddle, PagerDuty, Grafana, Terraform Cloud, GitLab, Linear, Standard Webhooks (Clerk/Resend/etc.), HMAC, AWS SNS X.509. IP allowlisting per source.
 - **Outbound webhooks.** Send webhooks to your customers with [Standard Webhooks](https://www.standardwebhooks.com/) compliant signatures. Dynamic endpoint management, subscription-based routing, per-endpoint signing secrets.
@@ -50,7 +51,7 @@ cargo install qhook
 # Or: docker run -p 8888:8888 -v $(pwd)/qhook.yaml:/data/qhook.yaml ghcr.io/totte-dev/qhook
 ```
 
-### Simple: one event, one action
+### Simple: Stripe webhook → billing + analytics
 
 ```yaml
 # qhook.yaml
@@ -58,23 +59,33 @@ database:
   driver: sqlite
 
 sources:
+  stripe:
+    type: webhook
+    verify: stripe
+    secret: ${STRIPE_WEBHOOK_SECRET}
+
+handlers:
+  billing:
+    source: stripe
+    events: [invoice.paid, customer.subscription.updated]
+    url: http://billing:3000/webhook
+    idempotency_key: "$.id"
+    retry: { max: 8 }
+  analytics:
+    source: stripe
+    events: ["*"]
+    url: http://analytics:3000/ingest
+```
+
+### Multi-step: GitHub push → build → deploy → rollback
+
+```yaml
+sources:
   github:
     type: webhook
     verify: github
     secret: ${GITHUB_WEBHOOK_SECRET}
 
-handlers:
-  deploy:
-    source: github
-    events: [push]
-    url: http://deployer:3000/deploy
-    filter: "$.ref == refs/heads/main"
-    retry: { max: 5 }
-```
-
-### Multi-step: event triggers a pipeline
-
-```yaml
 workflows:
   deploy-pipeline:
     source: github

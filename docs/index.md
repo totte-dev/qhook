@@ -5,8 +5,9 @@ title: Home
 
 # qhook
 
-**Queue-first webhook gateway with built-in retry and workflow engine.** Verify, enqueue, ACK — then deliver reliably. Single binary, zero infrastructure.
+**Queue-first, poll-based webhook gateway with built-in retry and workflow engine.** Verify, enqueue, ACK — then deliver reliably. Your app pulls events when ready — no public endpoint needed. Single binary, zero infrastructure.
 
+- **Poll-based architecture.** Your app pulls events when ready — no public endpoint needed, no timeout pressure. Webhooks are controlled by the receiver, not the sender.
 - **Queue-first by default.** Every event is persisted before acknowledgment — no event is lost, even if downstream is down.
 - **Zero infrastructure.** Single binary, SQLite for dev, Postgres or MySQL for production. No Redis, no message broker.
 - **13 provider signature verification.** GitHub, Stripe, Shopify, PagerDuty, Grafana, Terraform Cloud, GitLab, Linear, Standard Webhooks, Twilio, Paddle, HMAC, and AWS SNS.
@@ -23,7 +24,7 @@ cargo install qhook
 docker run -p 8888:8888 -v $(pwd)/qhook.yaml:/data/qhook.yaml ghcr.io/totte-dev/qhook
 ```
 
-### Simple: one event, one action
+### Simple: Stripe webhook → billing + analytics
 
 ```yaml
 # qhook.yaml
@@ -31,23 +32,33 @@ database:
   driver: sqlite
 
 sources:
+  stripe:
+    type: webhook
+    verify: stripe
+    secret: ${STRIPE_WEBHOOK_SECRET}
+
+handlers:
+  billing:
+    source: stripe
+    events: [invoice.paid, customer.subscription.updated]
+    url: http://billing:3000/webhook
+    idempotency_key: "$.id"
+    retry: { max: 8 }
+  analytics:
+    source: stripe
+    events: ["*"]
+    url: http://analytics:3000/ingest
+```
+
+### Multi-step: GitHub push → build → deploy → rollback
+
+```yaml
+sources:
   github:
     type: webhook
     verify: github
     secret: ${GITHUB_WEBHOOK_SECRET}
 
-handlers:
-  deploy:
-    source: github
-    events: [push]
-    url: http://deployer:3000/deploy
-    filter: "$.ref == refs/heads/main"
-    retry: { max: 5 }
-```
-
-### Multi-step: event triggers a pipeline
-
-```yaml
 workflows:
   deploy-pipeline:
     source: github
@@ -82,6 +93,7 @@ qhook start
 
 | Guide | Description |
 |-------|-------------|
+| [5-Minute Quickstart](quickstart.md) | Stripe webhooks in 5 minutes — no Docker needed |
 | [Getting Started](getting-started.md) | Installation, first config, first event |
 | [Configuration](configuration.md) | Full YAML config reference |
 | [CLI Reference](cli.md) | All CLI commands and options |
