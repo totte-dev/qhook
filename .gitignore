@@ -34,3 +34,4 @@ sdks/typescript/dist/
 # Private docs
 docs/private/
 .claude/
+CLAUDE.md
