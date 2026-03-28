@@ -1419,9 +1419,15 @@ impl Args {
                     let handler = format!("queue/{}", name);
 
                     if let Some(job_id) = id {
-                        // Verify the job belongs to this queue
-                        let jobs = db.list_jobs_by_handler(&handler, Some("dead"), 1000).await?;
-                        if !jobs.iter().any(|j| j.id == job_id) {
+                        // Verify the job belongs to this queue by checking handler directly
+                        let row: Option<(String,)> = sqlx::query_as(
+                            "SELECT handler FROM jobs WHERE id = $1 AND handler = $2 AND status = 'dead'",
+                        )
+                        .bind(&job_id)
+                        .bind(&handler)
+                        .fetch_optional(&db.pool)
+                        .await?;
+                        if row.is_none() {
                             anyhow::bail!(
                                 "Job '{}' not found in queue '{}' dead-letter.",
                                 job_id,

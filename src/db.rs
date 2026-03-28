@@ -1351,7 +1351,7 @@ impl Database {
     pub async fn retry_job(&self, job_id: &str) -> Result<bool> {
         let now = format_now();
         let result = sqlx::query(
-            "UPDATE jobs SET status = 'available', scheduled_at = $1, last_error = NULL \
+            "UPDATE jobs SET status = 'available', scheduled_at = $1, last_error = NULL, attempt = 0 \
              WHERE id = $2 AND status IN ('dead', 'retryable')",
         )
         .bind(&now)
@@ -2088,26 +2088,27 @@ impl Database {
 
     /// Delete all jobs for a specific handler.
     pub async fn delete_jobs_by_handler(&self, handler: &str) -> Result<u64> {
-        // Delete attempts first
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             "DELETE FROM job_attempts WHERE job_id IN (SELECT id FROM jobs WHERE handler = $1)",
         )
         .bind(handler)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         let result = sqlx::query("DELETE FROM jobs WHERE handler = $1")
             .bind(handler)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(result.rows_affected())
     }
 
-    /// Retry all dead jobs for a specific handler.
+    /// Retry all dead jobs for a specific handler. Resets attempt counter.
     pub async fn retry_dead_jobs_by_handler(&self, handler: &str) -> Result<u64> {
         let now = format_now();
         let result = sqlx::query(
-            "UPDATE jobs SET status = 'available', scheduled_at = $1, last_error = NULL \
+            "UPDATE jobs SET status = 'available', scheduled_at = $1, last_error = NULL, attempt = 0 \
              WHERE handler = $2 AND status = 'dead'",
         )
         .bind(&now)
