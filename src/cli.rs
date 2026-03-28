@@ -393,6 +393,18 @@ impl Args {
                 if cfg.alerts.is_some() {
                     println!("Alerts: configured");
                 }
+                // Production warnings
+                if cfg.api.auth_token.is_none() {
+                    eprintln!("[warn] Warning: api.auth_token not configured. The management API is open to anyone.");
+                }
+                if cfg.server.allow_private_urls {
+                    eprintln!("[warn] Warning: allow_private_urls is enabled. Disable in production to prevent SSRF.");
+                }
+                for (name, queue) in &cfg.queues {
+                    if queue.api_key.is_none() {
+                        eprintln!("[warn] Warning: queue '{}' has no api_key. Anyone can consume messages.", name);
+                    }
+                }
                 tracing::info!("Config is valid");
                 Ok(())
             }
