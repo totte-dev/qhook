@@ -15,11 +15,15 @@ impl LabeledCounter {
     }
 
     fn inc(&self, label: &str) {
+        self.inc_by(label, 1);
+    }
+
+    fn inc_by(&self, label: &str, n: u64) {
         // Fast path: read lock
         {
             let map = self.counters.read().unwrap_or_else(|e| e.into_inner());
             if let Some(counter) = map.get(label) {
-                counter.fetch_add(1, Ordering::Relaxed);
+                counter.fetch_add(n, Ordering::Relaxed);
                 return;
             }
         }
@@ -27,7 +31,7 @@ impl LabeledCounter {
         let mut map = self.counters.write().unwrap_or_else(|e| e.into_inner());
         map.entry(label.to_string())
             .or_insert_with(|| AtomicU64::new(0))
-            .fetch_add(1, Ordering::Relaxed);
+            .fetch_add(n, Ordering::Relaxed);
     }
 
     fn snapshot(&self) -> Vec<(String, u64)> {
@@ -241,27 +245,19 @@ impl Metrics {
 
     // Queue (pull-mode) metrics
     pub fn inc_queue_messages_delivered(&self, queue: &str, count: u64) {
-        for _ in 0..count {
-            self.queue_messages_delivered.inc(queue);
-        }
+        self.queue_messages_delivered.inc_by(queue, count);
     }
 
     pub fn inc_queue_messages_acked(&self, queue: &str, count: u64) {
-        for _ in 0..count {
-            self.queue_messages_acked.inc(queue);
-        }
+        self.queue_messages_acked.inc_by(queue, count);
     }
 
     pub fn inc_queue_messages_nacked(&self, queue: &str, count: u64) {
-        for _ in 0..count {
-            self.queue_messages_nacked.inc(queue);
-        }
+        self.queue_messages_nacked.inc_by(queue, count);
     }
 
     pub fn inc_queue_messages_expired(&self, queue: &str, count: u64) {
-        for _ in 0..count {
-            self.queue_messages_expired.inc(queue);
-        }
+        self.queue_messages_expired.inc_by(queue, count);
     }
 
     pub fn dlq_total(&self) -> u64 {

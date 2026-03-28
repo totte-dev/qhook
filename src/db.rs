@@ -1493,11 +1493,12 @@ impl Database {
             };
 
             if attempt < max_attempts {
-                // Retry with exponential backoff: 30s * 2^attempt
-                let backoff_secs = 30i64 * (1i64 << attempt.min(20));
+                // Retry with exponential backoff: 30s * 2^attempt, capped at 1 hour
+                let backoff_secs = (30i64 * (1i64 << attempt.min(20))).min(3600);
                 let next_at = format_dt(now + chrono::Duration::seconds(backoff_secs));
                 sqlx::query(
-                    "UPDATE jobs SET status = 'retryable', scheduled_at = $1, last_error = 'nack' WHERE id = $2",
+                    "UPDATE jobs SET status = 'retryable', scheduled_at = $1, last_error = 'nack' \
+                     WHERE id = $2 AND status = 'running'",
                 )
                 .bind(&next_at)
                 .bind(id)
@@ -1507,7 +1508,8 @@ impl Database {
             } else {
                 // Move to DLQ
                 sqlx::query(
-                    "UPDATE jobs SET status = 'dead', completed_at = $1, last_error = 'nack: max attempts exceeded' WHERE id = $2",
+                    "UPDATE jobs SET status = 'dead', completed_at = $1, last_error = 'nack: max attempts exceeded' \
+                     WHERE id = $2 AND status = 'running'",
                 )
                 .bind(&now_str)
                 .bind(id)
