@@ -140,6 +140,11 @@ enum Command {
         #[command(subcommand)]
         action: WorkflowRunsAction,
     },
+    /// Manage pull-mode queues
+    Queues {
+        #[command(subcommand)]
+        action: QueuesAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -248,6 +253,73 @@ enum WorkflowRunsAction {
         /// Workflow run ID
         #[arg()]
         run_id: String,
+        /// Path to config file
+        #[arg(short, long, default_value = "qhook.yaml")]
+        config: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum QueuesAction {
+    /// List all configured queues with job counts
+    List {
+        /// Path to config file
+        #[arg(short, long, default_value = "qhook.yaml")]
+        config: PathBuf,
+    },
+    /// Show detailed stats for a queue
+    Inspect {
+        /// Queue name
+        #[arg()]
+        name: String,
+        /// Max number of recent messages to show
+        #[arg(short, long, default_value = "10")]
+        limit: i32,
+        /// Path to config file
+        #[arg(short, long, default_value = "qhook.yaml")]
+        config: PathBuf,
+    },
+    /// Delete all jobs for a queue
+    Drain {
+        /// Queue name
+        #[arg()]
+        name: String,
+        /// Skip confirmation prompt
+        #[arg(short, long)]
+        force: bool,
+        /// Path to config file
+        #[arg(short, long, default_value = "qhook.yaml")]
+        config: PathBuf,
+    },
+    /// List dead-letter messages for a queue
+    Dlq {
+        /// Queue name
+        #[arg()]
+        name: String,
+        /// Max number of messages to show
+        #[arg(short, long, default_value = "20")]
+        limit: i32,
+        /// Path to config file
+        #[arg(short, long, default_value = "qhook.yaml")]
+        config: PathBuf,
+    },
+    /// Retry dead jobs for a queue
+    Retry {
+        /// Queue name
+        #[arg()]
+        name: String,
+        /// Specific job ID to retry (omit to retry all dead jobs)
+        #[arg(long)]
+        id: Option<String>,
+        /// Path to config file
+        #[arg(short, long, default_value = "qhook.yaml")]
+        config: PathBuf,
+    },
+    /// Show the next available message without consuming it
+    Peek {
+        /// Queue name
+        #[arg()]
+        name: String,
         /// Path to config file
         #[arg(short, long, default_value = "qhook.yaml")]
         config: PathBuf,
@@ -1132,6 +1204,270 @@ impl Args {
                 );
                 Ok(())
             }
+            Command::Queues { action } => match action {
+                QueuesAction::List { config } => {
+                    let cfg = Config::load(&config)?;
+                    let db = crate::db::Database::connect(&cfg.database).await?;
+                    db.migrate().await?;
+
+                    if cfg.queues.is_empty() {
+                        println!("No queues configured.");
+                        return Ok(());
+                    }
+
+                    println!(
+                        "{:<20} {:<10} {:<10} {:<12} {:<10}",
+                        "NAME", "SOURCE", "PENDING", "PROCESSING", "DEAD"
+                    );
+                    println!("{}", "-".repeat(62));
+
+                    for (name, queue_cfg) in &cfg.queues {
+                        let handler = format!("queue/{}", name);
+                        let counts = db.count_jobs_by_handler_status(&handler).await?;
+                        let mut pending: i64 = 0;
+                        let mut processing: i64 = 0;
+                        let mut dead: i64 = 0;
+                        for (status, cnt) in &counts {
+                            match status.as_str() {
+                                "available" | "retryable" => pending += cnt,
+                                "running" => processing += cnt,
+                                "dead" => dead += cnt,
+                                _ => {}
+                            }
+                        }
+                        println!(
+                            "{:<20} {:<10} {:<10} {:<12} {:<10}",
+                            name,
+                            &queue_cfg.source[..queue_cfg.source.len().min(8)],
+                            pending,
+                            processing,
+                            dead,
+                        );
+                    }
+                    Ok(())
+                }
+                QueuesAction::Inspect {
+                    name,
+                    limit,
+                    config,
+                } => {
+                    let cfg = Config::load(&config)?;
+                    if !cfg.queues.contains_key(&name) {
+                        let available: Vec<_> = cfg.queues.keys().collect();
+                        anyhow::bail!(
+                            "Unknown queue '{}'. Available: {}",
+                            name,
+                            available
+                                .iter()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
+
+                    let db = crate::db::Database::connect(&cfg.database).await?;
+                    db.migrate().await?;
+
+                    let handler = format!("queue/{}", name);
+                    let queue_cfg = &cfg.queues[&name];
+
+                    println!("Queue: {}", name);
+                    println!("  Source: {}", queue_cfg.source);
+                    if !queue_cfg.events.is_empty() {
+                        println!("  Events: {}", queue_cfg.events.join(", "));
+                    }
+                    println!("  Visibility timeout: {}", queue_cfg.visibility_timeout);
+                    if let Some(max) = queue_cfg.max_attempts {
+                        println!("  Max attempts: {}", max);
+                    }
+
+                    let counts = db.count_jobs_by_handler_status(&handler).await?;
+                    let mut pending: i64 = 0;
+                    let mut processing: i64 = 0;
+                    let mut dead: i64 = 0;
+                    let mut completed: i64 = 0;
+                    for (status, cnt) in &counts {
+                        match status.as_str() {
+                            "available" | "retryable" => pending += cnt,
+                            "running" => processing += cnt,
+                            "dead" => dead += cnt,
+                            "completed" => completed += cnt,
+                            _ => {}
+                        }
+                    }
+                    println!("\n  Pending: {}", pending);
+                    println!("  Processing: {}", processing);
+                    println!("  Dead: {}", dead);
+                    println!("  Completed: {}", completed);
+
+                    // Show recent messages
+                    let jobs = db.list_jobs_by_handler(&handler, None, limit).await?;
+                    if !jobs.is_empty() {
+                        println!("\nRecent messages:");
+                        println!(
+                            "  {:<28} {:<12} {:<8} {:<20}",
+                            "ID", "STATUS", "ATTEMPT", "SCHEDULED"
+                        );
+                        println!("  {}", "-".repeat(68));
+                        for job in &jobs {
+                            println!(
+                                "  {:<28} {:<12} {}/{:<5} {}",
+                                &job.id[..job.id.len().min(26)],
+                                job.status,
+                                job.attempt,
+                                job.max_attempts,
+                                &job.scheduled_at[..job.scheduled_at.len().min(19)],
+                            );
+                        }
+                    }
+                    Ok(())
+                }
+                QueuesAction::Drain {
+                    name,
+                    force,
+                    config,
+                } => {
+                    let cfg = Config::load(&config)?;
+                    if !cfg.queues.contains_key(&name) {
+                        anyhow::bail!("Unknown queue '{}'.", name);
+                    }
+
+                    let db = crate::db::Database::connect(&cfg.database).await?;
+                    db.migrate().await?;
+
+                    let handler = format!("queue/{}", name);
+
+                    if !force {
+                        let counts = db.count_jobs_by_handler_status(&handler).await?;
+                        let total: i64 = counts.iter().map(|(_, c)| c).sum();
+                        if total == 0 {
+                            println!("Queue '{}' is already empty.", name);
+                            return Ok(());
+                        }
+                        print!("Delete all {} job(s) from queue '{}'? [y/N] ", total, name);
+                        use std::io::Write;
+                        std::io::stdout().flush()?;
+                        let mut input = String::new();
+                        std::io::stdin().read_line(&mut input)?;
+                        if !input.trim().eq_ignore_ascii_case("y") {
+                            println!("Aborted.");
+                            return Ok(());
+                        }
+                    }
+
+                    let deleted = db.delete_jobs_by_handler(&handler).await?;
+                    println!("Deleted {} job(s) from queue '{}'.", deleted, name);
+                    Ok(())
+                }
+                QueuesAction::Dlq { name, limit, config } => {
+                    let cfg = Config::load(&config)?;
+                    if !cfg.queues.contains_key(&name) {
+                        anyhow::bail!("Unknown queue '{}'.", name);
+                    }
+
+                    let db = crate::db::Database::connect(&cfg.database).await?;
+                    db.migrate().await?;
+
+                    let handler = format!("queue/{}", name);
+                    let jobs = db.list_jobs_by_handler(&handler, Some("dead"), limit).await?;
+
+                    if jobs.is_empty() {
+                        println!("No dead-letter messages in queue '{}'.", name);
+                        return Ok(());
+                    }
+
+                    println!(
+                        "{:<28} {:<8} {:<20} {}",
+                        "ID", "ATTEMPT", "SCHEDULED", "ERROR"
+                    );
+                    println!("{}", "-".repeat(80));
+                    for job in &jobs {
+                        let err = job.last_error.as_deref().unwrap_or("-");
+                        println!(
+                            "{:<28} {}/{:<5} {:<20} {}",
+                            &job.id[..job.id.len().min(26)],
+                            job.attempt,
+                            job.max_attempts,
+                            &job.scheduled_at[..job.scheduled_at.len().min(19)],
+                            err,
+                        );
+                    }
+                    println!("\n{} dead-letter message(s).", jobs.len());
+                    Ok(())
+                }
+                QueuesAction::Retry { name, id, config } => {
+                    let cfg = Config::load(&config)?;
+                    if !cfg.queues.contains_key(&name) {
+                        anyhow::bail!("Unknown queue '{}'.", name);
+                    }
+
+                    let db = crate::db::Database::connect(&cfg.database).await?;
+                    db.migrate().await?;
+
+                    let handler = format!("queue/{}", name);
+
+                    if let Some(job_id) = id {
+                        // Verify the job belongs to this queue
+                        let jobs = db.list_jobs_by_handler(&handler, Some("dead"), 1000).await?;
+                        if !jobs.iter().any(|j| j.id == job_id) {
+                            anyhow::bail!(
+                                "Job '{}' not found in queue '{}' dead-letter.",
+                                job_id,
+                                name
+                            );
+                        }
+                        if db.retry_job(&job_id).await? {
+                            println!("Job {} queued for retry.", job_id);
+                        } else {
+                            println!("Job {} not in retryable/dead state.", job_id);
+                        }
+                    } else {
+                        let count = db.retry_dead_jobs_by_handler(&handler).await?;
+                        println!(
+                            "{} dead job(s) in queue '{}' queued for retry.",
+                            count, name
+                        );
+                    }
+                    Ok(())
+                }
+                QueuesAction::Peek { name, config } => {
+                    let cfg = Config::load(&config)?;
+                    if !cfg.queues.contains_key(&name) {
+                        anyhow::bail!("Unknown queue '{}'.", name);
+                    }
+
+                    let db = crate::db::Database::connect(&cfg.database).await?;
+                    db.migrate().await?;
+
+                    let handler = format!("queue/{}", name);
+
+                    match db.peek_queue_job(&handler).await? {
+                        Some(job) => {
+                            println!("Next message in queue '{}':", name);
+                            println!("  ID: {}", job.id);
+                            println!("  Event: {}", job.event_id);
+                            println!("  Status: {}", job.status);
+                            println!("  Attempt: {}/{}", job.attempt, job.max_attempts);
+                            println!("  Scheduled: {}", job.scheduled_at);
+
+                            // Fetch event payload for display
+                            if let Ok(Some(event)) = db.get_event_by_id(&job.event_id).await {
+                                let payload_display = if event.payload.len() > 200 {
+                                    format!("{}...", &event.payload[..200])
+                                } else {
+                                    event.payload.clone()
+                                };
+                                println!("  Type: {}", event.event_type);
+                                println!("  Payload: {}", payload_display);
+                            }
+                        }
+                        None => {
+                            println!("Queue '{}' is empty.", name);
+                        }
+                    }
+                    Ok(())
+                }
+            },
             Command::Events { action } => match action {
                 EventsAction::List { limit, config } => {
                     let cfg = Config::load(&config)?;
