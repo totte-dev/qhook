@@ -48,6 +48,15 @@ curl http://localhost:8888/metrics
 | `qhook_circuit_breaker_opened_total` | `handler` | Times a circuit breaker opened (after consecutive failures) |
 | `qhook_circuit_breaker_rejected_total` | `handler` | Deliveries rejected by an open circuit breaker |
 
+**Queue (Pull-Mode) Counters:**
+
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| `qhook_queue_messages_delivered_total` | `queue` | Messages delivered to consumers via GET /messages |
+| `qhook_queue_messages_acked_total` | `queue` | Messages acknowledged by consumers |
+| `qhook_queue_messages_nacked_total` | `queue` | Messages negatively acknowledged (retry or DLQ) |
+| `qhook_queue_messages_expired_total` | `queue` | Messages recovered after visibility timeout |
+
 **Workflow Counters:**
 
 | Metric | Labels | Description |

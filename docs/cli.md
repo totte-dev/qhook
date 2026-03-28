@@ -200,6 +200,56 @@ qhook workflow-runs redrive <RUN_ID>       # redrive a specific workflow run
 
 Resets the workflow run to `pending` and creates a new job for the first step.
 
+### qhook queues list
+
+List all configured queues with pending, processing, and dead counts.
+
+```bash
+qhook queues list
+```
+
+### qhook queues inspect
+
+Show detailed stats for a queue.
+
+```bash
+qhook queues inspect billing
+```
+
+### qhook queues peek
+
+View the next available message without consuming it.
+
+```bash
+qhook queues peek billing
+```
+
+### qhook queues dlq
+
+List dead-letter messages for a queue.
+
+```bash
+qhook queues dlq billing
+```
+
+### qhook queues retry
+
+Retry dead jobs for a queue.
+
+```bash
+qhook queues retry billing                 # retry all dead jobs
+qhook queues retry billing --id <JOB_ID>   # retry a specific job
+```
+
+### qhook queues drain
+
+Delete all jobs for a queue.
+
+```bash
+qhook queues drain billing                 # interactive confirmation
+qhook queues drain billing --force         # skip confirmation
+```
+
 ### qhook tail
 
 Stream events and job results in real time.
