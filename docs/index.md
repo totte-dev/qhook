@@ -105,6 +105,7 @@ qhook start
 | [Monitoring](guides/monitoring.md) | Prometheus metrics, health checks, alerts |
 | [Security](guides/security.md) | Security features and best practices |
 | [Local Development](guides/local-development.md) | Dev mode, echo endpoint, test events, tunnels |
+| [Local to Production](guides/local-to-production.md) | Environment overlays, DB migration, security checklist |
 | [Database Schema](guides/database-schema.md) | Tables, columns, indexes, and conventions |
 | [Error Reference](guides/error-reference.md) | HTTP status codes and error messages |
 | [Compliance & Audit Trail](guides/compliance.md) | PCI DSS 4.0, SOC 2 compliance framing |
