@@ -1,6 +1,6 @@
 # qhook
 
-**Queue-first, poll-based webhook gateway with built-in retry and workflow engine.** Verify, enqueue, ACK — then deliver reliably. Your app pulls events when ready — no public endpoint needed. Single binary, zero infrastructure.
+**Lightweight event gateway with Push and Pull delivery, built-in retry, and workflow engine.** Verify, enqueue, ACK — then deliver via HTTP push or let your app pull when ready. Single binary, zero infrastructure.
 
 <!-- badges -->
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
@@ -35,7 +35,7 @@ Simple:                           Multi-step:
 
 ## Why qhook?
 
-- **Poll-based architecture.** Your app pulls events when ready — no public endpoint needed, no timeout pressure. Webhooks are controlled by the receiver, not the sender.
+- **Push and Pull delivery.** Push mode delivers events to your HTTP endpoints instantly. Pull mode lets your app poll a queue and ACK when done — no public endpoint needed, no timeout pressure. Use both in the same config.
 - **Zero infrastructure.** Single binary, SQLite for dev, Postgres or MySQL for production. No Redis, no message broker.
 - **Webhook verification built in.** GitHub, Stripe, Shopify, Twilio, Paddle, PagerDuty, Grafana, Terraform Cloud, GitLab, Linear, Standard Webhooks (Clerk/Resend/etc.), HMAC, AWS SNS X.509. IP allowlisting per source.
 - **Outbound webhooks.** Send webhooks to your customers with [Standard Webhooks](https://www.standardwebhooks.com/) compliant signatures. Dynamic endpoint management, subscription-based routing, per-endpoint signing secrets.
@@ -113,8 +113,33 @@ workflows:
         end: true
 ```
 
+### Pull mode: Stripe events → consumer polls when ready
+
+```yaml
+sources:
+  stripe:
+    type: webhook
+    verify: stripe
+    secret: ${STRIPE_WEBHOOK_SECRET}
+
+queues:
+  billing:
+    source: stripe
+    events: [invoice.paid, invoice.payment_failed]
+    visibility_timeout: 60s
+    max_attempts: 5
+```
+
 ```bash
 qhook start
+
+# Consumer pulls messages
+curl http://localhost:8888/api/queues/billing/messages?wait=10s&batch=5
+
+# Acknowledge after processing
+curl -X POST http://localhost:8888/api/queues/billing/ack \
+  -H "Content-Type: application/json" \
+  -d '{"ids": ["01J..."]}'
 ```
 
 > See the [Getting Started guide](https://totte-dev.github.io/qhook/getting-started) for a full walkthrough.

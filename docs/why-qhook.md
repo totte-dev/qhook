@@ -5,7 +5,7 @@ title: Why qhook?
 
 # Why qhook?
 
-qhook is a **lightweight workflow engine with built-in queue and retry**. It receives events (webhooks, SNS, API calls) and executes HTTP actions reliably — from a single call to a multi-step pipeline with error routing and rollback. Single binary, no Redis, no Kubernetes.
+qhook is a **lightweight event gateway with Push and Pull delivery, built-in queue, retry, and workflow engine**. It receives events (webhooks, SNS, API calls) and delivers them reliably — push to HTTP endpoints or pull from queues — from a single action to a multi-step pipeline with error routing and rollback. Single binary, no Redis, no Kubernetes.
 
 ---
 
@@ -25,35 +25,36 @@ qhook fills the gap: **lightweight, reliable event-to-action execution without i
 
 ---
 
-## Push vs Poll: A Different Architecture
+## Push and Pull: Two Delivery Modes, One Gateway
 
-Most webhook infrastructure (Svix, Hookdeck, Convoy) uses a **push-based** model: events arrive and are immediately forwarded to your endpoint. This means your server must be publicly reachable, always available, and fast enough to respond before the sender times out.
-
-qhook takes a **poll-based** approach: events are received, verified, and persisted — then **your application pulls them when ready**.
+Most webhook infrastructure (Svix, Hookdeck, Convoy) only supports **push-based** delivery: events arrive and are immediately forwarded to your endpoint. qhook is the only webhook gateway that supports **both Push and Pull delivery** as first-class modes.
 
 ```
-Push-based (Svix, Hookdeck, Convoy):
-  Stripe → gateway → POST to your server (must be up, must respond fast)
-                      ↓ timeout?
-                   retry storm → your server overloaded
+Push mode (handlers):
+  Stripe → qhook → ACK → POST to your server (with retry + DLQ)
 
-Poll-based (qhook):
-  Stripe → qhook → ACK (< 500ms) → event stored
-                                     ↓
-                          your app polls when ready (no timeout pressure)
+Pull mode (queues):
+  Stripe → qhook → ACK → event stored in queue
+                          ↓
+               your app polls when ready → ack/nack
 ```
 
-### Why poll-based matters
+Use both in the same config — some events push to always-on services, others queue for batch workers.
 
-| | Push-based | Poll-based (qhook) |
+### Why Pull mode matters
+
+Every competitor (Convoy, Hookdeck, Svix) is push-only. qhook is the only webhook gateway with built-in pull delivery.
+
+| | Push-only (competitors) | Push + Pull (qhook) |
 |---|---|---|
-| **Public endpoint required** | Yes — your server must be internet-reachable | No — your app initiates the connection |
-| **Timeout pressure** | Sender times out if you're slow (Vercel 10s, Lambda 30s) | None — process at your own pace |
-| **Backpressure** | Sender controls the rate | Receiver controls the rate |
-| **Scaling** | Must scale to handle spikes instantly | Pull at your capacity |
-| **Firewall-friendly** | Requires inbound rules | Outbound only |
+| **Public endpoint required** | Yes — your server must be internet-reachable | Push: yes. Pull: no — your app initiates the connection |
+| **Timeout pressure** | Sender times out if you're slow (Vercel 10s, Lambda 30s) | Push: managed by retry. Pull: none — process at your own pace |
+| **Backpressure** | Sender controls the rate | Push: rate limiting. Pull: receiver controls the rate |
+| **Scaling** | Must scale to handle spikes instantly | Push: scale to match. Pull: consume at your capacity |
+| **Firewall-friendly** | Requires inbound rules | Push: inbound rules. Pull: outbound only |
+| **Batch processing** | Awkward — must buffer externally | Pull mode with `batch` parameter, built-in |
 
-> **Mental model:** With push, the webhook sender controls your infrastructure. With poll, **you** control when and how fast you process events. Webhooks are controlled by the receiver, not the sender.
+> **Mental model:** Push is great for always-on microservices. Pull is great for batch workers, cron jobs, firewalled environments, and anything that needs explicit backpressure control. With qhook, you choose per-source.
 
 ---
 
@@ -464,7 +465,7 @@ Self-hosting qhook replaces paid webhook and workflow services. Here's what the 
 
 | Feature | qhook | Svix | Hookdeck | Convoy |
 |---------|-------|------|----------|--------|
-| **Architecture** | Poll-based | Push-based | Push-based | Push-based |
+| **Architecture** | Push + Pull | Push-only | Push-only | Push-only |
 | **Direction** | Inbound + Outbound | Outbound only | Inbound (+ Outpost) | Inbound + Outbound |
 | **Language** | Rust | Rust/Python | Node.js/Go | Go |
 | **OSS** | Apache 2.0 | MIT (core) | Partial (Outpost) | MPL-2.0 |
@@ -480,7 +481,7 @@ Self-hosting qhook replaces paid webhook and workflow services. Here's what the 
 ### Key takeaways
 
 - **Price gap**: qhook's $19 Starter and $49 Pro fill the gap between Svix $10 (limited) and $490 (enterprise), and sit below Convoy's $99 cloud minimum.
-- **Poll-based is unique**: Every competitor uses push-based delivery. qhook is the only poll-based gateway — eliminating timeout issues (Vercel 10s, Lambda 30s) and giving receivers full control.
+- **Pull mode is unique**: Every competitor is push-only. qhook is the only gateway with built-in pull delivery — consumers poll when ready, no public endpoint needed, no timeout pressure. Push and Pull work side-by-side in the same config.
 - **Workflow engine included**: qhook is the only option with a built-in multi-step workflow engine (branching, parallelism, rollback) — no need for a separate orchestrator.
 - **Zero egress**: Cloudflare Workers have no egress charges, unlike AWS/GCP-hosted competitors.
 
@@ -513,6 +514,7 @@ It **is** the right choice when:
 | **Database** | SQLite (dev) / Postgres or MySQL (prod) |
 | **Input** | Webhooks (13 providers verified), SNS, internal API (`POST /events/{source}/{type}`) |
 | **Outbound Webhooks** | Standard Webhooks compliant, per-endpoint signing secrets, subscription-based routing |
+| **Delivery** | Push (HTTP handlers) and Pull (queue polling with ack/nack) |
 | **Actions** | HTTP with custom headers for authentication |
 | **Management API** | Track events, jobs, and workflow runs programmatically |
 | **Reliability** | Retry (exponential backoff), error routing, DLQ |

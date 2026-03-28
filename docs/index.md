@@ -5,9 +5,9 @@ title: Home
 
 # qhook
 
-**Queue-first, poll-based webhook gateway with built-in retry and workflow engine.** Verify, enqueue, ACK — then deliver reliably. Your app pulls events when ready — no public endpoint needed. Single binary, zero infrastructure.
+**Lightweight event gateway with Push and Pull delivery, built-in retry, and workflow engine.** Verify, enqueue, ACK — then deliver via HTTP push or let your app pull when ready. Single binary, zero infrastructure.
 
-- **Poll-based architecture.** Your app pulls events when ready — no public endpoint needed, no timeout pressure. Webhooks are controlled by the receiver, not the sender.
+- **Push and Pull delivery.** Push mode delivers to HTTP endpoints instantly. Pull mode lets consumers poll a queue and ACK when done — no public endpoint needed. Use both in the same config.
 - **Queue-first by default.** Every event is persisted before acknowledgment — no event is lost, even if downstream is down.
 - **Zero infrastructure.** Single binary, SQLite for dev, Postgres or MySQL for production. No Redis, no message broker.
 - **13 provider signature verification.** GitHub, Stripe, Shopify, PagerDuty, Grafana, Terraform Cloud, GitLab, Linear, Standard Webhooks, Twilio, Paddle, HMAC, and AWS SNS.

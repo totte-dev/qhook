@@ -105,6 +105,64 @@ qhook events list
 qhook jobs list
 ```
 
+## Pull Mode Quick Start
+
+The examples above use **push mode** — qhook delivers events to your HTTP endpoints. With **pull mode**, your application polls a queue and acknowledges messages after processing. No public endpoint needed.
+
+### 1. Configure a queue
+
+```yaml
+database:
+  driver: sqlite
+
+server:
+  port: 8888
+
+sources:
+  app:
+    type: event
+
+queues:
+  orders:
+    source: app
+    events: [order.created]
+    visibility_timeout: 60s
+    max_attempts: 5
+```
+
+### 2. Send an event (same as push mode)
+
+```bash
+curl -X POST http://localhost:8888/events/app/order.created \
+  -H "Content-Type: application/json" \
+  -d '{"id": "ord_123", "customer": "alice", "amount": 4999}'
+```
+
+### 3. Poll for messages
+
+```bash
+# Long-poll for up to 10 seconds, receive up to 5 messages
+curl "http://localhost:8888/api/queues/orders/messages?wait=10s&batch=5"
+```
+
+### 4. Acknowledge after processing
+
+```bash
+curl -X POST http://localhost:8888/api/queues/orders/ack \
+  -H "Content-Type: application/json" \
+  -d '{"ids": ["01J..."]}'
+```
+
+If processing fails, nack the message to re-queue it:
+
+```bash
+curl -X POST http://localhost:8888/api/queues/orders/nack \
+  -H "Content-Type: application/json" \
+  -d '{"ids": ["01J..."]}'
+```
+
+> See the [Pull-Mode Queues guide](guides/pull-mode-queues.md) for visibility timeouts, DLQ, consumer snippets in Python/TypeScript/Go/Ruby, and CLI commands.
+
 ## Architecture
 
 ```
@@ -132,12 +190,16 @@ POST /sns/my-topic ----------> | Verify X.509 + unwrap    |
 | `POST /webhooks/{source}` | Receive external webhooks (signature verified) |
 | `POST /sns/{source}` | Receive AWS SNS messages (X.509 verified) |
 | `POST /events/{source}/{event_type}` | Receive internal events (bearer token auth) |
+| `GET /api/queues/{name}/messages` | Pull messages from a queue (long-polling) |
+| `POST /api/queues/{name}/ack` | Acknowledge processed messages |
+| `POST /api/queues/{name}/nack` | Negative-acknowledge (re-queue or DLQ) |
 | `GET /health` | Health check with queue depth |
 | `GET /metrics` | Prometheus metrics |
 
 ## Next Steps
 
 - [Configuration Reference](configuration.md) -- all config options
+- [Pull-Mode Queues](guides/pull-mode-queues.md) -- consumer-driven polling with visibility timeout and DLQ
 - [Webhook Verification](guides/webhook-verification.md) -- add signature checks
 - [Filtering & Transformation](guides/filtering.md) -- filter events, reshape payloads
 - [Monitoring](guides/monitoring.md) -- Prometheus metrics, alerts

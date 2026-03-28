@@ -117,6 +117,14 @@ handlers:
     headers:                            # custom HTTP headers (optional)
       Authorization: "Bearer ${API_TOKEN}"
 
+queues:
+  billing:
+    source: stripe
+    events: [invoice.paid, invoice.payment_failed]
+    visibility_timeout: 60s           # message invisible to other consumers for 60s
+    max_attempts: 5                   # move to DLQ after 5 failed attempts
+    # api_key: ${QUEUE_API_KEY}       # per-queue Bearer token (optional)
+
 alerts:
   url: ${SLACK_WEBHOOK_URL}
   type: slack                       # slack / discord / generic
@@ -280,6 +288,40 @@ Each handler is a named entry under `handlers:`.
 | `filter` | string | - | JSONPath filter expression. Supports `==`, `!=`, `>`, `<`, `>=`, `<=`, `in`, `contains`, `starts_with`, `ends_with`, `matches`, `exists`, `not` |
 | `transform` | string | - | Payload transformation template with `{{$.path}}` placeholders |
 | `headers` | map | `{}` | Custom HTTP headers to send with delivery (e.g., `Authorization`) |
+
+### queues
+
+Each queue is a named entry under `queues:`. Queues provide **pull-mode delivery** — instead of pushing events to an HTTP endpoint, events are held in a queue for consumers to poll, process, and acknowledge.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `source` | string | required | Source name to subscribe to |
+| `events` | list | `[]` (all) | Event types to accept. Empty = all events from this source |
+| `filter` | string | - | JSONPath filter expression. Only matching events enter the queue |
+| `idempotency_key` | string | - | JSONPath for deduplication key extraction |
+| `visibility_timeout` | duration | `30s` | How long a delivered message stays invisible before re-queuing |
+| `max_attempts` | integer | - | Max delivery attempts before moving to the dead-letter queue |
+| `api_key` | string | - | Per-queue Bearer token. If unset, no authentication is required |
+
+```yaml
+queues:
+  billing:
+    source: stripe
+    events: [invoice.paid, invoice.payment_failed]
+    filter: "$.data.object.amount_due >= 1000"
+    visibility_timeout: 60s
+    max_attempts: 5
+    api_key: ${QUEUE_API_KEY}
+```
+
+Consumers interact with queues via the Pull API:
+
+- `GET /api/queues` — list all queues
+- `GET /api/queues/{name}/messages?wait=10s&batch=5` — receive messages (long-polling)
+- `POST /api/queues/{name}/ack` — acknowledge processed messages
+- `POST /api/queues/{name}/nack` — negative-acknowledge (re-queue or DLQ)
+
+> See the [Pull-Mode Queues guide](guides/pull-mode-queues.md) for visibility timeout details, DLQ management, CLI commands, and consumer snippets in Python, TypeScript, Go, and Ruby.
 
 **Circuit breaker:** Each handler has an automatic circuit breaker. After 5 consecutive delivery failures, the circuit opens and deliveries are temporarily rejected (jobs are rescheduled). After 60 seconds, a single probe request is allowed through (half-open state). If it succeeds, the circuit closes; if it fails, it stays open for another cooldown period.
 

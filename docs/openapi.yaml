@@ -2,13 +2,14 @@ openapi: 3.1.0
 info:
   title: qhook API
   description: |
-    Lightweight event gateway with built-in queue, retry, and workflow engine.
+    Lightweight event gateway with Push and Pull delivery, built-in queue, retry, and workflow engine.
 
-    qhook receives webhooks and events via HTTP, queues them, and delivers to
-    configured handlers with retry and dead-letter support.
+    qhook receives webhooks and events via HTTP, then delivers them via push
+    (HTTP handlers) or pull (queue polling with ack/nack), with retry and
+    dead-letter support.
 
     All responses include an `X-API-Version` header indicating the current API version.
-  version: 0.4.2
+  version: 0.5.0
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -36,6 +37,8 @@ tags:
     description: Event and job inspection endpoints
   - name: Outbound
     description: Outbound webhook endpoint and subscription management
+  - name: Queues
+    description: Pull-mode queue endpoints (receive, ack, nack)
   - name: Operations
     description: Health check and metrics
 
@@ -1109,6 +1112,269 @@ paths:
         "404":
           description: Subscription not found
 
+  /api/queues:
+    get:
+      tags: [Queues]
+      summary: List queues
+      description: |
+        Returns all configured pull-mode queues with their current depth.
+        Requires Bearer token authentication if `api.auth_token` is configured.
+      operationId: listQueues
+      security:
+        - bearerAuth: []
+        - {}
+      responses:
+        "200":
+          description: List of queues
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queues:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                          description: Queue name
+                          example: billing
+                        source:
+                          type: string
+                          description: Source name
+                          example: stripe
+                        events:
+                          type: array
+                          items:
+                            type: string
+                          description: Subscribed event types (empty = all)
+                          example: [invoice.paid, invoice.payment_failed]
+                        visibility_timeout:
+                          type: string
+                          description: Visibility timeout duration
+                          example: "60s"
+                        depth:
+                          type: integer
+                          description: Number of messages currently in the queue
+                          example: 42
+                      required: [name, source, events, visibility_timeout, depth]
+                required: [queues]
+        "401":
+          description: Missing or invalid Bearer token
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid token
+
+  /api/queues/{name}/messages:
+    get:
+      tags: [Queues]
+      summary: Receive messages from a queue
+      description: |
+        Receives messages from a pull-mode queue. Supports long-polling via the `wait`
+        parameter. Received messages become invisible to other consumers for the duration
+        of the queue's `visibility_timeout`.
+
+        Returns an empty `{"messages": []}` when no messages are available after the
+        wait period expires.
+
+        Requires the queue's `api_key` as Bearer token if configured.
+      operationId: receiveMessages
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: Queue name as defined in qhook configuration
+          schema:
+            type: string
+          example: billing
+        - name: wait
+          in: query
+          required: false
+          description: "Long-poll duration. Max 30s. Returns immediately if messages are available."
+          schema:
+            type: string
+            default: "0s"
+          example: "10s"
+        - name: batch
+          in: query
+          required: false
+          description: "Number of messages to receive. Range: 1-100."
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+            maximum: 100
+          example: 5
+      responses:
+        "200":
+          description: Messages received (may be empty)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/QueueMessage"
+                required: [messages]
+        "401":
+          description: Missing or invalid queue API key
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid token
+        "404":
+          description: Queue not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: queue not found
+
+  /api/queues/{name}/ack:
+    post:
+      tags: [Queues]
+      summary: Acknowledge messages
+      description: |
+        Acknowledges one or more messages. Acknowledged messages are permanently
+        removed from the queue.
+
+        Requires the queue's `api_key` as Bearer token if configured.
+      operationId: ackMessages
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: Queue name
+          schema:
+            type: string
+          example: billing
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ids:
+                  type: array
+                  items:
+                    type: string
+                  description: Message IDs to acknowledge
+              required: [ids]
+            example:
+              ids: ["01JEXAMPLE00000000000000000"]
+      responses:
+        "200":
+          description: Messages acknowledged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  acked:
+                    type: integer
+                    description: Number of messages acknowledged
+                    example: 1
+                required: [acked]
+        "401":
+          description: Missing or invalid queue API key
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid token
+        "404":
+          description: Queue not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: queue not found
+
+  /api/queues/{name}/nack:
+    post:
+      tags: [Queues]
+      summary: Negative-acknowledge messages
+      description: |
+        Negative-acknowledges one or more messages. Nacked messages are re-queued
+        for retry. If `max_attempts` is configured on the queue and the message has
+        exceeded it, the message moves to the dead-letter queue instead.
+
+        Requires the queue's `api_key` as Bearer token if configured.
+      operationId: nackMessages
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: Queue name
+          schema:
+            type: string
+          example: billing
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ids:
+                  type: array
+                  items:
+                    type: string
+                  description: Message IDs to negative-acknowledge
+              required: [ids]
+            example:
+              ids: ["01JEXAMPLE00000000000000000"]
+      responses:
+        "200":
+          description: Messages nacked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  retried:
+                    type: integer
+                    description: Number of messages re-queued for retry
+                    example: 1
+                  dead:
+                    type: integer
+                    description: Number of messages moved to dead-letter queue
+                    example: 0
+                required: [retried, dead]
+        "401":
+          description: Missing or invalid queue API key
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid token
+        "404":
+          description: Queue not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: queue not found
+
   /health:
     get:
       tags: [Operations]
@@ -1276,6 +1542,40 @@ components:
         updated_at:
           type: string
       required: [id, source, url, signing_secret, status, created_at, updated_at]
+
+    QueueMessage:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Message ID (ULID)
+          example: 01JEXAMPLE00000000000000000
+        event_id:
+          type: string
+          description: Associated event ID (ULID)
+          example: 01JEXAMPLE00000000000000001
+        event_type:
+          type: string
+          description: Event type
+          example: invoice.paid
+        payload:
+          type: object
+          additionalProperties: true
+          description: Event payload
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+          description: Stored headers
+        attempt:
+          type: integer
+          description: Current delivery attempt number
+          example: 1
+        created_at:
+          type: string
+          description: Creation timestamp (UTC)
+          example: "2026-03-28T12:00:00.000"
+      required: [id, event_id, event_type, payload, headers, attempt, created_at]
 
     Error:
       type: object
