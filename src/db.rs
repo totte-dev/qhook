@@ -445,6 +445,14 @@ impl Database {
     }
 
     /// Mark a job as running (SQLite/MySQL only — Postgres does this in fetch_available_jobs).
+    ///
+    /// TODO(perf): This is called per-job in a loop (N+1 problem). Ideally we'd batch these
+    /// into a single `UPDATE ... WHERE id IN (...)` query, but sqlx's AnyPool doesn't support
+    /// dynamic bind parameter lists for IN clauses. Options to fix:
+    /// - Build raw SQL with comma-separated IDs (risk: SQL injection if IDs aren't validated)
+    /// - Use a CTE or temp table approach
+    /// - Use sqlx's `QueryBuilder` with `push_values` (requires separate sqlite/mysql pool types)
+    /// In practice, the loop is bounded by `concurrent_delivery` (default 10), so impact is low.
     pub async fn mark_job_running(&self, job_id: &str) -> Result<bool> {
         let now = format_now();
 
@@ -2030,6 +2038,96 @@ impl Database {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
+    }
+
+    // ── Queue CLI helper methods ──────────────────────────────────────
+
+    /// Count jobs by status for a specific handler pattern (e.g. "queue/{name}").
+    pub async fn count_jobs_by_handler_status(
+        &self,
+        handler: &str,
+    ) -> Result<Vec<(String, i64)>> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT status, COUNT(*) as cnt FROM jobs WHERE handler = $1 GROUP BY status",
+        )
+        .bind(handler)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// List jobs for a specific handler with optional status filter.
+    pub async fn list_jobs_by_handler(
+        &self,
+        handler: &str,
+        status: Option<&str>,
+        limit: i32,
+    ) -> Result<Vec<JobRow>> {
+        let rows = if let Some(status) = status {
+            sqlx::query_as::<_, JobRow>(
+                "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
+                 FROM jobs WHERE handler = $1 AND status = $2 ORDER BY scheduled_at DESC LIMIT $3",
+            )
+            .bind(handler)
+            .bind(status)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, JobRow>(
+                "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
+                 FROM jobs WHERE handler = $1 ORDER BY scheduled_at DESC LIMIT $2",
+            )
+            .bind(handler)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows)
+    }
+
+    /// Delete all jobs for a specific handler.
+    pub async fn delete_jobs_by_handler(&self, handler: &str) -> Result<u64> {
+        // Delete attempts first
+        sqlx::query(
+            "DELETE FROM job_attempts WHERE job_id IN (SELECT id FROM jobs WHERE handler = $1)",
+        )
+        .bind(handler)
+        .execute(&self.pool)
+        .await?;
+
+        let result = sqlx::query("DELETE FROM jobs WHERE handler = $1")
+            .bind(handler)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Retry all dead jobs for a specific handler.
+    pub async fn retry_dead_jobs_by_handler(&self, handler: &str) -> Result<u64> {
+        let now = format_now();
+        let result = sqlx::query(
+            "UPDATE jobs SET status = 'available', scheduled_at = $1, last_error = NULL \
+             WHERE handler = $2 AND status = 'dead'",
+        )
+        .bind(&now)
+        .bind(handler)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Peek at the first available job for a handler without consuming it.
+    pub async fn peek_queue_job(&self, handler: &str) -> Result<Option<JobRow>> {
+        let row = sqlx::query_as::<_, JobRow>(
+            "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
+             FROM jobs WHERE handler = $1 AND status IN ('available', 'retryable') \
+             ORDER BY scheduled_at ASC LIMIT 1",
+        )
+        .bind(handler)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
     }
 
     /// Get signing secret for an outbound endpoint.

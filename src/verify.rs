@@ -420,6 +420,8 @@ fn get_cached_cert(url: &str) -> Option<Vec<u8>> {
 
 fn set_cached_cert(url: &str, data: Vec<u8>) {
     let mut cache = SNS_CERT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    // Clean up expired entries before inserting
+    cache.retain(|_, (_, ts)| ts.elapsed() < SNS_CERT_CACHE_TTL);
     cache.insert(url.to_string(), (data, Instant::now()));
 }
 

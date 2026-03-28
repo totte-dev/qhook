@@ -32,29 +32,38 @@ impl AlertEvent {
 }
 
 /// Sends alerts via webhook (generic JSON, Slack, or Discord format).
+/// Channel capacity for alert events. Alerts are dropped when the channel is full.
+const ALERT_CHANNEL_CAPACITY: usize = 1000;
+
 pub struct Alerter {
-    tx: mpsc::UnboundedSender<AlertEvent>,
+    tx: mpsc::Sender<AlertEvent>,
 }
 
 impl Alerter {
     /// Create a new alerter that sends to the configured webhook.
     /// Spawns a background task to process alert events.
     pub fn new(config: AlertConfig, metrics: Arc<Metrics>) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(ALERT_CHANNEL_CAPACITY);
         tokio::spawn(alert_worker(config, metrics, rx));
         Self { tx }
     }
 
     /// Send an alert event. Non-blocking, drops if channel is full/closed.
     pub fn send(&self, event: AlertEvent) {
-        let _ = self.tx.send(event);
+        match self.tx.try_send(event) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!("Alert channel full, dropping alert event");
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
     }
 }
 
 async fn alert_worker(
     config: AlertConfig,
     metrics: Arc<Metrics>,
-    mut rx: mpsc::UnboundedReceiver<AlertEvent>,
+    mut rx: mpsc::Receiver<AlertEvent>,
 ) {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
