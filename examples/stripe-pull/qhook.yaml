@@ -1,0 +1,22 @@
+# qhook config for Stripe pull-mode example
+
+database:
+  driver: sqlite
+
+server:
+  port: 8888
+
+# Stripe webhook source (with signature verification)
+sources:
+  stripe:
+    type: webhook
+    verify: stripe
+    secret: ${STRIPE_WEBHOOK_SECRET}
+
+# Pull-mode queue -- consumers poll for messages instead of push delivery
+queues:
+  payments:
+    source: stripe
+    events: [checkout.session.completed, charge.failed]
+    visibility_timeout: 30s
+    max_attempts: 5
