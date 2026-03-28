@@ -406,6 +406,7 @@ impl Database {
                  WHERE id IN ( \
                      SELECT id FROM jobs \
                      WHERE status IN ('available', 'retryable') AND scheduled_at <= $1 \
+                     AND handler NOT LIKE 'queue/%' \
                      ORDER BY scheduled_at ASC \
                      LIMIT $2 \
                      FOR UPDATE SKIP LOCKED \
@@ -421,6 +422,7 @@ impl Database {
                 "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
                  FROM jobs \
                  WHERE status IN ('available', 'retryable') AND scheduled_at <= $1 \
+                 AND handler NOT LIKE 'queue/%' \
                  ORDER BY scheduled_at ASC \
                  LIMIT $2",
             )
@@ -784,7 +786,8 @@ impl Database {
         let start = Instant::now();
         let result = sqlx::query(
             "UPDATE jobs SET status = 'retryable', scheduled_at = $1 \
-             WHERE status = 'running' AND started_at <= $2",
+             WHERE status = 'running' AND started_at <= $2 \
+             AND handler NOT LIKE 'queue/%'",
         )
         .bind(&now_str)
         .bind(&cutoff)
@@ -1349,6 +1352,201 @@ impl Database {
         .await?;
         Ok(result.rows_affected() > 0)
     }
+
+    // ── Queue (Pull-mode) methods ──────────────────────────────────────
+
+    /// Fetch available queue messages, atomically marking them as running.
+    /// Returns jobs joined with event payload/headers/event_type for the response.
+    pub async fn fetch_queue_messages(
+        &self,
+        handler: &str,
+        limit: i32,
+    ) -> Result<Vec<QueueMessageRow>> {
+        let now = format_now();
+
+        let rows = if self.driver == "postgres" {
+            sqlx::query_as::<_, QueueMessageRow>(
+                "UPDATE jobs SET status = 'running', started_at = $1, attempt = attempt + 1 \
+                 WHERE id IN ( \
+                     SELECT id FROM jobs \
+                     WHERE handler = $2 AND status IN ('available', 'retryable') AND scheduled_at <= $1 \
+                     ORDER BY scheduled_at ASC \
+                     LIMIT $3 \
+                     FOR UPDATE SKIP LOCKED \
+                 ) \
+                 RETURNING id, event_id, \
+                     (SELECT event_type FROM events WHERE events.id = jobs.event_id) AS event_type, \
+                     (SELECT payload FROM events WHERE events.id = jobs.event_id) AS payload, \
+                     (SELECT headers FROM events WHERE events.id = jobs.event_id) AS headers, \
+                     attempt - 1 AS attempt, created_at",
+            )
+            .bind(&now)
+            .bind(handler)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            // SQLite/MySQL: two-step — SELECT then mark running individually.
+            let job_rows = sqlx::query_as::<_, JobRow>(
+                "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
+                 FROM jobs \
+                 WHERE handler = $1 AND status IN ('available', 'retryable') AND scheduled_at <= $2 \
+                 ORDER BY scheduled_at ASC \
+                 LIMIT $3",
+            )
+            .bind(handler)
+            .bind(&now)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+
+            let mut msgs = Vec::with_capacity(job_rows.len());
+            for job in job_rows {
+                if !self.mark_job_running(&job.id).await? {
+                    continue; // another consumer grabbed it
+                }
+                // Fetch event data
+                let evt: (String, String, Option<String>) = sqlx::query_as(
+                    "SELECT event_type, payload, headers FROM events WHERE id = $1",
+                )
+                .bind(&job.event_id)
+                .fetch_one(&self.pool)
+                .await?;
+
+                msgs.push(QueueMessageRow {
+                    id: job.id,
+                    event_id: job.event_id,
+                    event_type: evt.0,
+                    payload: evt.1,
+                    headers: evt.2,
+                    attempt: job.attempt,
+                    created_at: job.created_at,
+                });
+            }
+            msgs
+        };
+
+        Ok(rows)
+    }
+
+    /// Acknowledge queue messages (mark as completed).
+    /// Returns the number of jobs actually acked.
+    pub async fn ack_queue_messages(&self, handler: &str, ids: &[String]) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let now = format_now();
+        let mut total = 0u64;
+        for id in ids {
+            let result = sqlx::query(
+                "UPDATE jobs SET status = 'completed', completed_at = $1 \
+                 WHERE id = $2 AND handler = $3 AND status = 'running'",
+            )
+            .bind(&now)
+            .bind(id)
+            .bind(handler)
+            .execute(&self.pool)
+            .await?;
+            if result.rows_affected() > 0 {
+                // Record a successful attempt
+                let attempt_id = ulid::Ulid::new().to_string();
+                let _ = self
+                    .insert_attempt(&attempt_id, id, 1, Some(200), None, None, 0)
+                    .await;
+                total += 1;
+            }
+        }
+        Ok(total)
+    }
+
+    /// Negative-acknowledge queue messages.
+    /// Jobs below max_attempts are retried with backoff; others go to DLQ.
+    /// Returns (retried, dead) counts.
+    pub async fn nack_queue_messages(&self, handler: &str, ids: &[String]) -> Result<(u64, u64)> {
+        if ids.is_empty() {
+            return Ok((0, 0));
+        }
+        let now = Utc::now().naive_utc();
+        let now_str = format_dt(now);
+        let mut retried = 0u64;
+        let mut dead = 0u64;
+        for id in ids {
+            // Fetch current attempt and max_attempts
+            let row: Option<(i32, i32)> = sqlx::query_as(
+                "SELECT attempt, max_attempts FROM jobs WHERE id = $1 AND handler = $2 AND status = 'running'",
+            )
+            .bind(id)
+            .bind(handler)
+            .fetch_optional(&self.pool)
+            .await?;
+
+            let Some((attempt, max_attempts)) = row else {
+                continue;
+            };
+
+            if attempt < max_attempts {
+                // Retry with exponential backoff: 30s * 2^attempt
+                let backoff_secs = 30i64 * (1i64 << attempt.min(20));
+                let next_at = format_dt(now + chrono::Duration::seconds(backoff_secs));
+                sqlx::query(
+                    "UPDATE jobs SET status = 'retryable', scheduled_at = $1, last_error = 'nack' WHERE id = $2",
+                )
+                .bind(&next_at)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+                retried += 1;
+            } else {
+                // Move to DLQ
+                sqlx::query(
+                    "UPDATE jobs SET status = 'dead', completed_at = $1, last_error = 'nack: max attempts exceeded' WHERE id = $2",
+                )
+                .bind(&now_str)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+                dead += 1;
+            }
+        }
+        Ok((retried, dead))
+    }
+
+    /// Recover queue messages that exceeded their visibility timeout.
+    /// Unlike stale recovery (which uses global threshold), this is per-queue.
+    pub async fn recover_expired_queue_messages(
+        &self,
+        handler: &str,
+        visibility_timeout_secs: u64,
+    ) -> Result<u64> {
+        let now = Utc::now().naive_utc();
+        let cutoff = format_dt(now - chrono::Duration::seconds(visibility_timeout_secs as i64));
+        let now_str = format_dt(now);
+
+        let result = sqlx::query(
+            "UPDATE jobs SET status = 'retryable', scheduled_at = $1 \
+             WHERE handler = $2 AND status = 'running' AND started_at <= $3",
+        )
+        .bind(&now_str)
+        .bind(handler)
+        .bind(&cutoff)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Count available + retryable messages in a queue (queue depth).
+    pub async fn count_queue_depth(&self, handler: &str) -> Result<i64> {
+        let now = format_now();
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM jobs WHERE handler = $1 AND status IN ('available', 'retryable') AND scheduled_at <= $2",
+        )
+        .bind(handler)
+        .bind(&now)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1371,6 +1569,18 @@ pub struct EventRow {
     pub source: String,
     pub event_type: String,
     pub unique_key: Option<String>,
+    pub created_at: String,
+}
+
+/// Row returned by fetch_queue_messages — job + event data for API response.
+#[derive(Debug, sqlx::FromRow)]
+pub struct QueueMessageRow {
+    pub id: String,
+    pub event_id: String,
+    pub event_type: String,
+    pub payload: String,
+    pub headers: Option<String>,
+    pub attempt: i32,
     pub created_at: String,
 }
 

@@ -20,6 +20,8 @@ pub struct Config {
     #[serde(default)]
     pub workflows: HashMap<String, WorkflowConfig>,
     #[serde(default)]
+    pub queues: HashMap<String, QueueConfig>,
+    #[serde(default)]
     pub worker: WorkerConfig,
     #[serde(default)]
     pub alerts: Option<AlertConfig>,
@@ -456,6 +458,50 @@ pub struct HandlerConfig {
     /// Custom HTTP headers to send with delivery requests. Supports env var expansion.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+}
+
+/// Pull-mode queue configuration.
+/// Events matching a queue create jobs with handler="queue/{name}" that are
+/// consumed via the GET /api/queues/{name}/messages endpoint.
+#[derive(Debug, Deserialize, Clone)]
+pub struct QueueConfig {
+    pub source: String,
+    #[serde(default)]
+    pub events: Vec<String>,
+    /// JSONPath filter condition. Only matching events create queue jobs.
+    pub filter: Option<String>,
+    /// JSONPath for idempotency key extraction.
+    pub idempotency_key: Option<String>,
+    /// How long a message stays invisible after delivery before re-queuing (default: 30s).
+    #[serde(default = "default_visibility_timeout")]
+    pub visibility_timeout: String,
+    /// Max delivery attempts before moving to DLQ.
+    pub max_attempts: Option<u32>,
+    /// Per-queue Bearer token. If unset, no authentication required (local dev).
+    pub api_key: Option<String>,
+}
+
+fn default_visibility_timeout() -> String {
+    "30s".into()
+}
+
+/// Parse a duration string like "30s", "5m", "1h" into seconds.
+/// Returns 0 if the string is not parseable.
+pub fn parse_duration(s: &str) -> u64 {
+    let s = s.trim();
+    if s.is_empty() {
+        return 0;
+    }
+    if let Some(rest) = s.strip_suffix('s') {
+        rest.parse().unwrap_or(0)
+    } else if let Some(rest) = s.strip_suffix('m') {
+        rest.parse::<u64>().map(|v| v * 60).unwrap_or(0)
+    } else if let Some(rest) = s.strip_suffix('h') {
+        rest.parse::<u64>().map(|v| v * 3600).unwrap_or(0)
+    } else {
+        // Try plain number as seconds
+        s.parse().unwrap_or(0)
+    }
 }
 
 fn default_handler_type() -> String {
@@ -909,6 +955,47 @@ impl Config {
             }
         }
 
+        // Validate queue config
+        for (name, queue) in &self.queues {
+            // Queue names must not contain '/'
+            if name.contains('/') {
+                anyhow::bail!("queue name '{}' must not contain '/'", name);
+            }
+            // Queue names must not collide with handler names
+            if self.handlers.contains_key(name) {
+                anyhow::bail!(
+                    "queue name '{}' conflicts with handler of the same name",
+                    name
+                );
+            }
+            // Source must exist
+            if !self.sources.contains_key(&queue.source) {
+                anyhow::bail!(
+                    "queue '{}' references unknown source '{}'",
+                    name,
+                    queue.source
+                );
+            }
+            // Visibility timeout must be parseable
+            if parse_duration(&queue.visibility_timeout) == 0 {
+                anyhow::bail!(
+                    "queue '{}' has invalid visibility_timeout '{}'",
+                    name,
+                    queue.visibility_timeout
+                );
+            }
+        }
+
+        // Handler names must not start with "queue/" (reserved prefix)
+        for name in self.handlers.keys() {
+            if name.starts_with("queue/") {
+                anyhow::bail!(
+                    "handler name '{}' must not start with 'queue/' (reserved prefix)",
+                    name
+                );
+            }
+        }
+
         // Validate database driver
         match self.database.driver.as_str() {
             "sqlite" | "postgres" | "mysql" => {}
@@ -1162,6 +1249,7 @@ mod tests {
             sources,
             handlers,
             workflows: HashMap::new(),
+            queues: HashMap::new(),
             worker: WorkerConfig::default(),
             alerts: None,
         }

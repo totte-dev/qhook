@@ -207,6 +207,7 @@ pub async fn serve(state: AppState, config_path: String) -> Result<()> {
         shared.config.workflows.clone(),
         shared.config.delivery.default_retry.max,
         shared.config.handlers.keys().cloned().collect(),
+        shared.config.queues.clone(),
     );
     let worker_handle = tokio::spawn(async move {
         worker.run().await;
@@ -355,6 +356,14 @@ pub async fn serve(state: AppState, config_path: String) -> Result<()> {
             "/api/outbound/endpoints/{endpoint_id}/subscriptions/{subscription_id}",
             delete(handle_delete_subscription),
         )
+        // Pull-mode queue endpoints
+        .route("/api/queues", get(handle_list_queues))
+        .route(
+            "/api/queues/{name}/messages",
+            get(handle_queue_receive),
+        )
+        .route("/api/queues/{name}/ack", post(handle_queue_ack))
+        .route("/api/queues/{name}/nack", post(handle_queue_nack))
         .route("/_echo", axum::routing::any(handle_echo))
         .route("/health", axum::routing::get(handle_health))
         .route("/metrics", axum::routing::get(handle_metrics))
@@ -889,6 +898,17 @@ async fn process_event(
         })
         .collect();
 
+    // Find matching queues
+    let matching_queues: Vec<_> = state
+        .config
+        .queues
+        .iter()
+        .filter(|(_, q)| {
+            q.source == source
+                && (q.events.is_empty() || q.events.iter().any(|e| event_matches(e, event_type)))
+        })
+        .collect();
+
     // Check if this is an outbound source — endpoints come from DB, not config
     let is_outbound = state
         .config
@@ -896,8 +916,12 @@ async fn process_event(
         .get(source)
         .is_some_and(|s| s.source_type == "outbound");
 
-    if !is_outbound && matching_handlers.is_empty() && matching_workflows.is_empty() {
-        tracing::debug!(source, event_type, "No matching handlers or workflows");
+    if !is_outbound
+        && matching_handlers.is_empty()
+        && matching_workflows.is_empty()
+        && matching_queues.is_empty()
+    {
+        tracing::debug!(source, event_type, "No matching handlers, workflows, or queues");
         return Ok(EventResult {
             event_id,
             created: true,
@@ -905,10 +929,15 @@ async fn process_event(
         });
     }
 
-    // Extract idempotency key if configured
+    // Extract idempotency key if configured (handlers take precedence, then queues)
     let unique_key = matching_handlers
         .first()
         .and_then(|(_, h)| h.idempotency_key.as_ref())
+        .or_else(|| {
+            matching_queues
+                .first()
+                .and_then(|(_, q)| q.idempotency_key.as_ref())
+        })
         .and_then(|path| extract_json_path(payload, path));
 
     // Serialize relevant headers
@@ -1008,6 +1037,37 @@ async fn process_event(
                 tracing::error!(error = %e, source, "Failed to find subscribed endpoints");
             }
         }
+    }
+
+    // Create jobs for matching queues (pull-mode delivery)
+    for (queue_name, queue) in &matching_queues {
+        if let Some(ref filter) = queue.filter {
+            if !evaluate_filter(payload, filter) {
+                tracing::debug!(queue = *queue_name, filter, "Event filtered out by queue");
+                continue;
+            }
+        }
+
+        let job_id = ulid::Ulid::new().to_string();
+        let handler_name = format!("queue/{}", queue_name);
+        let max_attempts = queue
+            .max_attempts
+            .unwrap_or(state.config.delivery.default_retry.max);
+
+        state
+            .db
+            .insert_job(&job_id, &event_id, &handler_name, "_pull", max_attempts)
+            .await?;
+
+        jobs_created += 1;
+        state.metrics.inc_jobs_created();
+        tracing::info!(
+            event_id,
+            job_id,
+            queue = *queue_name,
+            event_type,
+            "Queue job created"
+        );
     }
 
     // Start matching workflows
@@ -2434,6 +2494,247 @@ async fn handle_delete_subscription(
             (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
         }
     }
+}
+
+// ── Pull-mode queue handlers ──────────────────────────────────────────
+
+/// Check per-queue Bearer token authentication.
+/// Returns None if auth passes, Some(401 response) if it fails.
+fn check_queue_auth(
+    queue: &crate::config::QueueConfig,
+    headers: &HeaderMap,
+) -> Option<axum::response::Response> {
+    let Some(expected) = &queue.api_key else {
+        return None; // no auth configured — allow all (local dev)
+    };
+    let provided = headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+
+    match provided {
+        Some(token) => {
+            use subtle::ConstantTimeEq;
+            if !bool::from(token.as_bytes().ct_eq(expected.as_bytes())) {
+                return Some(
+                    (StatusCode::UNAUTHORIZED, "Invalid token".to_string()).into_response(),
+                );
+            }
+        }
+        _ => {
+            return Some(
+                (StatusCode::UNAUTHORIZED, "Missing or invalid Authorization header".to_string())
+                    .into_response(),
+            );
+        }
+    }
+    None
+}
+
+#[derive(serde::Deserialize)]
+struct QueueReceiveParams {
+    /// Long-polling wait duration (e.g., "10s"). Default: "0s" (no wait). Max: "30s".
+    #[serde(default)]
+    wait: Option<String>,
+    /// Max messages to receive. Default: 1. Max: 100.
+    #[serde(default)]
+    batch: Option<i32>,
+}
+
+/// GET /api/queues/{name}/messages — long-poll for queue messages.
+async fn handle_queue_receive(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+    Query(params): Query<QueueReceiveParams>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    let Some(queue) = state.config.queues.get(&name) else {
+        let body = serde_json::json!({"error": "queue not found"});
+        return (StatusCode::NOT_FOUND, axum::Json(body)).into_response();
+    };
+
+    if let Some(resp) = check_queue_auth(queue, &headers) {
+        return resp;
+    }
+
+    let batch = params.batch.unwrap_or(1).clamp(1, 100);
+    let wait_secs = params
+        .wait
+        .as_deref()
+        .map(crate::config::parse_duration)
+        .unwrap_or(0)
+        .min(30);
+
+    let handler = format!("queue/{}", name);
+
+    // Try to fetch messages immediately
+    let messages = match state.db.fetch_queue_messages(&handler, batch).await {
+        Ok(msgs) => msgs,
+        Err(e) => {
+            tracing::error!(error = %e, queue = name, "Failed to fetch queue messages");
+            let body = serde_json::json!({"error": "internal error"});
+            return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response();
+        }
+    };
+
+    if !messages.is_empty() || wait_secs == 0 {
+        state
+            .metrics
+            .inc_queue_messages_delivered(&name, messages.len() as u64);
+        let body = queue_messages_to_json(&messages);
+        return (StatusCode::OK, axum::Json(body)).into_response();
+    }
+
+    // Long-polling: retry every 500ms until wait expires
+    // Future improvement: use tokio::sync::Notify or Postgres LISTEN/NOTIFY
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+    let poll_interval = std::time::Duration::from_millis(500);
+
+    loop {
+        tokio::time::sleep(poll_interval).await;
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+
+        match state.db.fetch_queue_messages(&handler, batch).await {
+            Ok(msgs) if !msgs.is_empty() => {
+                state
+                    .metrics
+                    .inc_queue_messages_delivered(&name, msgs.len() as u64);
+                let body = queue_messages_to_json(&msgs);
+                return (StatusCode::OK, axum::Json(body)).into_response();
+            }
+            Ok(_) => continue,
+            Err(e) => {
+                tracing::error!(error = %e, queue = name, "Failed to fetch queue messages");
+                let body = serde_json::json!({"error": "internal error"});
+                return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response();
+            }
+        }
+    }
+
+    // Timed out — return empty
+    state.metrics.inc_queue_messages_delivered(&name, 0);
+    let body = serde_json::json!({"messages": []});
+    (StatusCode::OK, axum::Json(body)).into_response()
+}
+
+fn queue_messages_to_json(messages: &[crate::db::QueueMessageRow]) -> serde_json::Value {
+    let msgs: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| {
+            let headers: serde_json::Value = m
+                .headers
+                .as_deref()
+                .and_then(|h| serde_json::from_str(h).ok())
+                .unwrap_or(serde_json::Value::Null);
+            let payload: serde_json::Value =
+                serde_json::from_str(&m.payload).unwrap_or(serde_json::Value::Null);
+            serde_json::json!({
+                "id": m.id,
+                "event_id": m.event_id,
+                "event_type": m.event_type,
+                "payload": payload,
+                "headers": headers,
+                "attempt": m.attempt,
+                "created_at": m.created_at,
+            })
+        })
+        .collect();
+    serde_json::json!({"messages": msgs})
+}
+
+#[derive(serde::Deserialize)]
+struct QueueAckNackBody {
+    ids: Vec<String>,
+}
+
+/// POST /api/queues/{name}/ack — acknowledge messages.
+async fn handle_queue_ack(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<QueueAckNackBody>,
+) -> axum::response::Response {
+    let Some(queue) = state.config.queues.get(&name) else {
+        let body = serde_json::json!({"error": "queue not found"});
+        return (StatusCode::NOT_FOUND, axum::Json(body)).into_response();
+    };
+
+    if let Some(resp) = check_queue_auth(queue, &headers) {
+        return resp;
+    }
+
+    let handler = format!("queue/{}", name);
+    match state.db.ack_queue_messages(&handler, &body.ids).await {
+        Ok(count) => {
+            state.metrics.inc_queue_messages_acked(&name, count);
+            let resp = serde_json::json!({"acked": count});
+            (StatusCode::OK, axum::Json(resp)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, queue = name, "Failed to ack queue messages");
+            let body = serde_json::json!({"error": "internal error"});
+            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
+        }
+    }
+}
+
+/// POST /api/queues/{name}/nack — negative-acknowledge messages.
+async fn handle_queue_nack(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<QueueAckNackBody>,
+) -> axum::response::Response {
+    let Some(queue) = state.config.queues.get(&name) else {
+        let body = serde_json::json!({"error": "queue not found"});
+        return (StatusCode::NOT_FOUND, axum::Json(body)).into_response();
+    };
+
+    if let Some(resp) = check_queue_auth(queue, &headers) {
+        return resp;
+    }
+
+    let handler = format!("queue/{}", name);
+    match state.db.nack_queue_messages(&handler, &body.ids).await {
+        Ok((retried, dead)) => {
+            state.metrics.inc_queue_messages_nacked(&name, retried + dead);
+            let resp = serde_json::json!({"retried": retried, "dead": dead});
+            (StatusCode::OK, axum::Json(resp)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, queue = name, "Failed to nack queue messages");
+            let body = serde_json::json!({"error": "internal error"});
+            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
+        }
+    }
+}
+
+/// GET /api/queues — list configured queues with depth.
+async fn handle_list_queues(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Some(resp) = check_api_auth(&state, &headers) {
+        return resp;
+    }
+
+    let mut queues = Vec::new();
+    for (name, queue) in &state.config.queues {
+        let handler = format!("queue/{}", name);
+        let depth = state.db.count_queue_depth(&handler).await.unwrap_or(0);
+        queues.push(serde_json::json!({
+            "name": name,
+            "source": queue.source,
+            "events": queue.events,
+            "visibility_timeout": queue.visibility_timeout,
+            "depth": depth,
+        }));
+    }
+
+    let body = serde_json::json!({"queues": queues});
+    (StatusCode::OK, axum::Json(body)).into_response()
 }
 
 #[cfg(test)]

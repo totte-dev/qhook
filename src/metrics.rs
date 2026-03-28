@@ -84,6 +84,11 @@ pub struct Metrics {
     // Circuit breaker metrics
     circuit_opened: LabeledCounter,
     circuit_rejected: LabeledCounter,
+    // Queue (pull-mode) metrics
+    queue_messages_delivered: LabeledCounter,
+    queue_messages_acked: LabeledCounter,
+    queue_messages_nacked: LabeledCounter,
+    queue_messages_expired: LabeledCounter,
 }
 
 impl Default for Metrics {
@@ -119,6 +124,10 @@ impl Metrics {
             callbacks_expired: AtomicU64::new(0),
             circuit_opened: LabeledCounter::new(),
             circuit_rejected: LabeledCounter::new(),
+            queue_messages_delivered: LabeledCounter::new(),
+            queue_messages_acked: LabeledCounter::new(),
+            queue_messages_nacked: LabeledCounter::new(),
+            queue_messages_expired: LabeledCounter::new(),
         }
     }
 
@@ -228,6 +237,31 @@ impl Metrics {
 
     pub fn inc_circuit_rejected(&self, handler: &str) {
         self.circuit_rejected.inc(handler);
+    }
+
+    // Queue (pull-mode) metrics
+    pub fn inc_queue_messages_delivered(&self, queue: &str, count: u64) {
+        for _ in 0..count {
+            self.queue_messages_delivered.inc(queue);
+        }
+    }
+
+    pub fn inc_queue_messages_acked(&self, queue: &str, count: u64) {
+        for _ in 0..count {
+            self.queue_messages_acked.inc(queue);
+        }
+    }
+
+    pub fn inc_queue_messages_nacked(&self, queue: &str, count: u64) {
+        for _ in 0..count {
+            self.queue_messages_nacked.inc(queue);
+        }
+    }
+
+    pub fn inc_queue_messages_expired(&self, queue: &str, count: u64) {
+        for _ in 0..count {
+            self.queue_messages_expired.inc(queue);
+        }
     }
 
     pub fn dlq_total(&self) -> u64 {
@@ -509,6 +543,57 @@ impl Metrics {
             }
         }
 
+        // Queue (pull-mode) metrics
+        let q_delivered = self.queue_messages_delivered.snapshot();
+        let q_acked = self.queue_messages_acked.snapshot();
+        let q_nacked = self.queue_messages_nacked.snapshot();
+        let q_expired = self.queue_messages_expired.snapshot();
+
+        if !q_delivered.is_empty() {
+            out.push_str(
+                "# HELP qhook_queue_messages_delivered_total Messages delivered to consumers\n",
+            );
+            out.push_str("# TYPE qhook_queue_messages_delivered_total counter\n");
+            for (queue, count) in &q_delivered {
+                push_fmt(
+                    &mut out,
+                    &format!("qhook_queue_messages_delivered_total{{queue=\"{queue}\"}} {count}\n"),
+                );
+            }
+        }
+        if !q_acked.is_empty() {
+            out.push_str("# HELP qhook_queue_messages_acked_total Messages acknowledged\n");
+            out.push_str("# TYPE qhook_queue_messages_acked_total counter\n");
+            for (queue, count) in &q_acked {
+                push_fmt(
+                    &mut out,
+                    &format!("qhook_queue_messages_acked_total{{queue=\"{queue}\"}} {count}\n"),
+                );
+            }
+        }
+        if !q_nacked.is_empty() {
+            out.push_str(
+                "# HELP qhook_queue_messages_nacked_total Messages negatively acknowledged\n",
+            );
+            out.push_str("# TYPE qhook_queue_messages_nacked_total counter\n");
+            for (queue, count) in &q_nacked {
+                push_fmt(
+                    &mut out,
+                    &format!("qhook_queue_messages_nacked_total{{queue=\"{queue}\"}} {count}\n"),
+                );
+            }
+        }
+        if !q_expired.is_empty() {
+            out.push_str("# HELP qhook_queue_messages_expired_total Messages recovered after visibility timeout\n");
+            out.push_str("# TYPE qhook_queue_messages_expired_total counter\n");
+            for (queue, count) in &q_expired {
+                push_fmt(
+                    &mut out,
+                    &format!("qhook_queue_messages_expired_total{{queue=\"{queue}\"}} {count}\n"),
+                );
+            }
+        }
+
         // Label cardinality (monitor for unbounded growth)
         let label_count = self.events_by_source.label_count()
             + self.deliveries_by_handler_ok.label_count()
@@ -521,7 +606,11 @@ impl Metrics {
             + self.workflow_runs_started.label_count()
             + self.workflow_runs_completed.label_count()
             + self.workflow_runs_failed.label_count()
-            + self.workflow_steps_completed.label_count();
+            + self.workflow_steps_completed.label_count()
+            + self.queue_messages_delivered.label_count()
+            + self.queue_messages_acked.label_count()
+            + self.queue_messages_nacked.label_count()
+            + self.queue_messages_expired.label_count();
         out.push_str(
             "# HELP qhook_metric_label_count Total unique label values across all labeled counters\n",
         );

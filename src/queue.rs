@@ -147,6 +147,8 @@ pub struct Worker {
     workflows: Arc<HashMap<String, config::WorkflowConfig>>,
     /// Default retry config.
     default_retry_max: u32,
+    /// Queue configs for visibility timeout recovery.
+    queues: Arc<HashMap<String, config::QueueConfig>>,
 }
 
 impl Worker {
@@ -164,6 +166,7 @@ impl Worker {
         workflows: HashMap<String, config::WorkflowConfig>,
         default_retry_max: u32,
         handler_names: Vec<String>,
+        queues: HashMap<String, config::QueueConfig>,
     ) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -208,6 +211,7 @@ impl Worker {
             handler_methods: Arc::new(handler_methods),
             workflows: Arc::new(workflows),
             default_retry_max,
+            queues: Arc::new(queues),
         }
     }
 
@@ -229,6 +233,9 @@ impl Worker {
         let busy_interval = Duration::from_millis(50);
         let mut maint_ticker = interval(Duration::from_secs(MAINTENANCE_INTERVAL_SECS));
         maint_ticker.tick().await; // skip immediate first tick
+        // Queue visibility recovery runs every 10s (queue timeouts are typically 30s)
+        let mut queue_recovery_ticker = interval(Duration::from_secs(10));
+        queue_recovery_ticker.tick().await; // skip immediate first tick
         let mut consecutive_db_errors: u32 = 0;
 
         loop {
@@ -338,6 +345,11 @@ impl Worker {
                 _ = maint_ticker.tick() => {
                     run_maintenance(&self.db, &self.metrics, self.worker_config.stale_threshold_secs, self.worker_config.retention_hours).await;
                 }
+                _ = queue_recovery_ticker.tick() => {
+                    if !self.queues.is_empty() {
+                        recover_expired_queue_messages(&self.db, &self.metrics, &self.queues).await;
+                    }
+                }
             }
         }
 
@@ -384,6 +396,35 @@ async fn run_maintenance(db: &Database, metrics: &Metrics, stale_secs: i64, rete
         Err(e) => {
             metrics.inc_db_errors();
             tracing::error!(error = %e, "Failed to cleanup old records");
+        }
+    }
+}
+
+/// Recover queue messages that exceeded their visibility timeout.
+async fn recover_expired_queue_messages(
+    db: &Database,
+    metrics: &Metrics,
+    queues: &HashMap<String, config::QueueConfig>,
+) {
+    for (name, queue) in queues {
+        let handler = format!("queue/{}", name);
+        let timeout_secs = config::parse_duration(&queue.visibility_timeout);
+        if timeout_secs == 0 {
+            continue;
+        }
+        match db
+            .recover_expired_queue_messages(&handler, timeout_secs)
+            .await
+        {
+            Ok(0) => {}
+            Ok(n) => {
+                metrics.inc_queue_messages_expired(name, n);
+                tracing::info!(queue = name, recovered = n, "Recovered expired queue messages");
+            }
+            Err(e) => {
+                metrics.inc_db_errors();
+                tracing::error!(error = %e, queue = name, "Failed to recover expired queue messages");
+            }
         }
     }
 }
