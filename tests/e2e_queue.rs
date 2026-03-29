@@ -380,11 +380,7 @@ async fn queue_list_queues() {
     send_event(&server.base_url, "checkout.session.completed").await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-    let resp = client
-        .get(server.url("/api/queues"))
-        .send()
-        .await
-        .unwrap();
+    let resp = client.get(server.url("/api/queues")).send().await.unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     let queues = body["queues"].as_array().unwrap();
@@ -431,7 +427,10 @@ async fn queue_visibility_timeout_recovery() {
             break;
         }
     }
-    assert!(recovered, "Message should be recovered after visibility timeout");
+    assert!(
+        recovered,
+        "Message should be recovered after visibility timeout"
+    );
 
     server.stop().await;
 }

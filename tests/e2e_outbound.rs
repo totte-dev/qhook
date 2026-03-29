@@ -66,10 +66,12 @@ handlers:
     assert_eq!(resp.status(), 422);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["code"], "validation_error");
-    assert!(body["details"][0]["message"]
-        .as_str()
-        .unwrap()
-        .contains("not an outbound source"));
+    assert!(
+        body["details"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not an outbound source")
+    );
 
     // Non-existent source
     let resp = client

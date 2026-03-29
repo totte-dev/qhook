@@ -50,11 +50,19 @@ impl RemoteClient {
         if let Some(ref token) = self.token {
             req = req.header("Authorization", format!("Bearer {}", token));
         }
-        let resp = req.send().await.context("Failed to connect to remote server")?;
+        let resp = req
+            .send()
+            .await
+            .context("Failed to connect to remote server")?;
         let status = resp.status();
         let body = resp.text().await.context("Failed to read response body")?;
         if !status.is_success() {
-            anyhow::bail!("Remote server returned {} {}: {}", status.as_u16(), status.canonical_reason().unwrap_or(""), body);
+            anyhow::bail!(
+                "Remote server returned {} {}: {}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or(""),
+                body
+            );
         }
         serde_json::from_str(&body).context("Failed to parse JSON response")
     }
@@ -65,11 +73,19 @@ impl RemoteClient {
         if let Some(ref token) = self.token {
             req = req.header("Authorization", format!("Bearer {}", token));
         }
-        let resp = req.send().await.context("Failed to connect to remote server")?;
+        let resp = req
+            .send()
+            .await
+            .context("Failed to connect to remote server")?;
         let status = resp.status();
         let body = resp.text().await.context("Failed to read response body")?;
         if !status.is_success() {
-            anyhow::bail!("Remote server returned {} {}: {}", status.as_u16(), status.canonical_reason().unwrap_or(""), body);
+            anyhow::bail!(
+                "Remote server returned {} {}: {}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or(""),
+                body
+            );
         }
         serde_json::from_str(&body).context("Failed to parse JSON response")
     }
@@ -468,14 +484,21 @@ impl Args {
                 }
                 // Production warnings
                 if cfg.api.auth_token.is_none() {
-                    eprintln!("[warn] Warning: api.auth_token not configured. The management API is open to anyone.");
+                    eprintln!(
+                        "[warn] Warning: api.auth_token not configured. The management API is open to anyone."
+                    );
                 }
                 if cfg.server.allow_private_urls {
-                    eprintln!("[warn] Warning: allow_private_urls is enabled. Disable in production to prevent SSRF.");
+                    eprintln!(
+                        "[warn] Warning: allow_private_urls is enabled. Disable in production to prevent SSRF."
+                    );
                 }
                 for (name, queue) in &cfg.queues {
                     if queue.api_key.is_none() {
-                        eprintln!("[warn] Warning: queue '{}' has no api_key. Anyone can consume messages.", name);
+                        eprintln!(
+                            "[warn] Warning: queue '{}' has no api_key. Anyone can consume messages.",
+                            name
+                        );
                     }
                 }
                 tracing::info!("Config is valid");
@@ -1444,7 +1467,11 @@ impl Args {
                     println!("Deleted {} job(s) from queue '{}'.", deleted, name);
                     Ok(())
                 }
-                QueuesAction::Dlq { name, limit, config } => {
+                QueuesAction::Dlq {
+                    name,
+                    limit,
+                    config,
+                } => {
                     let cfg = Config::load(&config)?;
                     if !cfg.queues.contains_key(&name) {
                         anyhow::bail!("Unknown queue '{}'.", name);
@@ -1454,17 +1481,16 @@ impl Args {
                     db.migrate().await?;
 
                     let handler = format!("queue/{}", name);
-                    let jobs = db.list_jobs_by_handler(&handler, Some("dead"), limit).await?;
+                    let jobs = db
+                        .list_jobs_by_handler(&handler, Some("dead"), limit)
+                        .await?;
 
                     if jobs.is_empty() {
                         println!("No dead-letter messages in queue '{}'.", name);
                         return Ok(());
                     }
 
-                    println!(
-                        "{:<28} {:<8} {:<20} ERROR",
-                        "ID", "ATTEMPT", "SCHEDULED"
-                    );
+                    println!("{:<28} {:<8} {:<20} ERROR", "ID", "ATTEMPT", "SCHEDULED");
                     println!("{}", "-".repeat(80));
                     for job in &jobs {
                         let err = job.last_error.as_deref().unwrap_or("-");
@@ -1914,13 +1940,13 @@ impl Args {
                     Ok(())
                 }
                 EventsAction::Replay { .. } => {
-                    anyhow::bail!("The 'events replay' command is not available in remote mode. Use 'replay-local' to replay events via the HTTP API.");
+                    anyhow::bail!(
+                        "The 'events replay' command is not available in remote mode. Use 'replay-local' to replay events via the HTTP API."
+                    );
                 }
             },
             Command::Jobs { action } => match action {
-                JobsAction::List {
-                    status, limit, ..
-                } => {
+                JobsAction::List { status, limit, .. } => {
                     let mut path = format!("/api/jobs?limit={}", limit);
                     if let Some(s) = status {
                         path.push_str(&format!("&status={}", s));
@@ -1985,9 +2011,7 @@ impl Args {
                 }
             },
             Command::Inspect { event_id, .. } => {
-                let data = client
-                    .get(&format!("/api/events/{}", event_id))
-                    .await?;
+                let data = client.get(&format!("/api/events/{}", event_id)).await?;
 
                 let source = data["source"].as_str().unwrap_or("-");
                 let event_type = data["event_type"].as_str().unwrap_or("-");
@@ -2096,10 +2120,7 @@ impl Args {
                     };
 
                     println!("Queue: {}", name);
-                    println!(
-                        "  Source: {}",
-                        queue["source"].as_str().unwrap_or("-")
-                    );
+                    println!("  Source: {}", queue["source"].as_str().unwrap_or("-"));
                     if let Some(events) = queue["events"].as_array() {
                         if !events.is_empty() {
                             let events_str: Vec<_> =
@@ -2130,8 +2151,7 @@ impl Args {
                                 let job_status = job["status"].as_str().unwrap_or("-");
                                 let attempt = job["attempt"].as_u64().unwrap_or(0);
                                 let max_attempts = job["max_attempts"].as_u64().unwrap_or(0);
-                                let scheduled =
-                                    job["scheduled_at"].as_str().unwrap_or("-");
+                                let scheduled = job["scheduled_at"].as_str().unwrap_or("-");
                                 println!(
                                     "  {:<28} {:<12} {}/{:<5} {}",
                                     &id[..id.len().min(26)],
@@ -2160,10 +2180,7 @@ impl Args {
                         return Ok(());
                     }
 
-                    println!(
-                        "{:<28} {:<8} {:<20} ERROR",
-                        "ID", "ATTEMPT", "SCHEDULED"
-                    );
+                    println!("{:<28} {:<8} {:<20} ERROR", "ID", "ATTEMPT", "SCHEDULED");
                     println!("{}", "-".repeat(80));
                     for job in jobs {
                         let id = job["id"].as_str().unwrap_or("-");
@@ -2192,10 +2209,7 @@ impl Args {
                     }
                     let handler = format!("queue/{}", name);
                     let data = client
-                        .post(&format!(
-                            "/api/jobs/retry?status=dead&handler={}",
-                            handler
-                        ))
+                        .post(&format!("/api/jobs/retry?status=dead&handler={}", handler))
                         .await?;
                     let count = data["retried"].as_u64().unwrap_or(0);
                     println!(
@@ -2205,14 +2219,10 @@ impl Args {
                     Ok(())
                 }
                 QueuesAction::Drain { .. } => {
-                    anyhow::bail!(
-                        "The 'queues drain' command is not available in remote mode."
-                    );
+                    anyhow::bail!("The 'queues drain' command is not available in remote mode.");
                 }
                 QueuesAction::Peek { .. } => {
-                    anyhow::bail!(
-                        "The 'queues peek' command is not available in remote mode."
-                    );
+                    anyhow::bail!("The 'queues peek' command is not available in remote mode.");
                 }
             },
             Command::Status { .. } => {
@@ -2257,12 +2267,12 @@ impl Args {
                 Ok(())
             }
             Command::WorkflowRuns { .. } => {
-                anyhow::bail!(
-                    "The 'workflow-runs' command is not available in remote mode."
-                );
+                anyhow::bail!("The 'workflow-runs' command is not available in remote mode.");
             }
             Command::Init { .. } => {
-                anyhow::bail!("The 'init' command does not use --remote (it creates a local config file).");
+                anyhow::bail!(
+                    "The 'init' command does not use --remote (it creates a local config file)."
+                );
             }
             Command::Start { .. } => {
                 anyhow::bail!(
@@ -2270,26 +2280,30 @@ impl Args {
                 );
             }
             Command::Validate { .. } => {
-                anyhow::bail!("The 'validate' command does not use --remote (it validates a local config file).");
+                anyhow::bail!(
+                    "The 'validate' command does not use --remote (it validates a local config file)."
+                );
             }
             Command::Send { .. } => {
-                anyhow::bail!("The 'send' command does not use --remote. It already sends HTTP requests to a running server.");
+                anyhow::bail!(
+                    "The 'send' command does not use --remote. It already sends HTTP requests to a running server."
+                );
             }
             Command::Doctor { .. } => {
-                anyhow::bail!("The 'doctor' command does not use --remote (it checks local config and connectivity).");
+                anyhow::bail!(
+                    "The 'doctor' command does not use --remote (it checks local config and connectivity)."
+                );
             }
             Command::Tail { .. } => {
-                anyhow::bail!(
-                    "The 'tail' command is not available in remote mode."
-                );
+                anyhow::bail!("The 'tail' command is not available in remote mode.");
             }
             Command::Export { .. } => {
-                anyhow::bail!(
-                    "The 'export' command is not available in remote mode."
-                );
+                anyhow::bail!("The 'export' command is not available in remote mode.");
             }
             Command::ReplayLocal { .. } => {
-                anyhow::bail!("The 'replay-local' command does not use --remote. It already sends HTTP requests to a target server. Use --target instead.");
+                anyhow::bail!(
+                    "The 'replay-local' command does not use --remote. It already sends HTTP requests to a target server. Use --target instead."
+                );
             }
         }
     }

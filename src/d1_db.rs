@@ -61,7 +61,10 @@ impl Database {
 
         // Get current version
         let current_version: i32 = match d1
-            .query_optional("SELECT COALESCE(MAX(version), 0) as v FROM _migrations", vec![])
+            .query_optional(
+                "SELECT COALESCE(MAX(version), 0) as v FROM _migrations",
+                vec![],
+            )
             .await?
         {
             Some(row) => d1::row_get_i32(&row, "v").unwrap_or(0),
@@ -78,7 +81,9 @@ impl Database {
             tracing::info!("Pre-existing database detected, initializing migration tracking");
             for v in 1..=4i32 {
                 d1.execute(
-                    &rewrite_params("INSERT INTO _migrations (version, applied_at) VALUES (?1, ?2)"),
+                    &rewrite_params(
+                        "INSERT INTO _migrations (version, applied_at) VALUES (?1, ?2)",
+                    ),
                     params![v, format_now()],
                 )
                 .await
@@ -260,7 +265,10 @@ impl Database {
     pub(crate) async fn d1_get_event_payload(&self, event_id: &str) -> Result<String> {
         let row = self
             .d1()
-            .query_one("SELECT payload FROM events WHERE id = ?1", params![event_id])
+            .query_one(
+                "SELECT payload FROM events WHERE id = ?1",
+                params![event_id],
+            )
             .await?;
         d1::row_get_string(&row, "payload")
     }
@@ -268,7 +276,10 @@ impl Database {
     pub(crate) async fn d1_get_event_headers(&self, event_id: &str) -> Result<Option<String>> {
         let row = self
             .d1()
-            .query_one("SELECT headers FROM events WHERE id = ?1", params![event_id])
+            .query_one(
+                "SELECT headers FROM events WHERE id = ?1",
+                params![event_id],
+            )
             .await?;
         Ok(d1::row_get_opt_string(&row, "headers"))
     }
@@ -398,10 +409,7 @@ impl Database {
         rows.iter().map(d1::row_to_event).collect()
     }
 
-    pub(crate) async fn d1_get_event_by_id(
-        &self,
-        event_id: &str,
-    ) -> Result<Option<EventRowFull>> {
+    pub(crate) async fn d1_get_event_by_id(&self, event_id: &str) -> Result<Option<EventRowFull>> {
         let row = self
             .d1()
             .query_optional(
@@ -679,10 +687,7 @@ impl Database {
         Ok(result.rows_affected)
     }
 
-    pub(crate) async fn d1_cleanup_old_records(
-        &self,
-        retention_hours: i64,
-    ) -> Result<(u64, u64)> {
+    pub(crate) async fn d1_cleanup_old_records(&self, retention_hours: i64) -> Result<(u64, u64)> {
         let cutoff = format_dt(Utc::now().naive_utc() - chrono::Duration::hours(retention_hours));
         let attempts = self
             .d1()
@@ -936,10 +941,7 @@ impl Database {
         row.as_ref().map(d1::row_to_workflow_job).transpose()
     }
 
-    pub(crate) async fn d1_get_workflow_run(
-        &self,
-        run_id: &str,
-    ) -> Result<Option<WorkflowRunRow>> {
+    pub(crate) async fn d1_get_workflow_run(&self, run_id: &str) -> Result<Option<WorkflowRunRow>> {
         let row = self
             .d1()
             .query_optional(
@@ -1019,10 +1021,7 @@ impl Database {
     }
 
     /// D1: increment parallel completed. No RETURNING, use UPDATE + SELECT (like SQLite).
-    pub(crate) async fn d1_increment_parallel_completed(
-        &self,
-        run_id: &str,
-    ) -> Result<(i32, i32)> {
+    pub(crate) async fn d1_increment_parallel_completed(&self, run_id: &str) -> Result<(i32, i32)> {
         self.d1()
             .execute(
                 "UPDATE workflow_runs SET parallel_completed = parallel_completed + 1 WHERE id = ?1",
@@ -1318,11 +1317,7 @@ impl Database {
         Ok(msgs)
     }
 
-    pub(crate) async fn d1_ack_queue_messages(
-        &self,
-        handler: &str,
-        ids: &[String],
-    ) -> Result<u64> {
+    pub(crate) async fn d1_ack_queue_messages(&self, handler: &str, ids: &[String]) -> Result<u64> {
         if ids.is_empty() {
             return Ok(0);
         }
@@ -1403,7 +1398,11 @@ impl Database {
         visibility_timeout_secs: u64,
     ) -> Result<u64> {
         let now = Utc::now().naive_utc();
-        let cutoff = format_dt(now - chrono::Duration::seconds(i64::try_from(visibility_timeout_secs).unwrap_or(i64::MAX)));
+        let cutoff = format_dt(
+            now - chrono::Duration::seconds(
+                i64::try_from(visibility_timeout_secs).unwrap_or(i64::MAX),
+            ),
+        );
         let now_str = format_dt(now);
         let result = self
             .d1()
@@ -1462,10 +1461,7 @@ impl Database {
         row.as_ref().map(d1::row_to_endpoint).transpose()
     }
 
-    pub(crate) async fn d1_list_endpoints(
-        &self,
-        source: Option<&str>,
-    ) -> Result<Vec<EndpointRow>> {
+    pub(crate) async fn d1_list_endpoints(&self, source: Option<&str>) -> Result<Vec<EndpointRow>> {
         let rows = if let Some(src) = source {
             self.d1()
                 .query(
@@ -1520,10 +1516,7 @@ impl Database {
             .await?;
         let result = self
             .d1()
-            .execute(
-                "DELETE FROM outbound_endpoints WHERE id = ?1",
-                params![id],
-            )
+            .execute("DELETE FROM outbound_endpoints WHERE id = ?1", params![id])
             .await?;
         Ok(result.rows_affected > 0)
     }
@@ -1707,10 +1700,7 @@ impl Database {
         row.as_ref().map(d1::row_to_job).transpose()
     }
 
-    pub(crate) async fn d1_get_endpoint_secret(
-        &self,
-        endpoint_id: &str,
-    ) -> Result<Option<String>> {
+    pub(crate) async fn d1_get_endpoint_secret(&self, endpoint_id: &str) -> Result<Option<String>> {
         let row = self
             .d1()
             .query_optional(
@@ -1804,7 +1794,10 @@ mod tests {
 
     #[test]
     fn test_rewrite_params_basic() {
-        assert_eq!(rewrite_params("SELECT * FROM t WHERE id = $1"), "SELECT * FROM t WHERE id = ?1");
+        assert_eq!(
+            rewrite_params("SELECT * FROM t WHERE id = $1"),
+            "SELECT * FROM t WHERE id = ?1"
+        );
     }
 
     #[test]
@@ -1822,10 +1815,7 @@ mod tests {
 
     #[test]
     fn test_rewrite_params_double_digit() {
-        assert_eq!(
-            rewrite_params("SELECT $10, $11"),
-            "SELECT ?10, ?11"
-        );
+        assert_eq!(rewrite_params("SELECT $10, $11"), "SELECT ?10, ?11");
     }
 
     #[test]

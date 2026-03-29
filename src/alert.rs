@@ -22,10 +22,7 @@ pub enum AlertEvent {
     /// Circuit breaker opened for a handler.
     CircuitOpened { handler: String },
     /// Workflow run failed.
-    WorkflowFailed {
-        workflow: String,
-        run_id: String,
-    },
+    WorkflowFailed { workflow: String, run_id: String },
     /// Database health check failed.
     DbUnhealthy,
     /// Events expired by TTL.

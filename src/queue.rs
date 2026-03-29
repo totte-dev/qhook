@@ -462,7 +462,11 @@ async fn recover_expired_queue_messages(
             Ok(0) => {}
             Ok(n) => {
                 metrics.inc_queue_messages_expired(name, n);
-                tracing::info!(queue = name, recovered = n, "Recovered expired queue messages");
+                tracing::info!(
+                    queue = name,
+                    recovered = n,
+                    "Recovered expired queue messages"
+                );
             }
             Err(e) => {
                 metrics.inc_db_errors();
@@ -562,9 +566,15 @@ async fn deliver_job(
                                 tracing::error!(job_id = job.id, error = %e, "Failed to mark parallel job completed");
                                 return;
                             }
-                            if let Err(e) =
-                                handle_parallel_step(db, metrics, alerter, default_retry_max, job, step)
-                                    .await
+                            if let Err(e) = handle_parallel_step(
+                                db,
+                                metrics,
+                                alerter,
+                                default_retry_max,
+                                job,
+                                step,
+                            )
+                            .await
                             {
                                 tracing::error!(job_id = job.id, error = %e, "Failed to handle parallel step");
                             }
@@ -577,7 +587,8 @@ async fn deliver_job(
                                 return;
                             }
                             if let Err(e) =
-                                handle_map_step(db, metrics, alerter, default_retry_max, job, step).await
+                                handle_map_step(db, metrics, alerter, default_retry_max, job, step)
+                                    .await
                             {
                                 tracing::error!(job_id = job.id, error = %e, "Failed to handle map step");
                             }
@@ -906,7 +917,7 @@ async fn deliver_workflow_step(
 
     // Add deterministic delivery ID for handler-side deduplication
     {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(format!("{}:{}", job.event_id, job.handler));
         let delivery_id = hex::encode(&hasher.finalize()[..16]);
@@ -1511,8 +1522,12 @@ async fn handle_parallel_step(
     };
 
     // Set parallel state on workflow run
-    db.set_parallel_state(run_id, &step.name, i32::try_from(branches.len()).unwrap_or(i32::MAX))
-        .await?;
+    db.set_parallel_state(
+        run_id,
+        &step.name,
+        i32::try_from(branches.len()).unwrap_or(i32::MAX),
+    )
+    .await?;
 
     let max_attempts = step
         .retry
@@ -1619,8 +1634,12 @@ async fn handle_map_step(
     }
 
     // Set parallel state (map uses the same parallel tracking)
-    db.set_parallel_state(run_id, &step.name, i32::try_from(items.len()).unwrap_or(i32::MAX))
-        .await?;
+    db.set_parallel_state(
+        run_id,
+        &step.name,
+        i32::try_from(items.len()).unwrap_or(i32::MAX),
+    )
+    .await?;
 
     let max_attempts = step
         .retry
@@ -1862,7 +1881,8 @@ async fn handle_wait_step(
 
     // Determine the wait duration
     let wait_until = if let Some(seconds) = step.seconds {
-        Utc::now().naive_utc() + chrono::Duration::seconds(i64::try_from(seconds).unwrap_or(i64::MAX))
+        Utc::now().naive_utc()
+            + chrono::Duration::seconds(i64::try_from(seconds).unwrap_or(i64::MAX))
     } else if let Some(ref ts_path) = step.timestamp_path {
         // Extract timestamp from payload
         let json: serde_json::Value = serde_json::from_str(payload)?;
@@ -2014,7 +2034,10 @@ async fn handle_callback_step(
 
     // Calculate callback timeout_at if configured
     let timeout_at = step.callback_timeout.map(|secs| {
-        crate::db::format_dt(Utc::now().naive_utc() + chrono::Duration::seconds(i64::try_from(secs).unwrap_or(i64::MAX)))
+        crate::db::format_dt(
+            Utc::now().naive_utc()
+                + chrono::Duration::seconds(i64::try_from(secs).unwrap_or(i64::MAX)),
+        )
     });
 
     db.insert_callback_job(
@@ -2543,7 +2566,7 @@ async fn deliver_http(
 
     // Add deterministic delivery ID for handler-side deduplication
     {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(format!("{}:{}", job.event_id, job.handler));
         let delivery_id = hex::encode(&hasher.finalize()[..16]);

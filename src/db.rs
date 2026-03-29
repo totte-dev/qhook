@@ -384,7 +384,9 @@ impl Database {
         unique_key: Option<&str>,
     ) -> Result<bool> {
         if self.is_d1() {
-            return self.d1_insert_event(id, source, event_type, payload, headers, unique_key).await;
+            return self
+                .d1_insert_event(id, source, event_type, payload, headers, unique_key)
+                .await;
         }
         let now = format_now();
 
@@ -551,7 +553,9 @@ impl Database {
         max_attempts: u32,
     ) -> Result<()> {
         if self.is_d1() {
-            return self.d1_insert_job(id, event_id, handler, url, max_attempts).await;
+            return self
+                .d1_insert_job(id, event_id, handler, url, max_attempts)
+                .await;
         }
         let now = format_now();
 
@@ -675,7 +679,9 @@ impl Database {
         error: &str,
     ) -> Result<()> {
         if self.is_d1() {
-            return self.d1_mark_job_retryable(job_id, next_attempt_at, error).await;
+            return self
+                .d1_mark_job_retryable(job_id, next_attempt_at, error)
+                .await;
         }
         let scheduled = format_dt(next_attempt_at);
 
@@ -721,7 +727,17 @@ impl Database {
         duration_ms: i64,
     ) -> Result<()> {
         if self.is_d1() {
-            return self.d1_insert_attempt(id, job_id, attempt, status_code, response_body, error, duration_ms).await;
+            return self
+                .d1_insert_attempt(
+                    id,
+                    job_id,
+                    attempt,
+                    status_code,
+                    response_body,
+                    error,
+                    duration_ms,
+                )
+                .await;
         }
         let now = format_now();
 
@@ -830,7 +846,9 @@ impl Database {
         limit: i32,
     ) -> Result<Vec<EventRowFull>> {
         if self.is_d1() {
-            return self.d1_list_events_filtered(source, event_type, since, until, limit).await;
+            return self
+                .d1_list_events_filtered(source, event_type, since, until, limit)
+                .await;
         }
         // Build query dynamically based on filters
         let mut conditions = Vec::new();
@@ -1134,7 +1152,9 @@ impl Database {
         first_step: &str,
     ) -> Result<()> {
         if self.is_d1() {
-            return self.d1_insert_workflow_run(id, workflow, event_id, first_step).await;
+            return self
+                .d1_insert_workflow_run(id, workflow, event_id, first_step)
+                .await;
         }
         let now = format_now();
 
@@ -1209,7 +1229,19 @@ impl Database {
         step_input: Option<&str>,
     ) -> Result<()> {
         if self.is_d1() {
-            return self.d1_insert_workflow_job(id, event_id, handler, url, max_attempts, workflow_run_id, step_name, step_index, step_input).await;
+            return self
+                .d1_insert_workflow_job(
+                    id,
+                    event_id,
+                    handler,
+                    url,
+                    max_attempts,
+                    workflow_run_id,
+                    step_name,
+                    step_index,
+                    step_input,
+                )
+                .await;
         }
         let now = format_now();
 
@@ -1324,7 +1356,9 @@ impl Database {
         count: i32,
     ) -> Result<()> {
         if self.is_d1() {
-            return self.d1_set_parallel_state(run_id, parallel_step, count).await;
+            return self
+                .d1_set_parallel_state(run_id, parallel_step, count)
+                .await;
         }
         sqlx::query(
             "UPDATE workflow_runs SET parallel_step = $1, parallel_count = $2, parallel_completed = 0 \
@@ -1411,7 +1445,20 @@ impl Database {
         branch_name: &str,
     ) -> Result<()> {
         if self.is_d1() {
-            return self.d1_insert_branch_job(id, event_id, handler, url, max_attempts, workflow_run_id, step_name, step_index, step_input, branch_name).await;
+            return self
+                .d1_insert_branch_job(
+                    id,
+                    event_id,
+                    handler,
+                    url,
+                    max_attempts,
+                    workflow_run_id,
+                    step_name,
+                    step_index,
+                    step_input,
+                    branch_name,
+                )
+                .await;
         }
         let now = format_now();
 
@@ -1474,7 +1521,20 @@ impl Database {
         scheduled_at: &str,
     ) -> Result<()> {
         if self.is_d1() {
-            return self.d1_insert_workflow_job_delayed(id, event_id, handler, url, max_attempts, workflow_run_id, step_name, step_index, step_input, scheduled_at).await;
+            return self
+                .d1_insert_workflow_job_delayed(
+                    id,
+                    event_id,
+                    handler,
+                    url,
+                    max_attempts,
+                    workflow_run_id,
+                    step_name,
+                    step_index,
+                    step_input,
+                    scheduled_at,
+                )
+                .await;
         }
         let now = format_now();
 
@@ -1516,7 +1576,20 @@ impl Database {
         _timeout_at: Option<&str>,
     ) -> Result<()> {
         if self.is_d1() {
-            return self.d1_insert_callback_job(id, event_id, handler, max_attempts, workflow_run_id, step_name, step_index, step_input, callback_token, _timeout_at).await;
+            return self
+                .d1_insert_callback_job(
+                    id,
+                    event_id,
+                    handler,
+                    max_attempts,
+                    workflow_run_id,
+                    step_name,
+                    step_index,
+                    step_input,
+                    callback_token,
+                    _timeout_at,
+                )
+                .await;
         }
         let now = format_now();
 
@@ -1652,7 +1725,16 @@ impl Database {
         parent_step_index: i32,
     ) -> Result<()> {
         if self.is_d1() {
-            return self.d1_insert_sub_workflow_run(id, workflow, event_id, first_step, parent_run_id, parent_step_index).await;
+            return self
+                .d1_insert_sub_workflow_run(
+                    id,
+                    workflow,
+                    event_id,
+                    first_step,
+                    parent_run_id,
+                    parent_step_index,
+                )
+                .await;
         }
         let now = format_now();
 
@@ -1760,12 +1842,11 @@ impl Database {
                     continue; // another consumer grabbed it
                 }
                 // Fetch event data
-                let evt: (String, String, Option<String>) = sqlx::query_as(
-                    "SELECT event_type, payload, headers FROM events WHERE id = $1",
-                )
-                .bind(&job.event_id)
-                .fetch_one(self.sqlx_pool())
-                .await?;
+                let evt: (String, String, Option<String>) =
+                    sqlx::query_as("SELECT event_type, payload, headers FROM events WHERE id = $1")
+                        .bind(&job.event_id)
+                        .fetch_one(self.sqlx_pool())
+                        .await?;
 
                 msgs.push(QueueMessageRow {
                     id: job.id,
@@ -1883,10 +1964,16 @@ impl Database {
         visibility_timeout_secs: u64,
     ) -> Result<u64> {
         if self.is_d1() {
-            return self.d1_recover_expired_queue_messages(handler, visibility_timeout_secs).await;
+            return self
+                .d1_recover_expired_queue_messages(handler, visibility_timeout_secs)
+                .await;
         }
         let now = Utc::now().naive_utc();
-        let cutoff = format_dt(now - chrono::Duration::seconds(i64::try_from(visibility_timeout_secs).unwrap_or(i64::MAX)));
+        let cutoff = format_dt(
+            now - chrono::Duration::seconds(
+                i64::try_from(visibility_timeout_secs).unwrap_or(i64::MAX),
+            ),
+        );
         let now_str = format_dt(now);
 
         let result = sqlx::query(
@@ -2110,7 +2197,9 @@ impl Database {
         after: Option<&str>,
     ) -> Result<Vec<EventRow>> {
         if self.is_d1() {
-            return self.d1_list_events_for_api(source, event_type, since, until, limit, after).await;
+            return self
+                .d1_list_events_for_api(source, event_type, since, until, limit, after)
+                .await;
         }
         let mut conditions = Vec::new();
         let mut param_idx = 1;
@@ -2178,7 +2267,9 @@ impl Database {
         after: Option<&str>,
     ) -> Result<Vec<JobRow>> {
         if self.is_d1() {
-            return self.d1_list_jobs_filtered(status, handler, limit, after).await;
+            return self
+                .d1_list_jobs_filtered(status, handler, limit, after)
+                .await;
         }
         let mut conditions = Vec::new();
         let mut param_idx = 1;
@@ -2235,7 +2326,9 @@ impl Database {
         status: &str,
     ) -> Result<()> {
         if self.is_d1() {
-            return self.d1_insert_endpoint(id, source, url, description, signing_secret, status).await;
+            return self
+                .d1_insert_endpoint(id, source, url, description, signing_secret, status)
+                .await;
         }
         let now = format_now();
         sqlx::query(
@@ -2458,10 +2551,7 @@ impl Database {
     // ── Queue CLI helper methods ──────────────────────────────────────
 
     /// Count jobs by status for a specific handler pattern (e.g. "queue/{name}").
-    pub async fn count_jobs_by_handler_status(
-        &self,
-        handler: &str,
-    ) -> Result<Vec<(String, i64)>> {
+    pub async fn count_jobs_by_handler_status(&self, handler: &str) -> Result<Vec<(String, i64)>> {
         if self.is_d1() {
             return self.d1_count_jobs_by_handler_status(handler).await;
         }

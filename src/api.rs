@@ -400,10 +400,7 @@ pub async fn serve(state: AppState, config_path: String) -> Result<()> {
         )
         // Pull-mode queue endpoints
         .route("/api/queues", get(handle_list_queues))
-        .route(
-            "/api/queues/{name}/messages",
-            get(handle_queue_receive),
-        )
+        .route("/api/queues/{name}/messages", get(handle_queue_receive))
         .route("/api/queues/{name}/ack", post(handle_queue_ack))
         .route("/api/queues/{name}/nack", post(handle_queue_nack))
         .route("/_echo", axum::routing::any(handle_echo))
@@ -720,11 +717,7 @@ async fn handle_event(
                     endpoint = "events",
                     "Authentication failed: missing bearer token"
                 );
-                return error_response(
-                    StatusCode::UNAUTHORIZED,
-                    "unauthorized",
-                    "Invalid token",
-                );
+                return error_response(StatusCode::UNAUTHORIZED, "unauthorized", "Invalid token");
             }
         }
     }
@@ -783,7 +776,10 @@ async fn handle_sns(
 ) -> impl IntoResponse {
     // Backpressure: reject early if DB is unhealthy
     if !state.db_healthy.load(std::sync::atomic::Ordering::Relaxed) {
-        return (StatusCode::SERVICE_UNAVAILABLE, "Database temporarily unavailable".to_string());
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Database temporarily unavailable".to_string(),
+        );
     }
     // Find source config
     let source = match state.config.sources.get(&source_name) {
@@ -995,7 +991,11 @@ async fn process_event_inner(
         && matching_workflows.is_empty()
         && matching_queues.is_empty()
     {
-        tracing::debug!(source, event_type, "No matching handlers, workflows, or queues");
+        tracing::debug!(
+            source,
+            event_type,
+            "No matching handlers, workflows, or queues"
+        );
         return Ok(EventResult {
             event_id,
             created: true,
@@ -1035,7 +1035,12 @@ async fn process_event_inner(
             .as_ref()
             .map(|r| r.max)
             .unwrap_or(state.config.delivery.default_retry.max);
-        jobs_to_create.push((job_id, handler_name.to_string(), handler.url.clone(), max_attempts));
+        jobs_to_create.push((
+            job_id,
+            handler_name.to_string(),
+            handler.url.clone(),
+            max_attempts,
+        ));
     }
 
     // Queue jobs (pull-mode)
@@ -1319,10 +1324,8 @@ fn check_db_health(state: &AppState) -> Option<axum::response::Response> {
             "service_unavailable",
             "Database temporarily unavailable",
         );
-        resp.headers_mut().insert(
-            "Retry-After",
-            axum::http::HeaderValue::from_static("30"),
-        );
+        resp.headers_mut()
+            .insert("Retry-After", axum::http::HeaderValue::from_static("30"));
         return Some(resp);
     }
     None
@@ -1733,7 +1736,9 @@ async fn handle_health(State(state): State<SharedState>) -> impl IntoResponse {
         Ok(depth) => {
             // If DB query succeeds but flag is false (worker may have crashed), auto-recover
             if !db_healthy_flag {
-                state.db_healthy.store(true, std::sync::atomic::Ordering::Relaxed);
+                state
+                    .db_healthy
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 tracing::info!("Health check recovered db_healthy flag (worker may have crashed)");
             }
             let dead_jobs = state.db.dead_job_count().await.unwrap_or(0);
@@ -2344,10 +2349,17 @@ async fn handle_create_endpoint(
     match state.config.sources.get(source) {
         Some(s) if s.source_type == "outbound" => {}
         Some(_) => {
-            return validation_error(vec![("source", &format!("source '{}' is not an outbound source", source))]);
+            return validation_error(vec![(
+                "source",
+                &format!("source '{}' is not an outbound source", source),
+            )]);
         }
         None => {
-            return error_response(StatusCode::NOT_FOUND, "not_found", &format!("source '{}' not found", source));
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                &format!("source '{}' not found", source),
+            );
         }
     }
 
@@ -2361,17 +2373,32 @@ async fn handle_create_endpoint(
 
     // Determine initial status: 'pending' unless verification is skipped
     let skip_verification = state.config.server.skip_endpoint_verification;
-    let initial_status = if skip_verification { "active" } else { "pending" };
+    let initial_status = if skip_verification {
+        "active"
+    } else {
+        "pending"
+    };
 
     match state
         .db
-        .insert_endpoint(&id, source, url, description, &signing_secret, initial_status)
+        .insert_endpoint(
+            &id,
+            source,
+            url,
+            description,
+            &signing_secret,
+            initial_status,
+        )
         .await
     {
         Ok(()) => {}
         Err(e) => {
             tracing::error!(error = %e, "Failed to create endpoint");
-            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "Failed to create endpoint");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to create endpoint",
+            );
         }
     }
 
@@ -2382,7 +2409,10 @@ async fn handle_create_endpoint(
         match verify_endpoint_ownership(&state.http, url).await {
             Ok(true) => {
                 // Update status to active
-                let _ = state.db.update_endpoint(&id, None, None, Some("active")).await;
+                let _ = state
+                    .db
+                    .update_endpoint(&id, None, None, Some("active"))
+                    .await;
                 ("active".to_string(), true)
             }
             Ok(false) => ("pending".to_string(), false),
@@ -2584,10 +2614,7 @@ async fn handle_update_endpoint(
     // Validate URL if provided
     if let Some(u) = url {
         if !u.starts_with("http://") && !u.starts_with("https://") {
-            return validation_error(vec![(
-                "url",
-                "url must start with http:// or https://",
-            )]);
+            return validation_error(vec![("url", "url must start with http:// or https://")]);
         }
     }
 
@@ -2805,7 +2832,10 @@ fn check_queue_auth(
         }
         _ => {
             return Some(
-                (StatusCode::UNAUTHORIZED, "Missing or invalid Authorization header".to_string())
+                (
+                    StatusCode::UNAUTHORIZED,
+                    "Missing or invalid Authorization header".to_string(),
+                )
                     .into_response(),
             );
         }
@@ -2981,7 +3011,9 @@ async fn handle_queue_nack(
     let handler = format!("queue/{}", name);
     match state.db.nack_queue_messages(&handler, &body.ids).await {
         Ok((retried, dead)) => {
-            state.metrics.inc_queue_messages_nacked(&name, retried + dead);
+            state
+                .metrics
+                .inc_queue_messages_nacked(&name, retried + dead);
             let resp = serde_json::json!({"retried": retried, "dead": dead});
             (StatusCode::OK, axum::Json(resp)).into_response()
         }

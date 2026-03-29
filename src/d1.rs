@@ -213,8 +213,8 @@ impl D1Config {
             );
         }
 
-        let api_response: D1ApiResponse = serde_json::from_str(&response_text)
-            .with_context(|| {
+        let api_response: D1ApiResponse =
+            serde_json::from_str(&response_text).with_context(|| {
                 format!(
                     "Failed to parse D1 response: {}",
                     truncate(&response_text, 200)
@@ -265,7 +265,10 @@ pub fn row_get_i32(row: &D1Row, key: &str) -> Result<i32> {
         Some(serde_json::Value::Number(n)) => n
             .as_i64()
             .and_then(|v| i32::try_from(v).ok())
-            .context(format!("Column '{}' is not an integer or out of i32 range", key)),
+            .context(format!(
+                "Column '{}' is not an integer or out of i32 range",
+                key
+            )),
         Some(serde_json::Value::Null) | None => {
             anyhow::bail!("Column '{}' is null or missing", key)
         }
@@ -284,9 +287,9 @@ pub fn row_get_opt_i32(row: &D1Row, key: &str) -> Option<i32> {
 /// Helper: extract an i64 from a D1Row.
 pub fn row_get_i64(row: &D1Row, key: &str) -> Result<i64> {
     match row.get(key) {
-        Some(serde_json::Value::Number(n)) => {
-            n.as_i64().context(format!("Column '{}' is not an i64", key))
-        }
+        Some(serde_json::Value::Number(n)) => n
+            .as_i64()
+            .context(format!("Column '{}' is not an i64", key)),
         Some(serde_json::Value::Null) | None => {
             anyhow::bail!("Column '{}' is null or missing", key)
         }
@@ -296,11 +299,7 @@ pub fn row_get_i64(row: &D1Row, key: &str) -> Result<i64> {
 
 /// Truncate a string for error messages.
 fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        &s[..max]
-    }
+    if s.len() <= max { s } else { &s[..max] }
 }
 
 /// Convert a D1Row to a JobRow.
@@ -489,9 +488,15 @@ mod tests {
         row.insert("status".into(), serde_json::json!("available"));
         row.insert("attempt".into(), serde_json::json!(0));
         row.insert("max_attempts".into(), serde_json::json!(5));
-        row.insert("scheduled_at".into(), serde_json::json!("2024-01-01T00:00:00.000"));
+        row.insert(
+            "scheduled_at".into(),
+            serde_json::json!("2024-01-01T00:00:00.000"),
+        );
         row.insert("last_error".into(), serde_json::Value::Null);
-        row.insert("created_at".into(), serde_json::json!("2024-01-01T00:00:00.000"));
+        row.insert(
+            "created_at".into(),
+            serde_json::json!("2024-01-01T00:00:00.000"),
+        );
 
         let job = row_to_job(&row).unwrap();
         assert_eq!(job.id, "job-1");
@@ -510,7 +515,10 @@ mod tests {
         row.insert("source".into(), serde_json::json!("github"));
         row.insert("event_type".into(), serde_json::json!("push"));
         row.insert("unique_key".into(), serde_json::Value::Null);
-        row.insert("created_at".into(), serde_json::json!("2024-01-01T00:00:00.000"));
+        row.insert(
+            "created_at".into(),
+            serde_json::json!("2024-01-01T00:00:00.000"),
+        );
 
         let event = row_to_event(&row).unwrap();
         assert_eq!(event.id, "evt-1");

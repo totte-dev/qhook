@@ -103,7 +103,10 @@ async fn test_d1_connect_api_mode_missing_account_id() {
     let result = Database::connect(&config).await;
     assert!(result.is_err());
     let err = format!("{}", result.err().unwrap());
-    assert!(err.contains("account_id"), "Error should mention account_id: {err}");
+    assert!(
+        err.contains("account_id"),
+        "Error should mention account_id: {err}"
+    );
 }
 
 #[tokio::test]
@@ -121,7 +124,10 @@ async fn test_d1_connect_api_mode_missing_database_id() {
     let result = Database::connect(&config).await;
     assert!(result.is_err());
     let err = format!("{}", result.err().unwrap());
-    assert!(err.contains("database_id"), "Error should mention database_id: {err}");
+    assert!(
+        err.contains("database_id"),
+        "Error should mention database_id: {err}"
+    );
 }
 
 #[tokio::test]
@@ -139,7 +145,10 @@ async fn test_d1_connect_api_mode_missing_api_token() {
     let result = Database::connect(&config).await;
     assert!(result.is_err());
     let err = format!("{}", result.err().unwrap());
-    assert!(err.contains("api_token"), "Error should mention api_token: {err}");
+    assert!(
+        err.contains("api_token"),
+        "Error should mention api_token: {err}"
+    );
 }
 
 #[tokio::test]
@@ -512,9 +521,16 @@ async fn test_d1_outbound_endpoint_crud() {
         .await;
 
     let db = make_d1_db(&server.uri()).await;
-    db.insert_endpoint("ep-1", "stripe", "https://example.com/hook", Some("My endpoint"), "secret123", "active")
-        .await
-        .unwrap();
+    db.insert_endpoint(
+        "ep-1",
+        "stripe",
+        "https://example.com/hook",
+        Some("My endpoint"),
+        "secret123",
+        "active",
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -638,7 +654,10 @@ async fn test_d1_resume_callback_not_found() {
         .resume_callback_job("nonexistent-token", r#"{"result":"done"}"#)
         .await
         .unwrap();
-    assert!(result.is_none(), "Should return None for non-existent token");
+    assert!(
+        result.is_none(),
+        "Should return None for non-existent token"
+    );
 }
 
 #[tokio::test]
