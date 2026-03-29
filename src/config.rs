@@ -508,9 +508,9 @@ pub fn parse_duration(s: &str) -> u64 {
     if let Some(rest) = s.strip_suffix('s') {
         rest.parse().unwrap_or(0)
     } else if let Some(rest) = s.strip_suffix('m') {
-        rest.parse::<u64>().map(|v| v * 60).unwrap_or(0)
+        rest.parse::<u64>().map_or(0, |v| v * 60)
     } else if let Some(rest) = s.strip_suffix('h') {
-        rest.parse::<u64>().map(|v| v * 3600).unwrap_or(0)
+        rest.parse::<u64>().map_or(0, |v| v * 3600)
     } else {
         // Try plain number as seconds
         s.parse().unwrap_or(0)

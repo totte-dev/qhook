@@ -1389,8 +1389,8 @@ impl Args {
                     }
 
                     println!(
-                        "{:<28} {:<8} {:<20} {}",
-                        "ID", "ATTEMPT", "SCHEDULED", "ERROR"
+                        "{:<28} {:<8} {:<20} ERROR",
+                        "ID", "ATTEMPT", "SCHEDULED"
                     );
                     println!("{}", "-".repeat(80));
                     for job in &jobs {

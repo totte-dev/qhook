@@ -249,7 +249,7 @@ impl Worker {
                 _ = poll_ticker.tick() => {
                     let is_postgres = self.db.driver == "postgres" && !self.db.is_d1();
                     let batch = self.worker_config.batch_size.min(
-                        semaphore.available_permits() as i32
+                        i32::try_from(semaphore.available_permits()).unwrap_or(i32::MAX)
                     ).max(1);
                     let jobs = match self.db.fetch_available_jobs(batch).await {
                         Ok(j) => {
@@ -619,12 +619,12 @@ async fn deliver_job(
                 .and_then(|s| s.branches.as_ref())
                 .and_then(|bs| bs.iter().find(|b| b.name == bn));
             let h = branch.map(|b| &b.headers).filter(|h| !h.is_empty());
-            let m = branch.map(|b| b.method.as_str()).unwrap_or("POST");
+            let m = branch.map_or("POST", |b| b.method.as_str());
             (h.cloned(), m.to_string())
         } else {
             // Regular step job
             let h = step.map(|s| &s.headers).filter(|h| !h.is_empty());
-            let m = step.map(|s| s.method.as_str()).unwrap_or("POST");
+            let m = step.map_or("POST", |s| s.method.as_str());
             (h.cloned(), m.to_string())
         };
         (None, headers, method)
@@ -646,7 +646,7 @@ async fn deliver_job(
     } else {
         deliver(db, http, job, transform, custom_headers.as_ref(), &method).await
     };
-    let duration_ms = start.elapsed().as_millis() as i64;
+    let duration_ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
 
     match result {
         Ok(delivery_result) => {
@@ -670,7 +670,7 @@ async fn deliver_job(
             }
 
             if (200..300).contains(&status_code) {
-                metrics.inc_delivery_success_for(&job.handler, duration_ms as u64);
+                metrics.inc_delivery_success_for(&job.handler, duration_ms.max(0) as u64);
                 if let Some(cb) = circuit_breaker {
                     cb.record_success();
                 }
@@ -703,7 +703,7 @@ async fn deliver_job(
                     "Job completed"
                 );
             } else {
-                metrics.inc_delivery_failure_for(&job.handler, duration_ms as u64);
+                metrics.inc_delivery_failure_for(&job.handler, duration_ms.max(0) as u64);
                 let error_type = if (400..500).contains(&status_code) {
                     "4xx"
                 } else {
@@ -753,7 +753,7 @@ async fn deliver_job(
         Err(e) => {
             let error = e.to_string();
             let attempt_id = ulid::Ulid::new().to_string();
-            metrics.inc_delivery_failure_for(&job.handler, duration_ms as u64);
+            metrics.inc_delivery_failure_for(&job.handler, duration_ms.max(0) as u64);
             let error_type = if e
                 .downcast_ref::<reqwest::Error>()
                 .is_some_and(|re| re.is_timeout())
@@ -983,7 +983,7 @@ async fn handle_workflow_step_success(
     }
 
     // Find next step
-    let next_index = (step_index + 1) as usize;
+    let next_index = (step_index + 1).max(0) as usize;
     if next_index >= workflow.steps.len() {
         // No more steps — workflow complete
         db.complete_workflow_run(run_id).await?;
@@ -1030,7 +1030,7 @@ async fn handle_workflow_step_success(
         max_attempts,
         run_id,
         &next_step.name,
-        next_index as i32,
+        i32::try_from(next_index).unwrap_or(i32::MAX),
         Some(&next_input),
     )
     .await?;
@@ -1273,7 +1273,7 @@ async fn route_to_catch_step(
         max_attempts,
         run_id,
         &goto_step.name,
-        goto_index as i32,
+        i32::try_from(goto_index).unwrap_or(i32::MAX),
         Some(&next_input),
     )
     .await?;
@@ -1374,7 +1374,7 @@ async fn handle_choice_step(
         max_attempts,
         run_id,
         &goto_step.name,
-        goto_index as i32,
+        i32::try_from(goto_index).unwrap_or(i32::MAX),
         Some(&next_input),
     )
     .await?;
@@ -1416,7 +1416,7 @@ async fn handle_parallel_step(
     };
 
     // Set parallel state on workflow run
-    db.set_parallel_state(run_id, &step.name, branches.len() as i32)
+    db.set_parallel_state(run_id, &step.name, i32::try_from(branches.len()).unwrap_or(i32::MAX))
         .await?;
 
     let max_attempts = step
@@ -1522,7 +1522,7 @@ async fn handle_map_step(
     }
 
     // Set parallel state (map uses the same parallel tracking)
-    db.set_parallel_state(run_id, &step.name, items.len() as i32)
+    db.set_parallel_state(run_id, &step.name, i32::try_from(items.len()).unwrap_or(i32::MAX))
         .await?;
 
     let max_attempts = step
@@ -1680,7 +1680,7 @@ async fn handle_branch_completion(
         Some(w) => w,
         None => return Ok(()),
     };
-    let next_index = (step_index + 1) as usize;
+    let next_index = (step_index + 1).max(0) as usize;
     if next_index >= workflow.steps.len() {
         db.complete_workflow_run(run_id).await?;
         metrics.inc_workflow_completed(workflow_name);
@@ -1722,7 +1722,7 @@ async fn handle_branch_completion(
         max_attempts,
         run_id,
         &next_step.name,
-        next_index as i32,
+        i32::try_from(next_index).unwrap_or(i32::MAX),
         Some(&next_input),
     )
     .await?;
@@ -1765,7 +1765,7 @@ async fn handle_wait_step(
 
     // Determine the wait duration
     let wait_until = if let Some(seconds) = step.seconds {
-        Utc::now().naive_utc() + chrono::Duration::seconds(seconds as i64)
+        Utc::now().naive_utc() + chrono::Duration::seconds(i64::try_from(seconds).unwrap_or(i64::MAX))
     } else if let Some(ref ts_path) = step.timestamp_path {
         // Extract timestamp from payload
         let json: serde_json::Value = serde_json::from_str(payload)?;
@@ -1828,7 +1828,7 @@ async fn handle_wait_step(
     );
 
     // Advance to next step with delayed scheduled_at
-    let next_index = (step_index + 1) as usize;
+    let next_index = (step_index + 1).max(0) as usize;
     if next_index >= workflow.steps.len() {
         db.complete_workflow_run(run_id).await?;
         metrics.inc_workflow_completed(workflow_name);
@@ -1869,7 +1869,7 @@ async fn handle_wait_step(
         max_attempts,
         run_id,
         &next_step.name,
-        next_index as i32,
+        i32::try_from(next_index).unwrap_or(i32::MAX),
         Some(&next_input),
         &scheduled_at,
     )
@@ -1917,7 +1917,7 @@ async fn handle_callback_step(
 
     // Calculate callback timeout_at if configured
     let timeout_at = step.callback_timeout.map(|secs| {
-        crate::db::format_dt(Utc::now().naive_utc() + chrono::Duration::seconds(secs as i64))
+        crate::db::format_dt(Utc::now().naive_utc() + chrono::Duration::seconds(i64::try_from(secs).unwrap_or(i64::MAX)))
     });
 
     db.insert_callback_job(
@@ -2081,7 +2081,7 @@ pub async fn resume_callback(
     }
 
     // Advance to next step
-    let next_index = (step_index + 1) as usize;
+    let next_index = (step_index + 1).max(0) as usize;
     if next_index >= workflow.steps.len() {
         db.complete_workflow_run(run_id).await?;
         metrics.inc_workflow_completed(workflow_name);
@@ -2122,7 +2122,7 @@ pub async fn resume_callback(
         max_attempts,
         run_id,
         &next_step.name,
-        next_index as i32,
+        i32::try_from(next_index).unwrap_or(i32::MAX),
         Some(&next_input),
     )
     .await?;
@@ -2252,7 +2252,7 @@ async fn resume_parent_workflow(
     };
 
     // Find next step in parent workflow
-    let next_index = (parent_step_index + 1) as usize;
+    let next_index = (parent_step_index + 1).max(0) as usize;
     if next_index >= parent_workflow.steps.len() {
         // Parent workflow also completed
         db.complete_workflow_run(&parent_run_id).await?;
@@ -2300,7 +2300,7 @@ async fn resume_parent_workflow(
         max_attempts,
         &parent_run_id,
         &next_step.name,
-        next_index as i32,
+        i32::try_from(next_index).unwrap_or(i32::MAX),
         Some(&next_input),
     )
     .await?;

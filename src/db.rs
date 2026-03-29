@@ -368,7 +368,7 @@ impl Database {
         }
 
         tracing::info!(
-            version = migrations.last().map(|m| m.0).unwrap_or(0),
+            version = migrations.last().map_or(0, |m| m.0),
             "Database migrated"
         );
         Ok(())
@@ -462,7 +462,7 @@ impl Database {
         .bind(event_id)
         .bind(handler)
         .bind(url)
-        .bind(max_attempts as i32)
+        .bind(i32::try_from(max_attempts).unwrap_or(i32::MAX))
         .bind(&now)
         .execute(self.sqlx_pool())
         .await?;
@@ -1092,7 +1092,7 @@ impl Database {
         .bind(event_id)
         .bind(handler)
         .bind(url)
-        .bind(max_attempts as i32)
+        .bind(i32::try_from(max_attempts).unwrap_or(i32::MAX))
         .bind(&now)
         .bind(workflow_run_id)
         .bind(step_name)
@@ -1291,7 +1291,7 @@ impl Database {
         .bind(event_id)
         .bind(handler)
         .bind(url)
-        .bind(max_attempts as i32)
+        .bind(i32::try_from(max_attempts).unwrap_or(i32::MAX))
         .bind(&now)
         .bind(workflow_run_id)
         .bind(step_name)
@@ -1354,7 +1354,7 @@ impl Database {
         .bind(event_id)
         .bind(handler)
         .bind(url)
-        .bind(max_attempts as i32)
+        .bind(i32::try_from(max_attempts).unwrap_or(i32::MAX))
         .bind(scheduled_at)
         .bind(&now)
         .bind(workflow_run_id)
@@ -1399,7 +1399,7 @@ impl Database {
         .bind(id)
         .bind(event_id)
         .bind(handler)
-        .bind(max_attempts as i32)
+        .bind(i32::try_from(max_attempts).unwrap_or(i32::MAX))
         .bind(far_future)
         .bind(&now)
         .bind(workflow_run_id)
@@ -1751,7 +1751,7 @@ impl Database {
             return self.d1_recover_expired_queue_messages(handler, visibility_timeout_secs).await;
         }
         let now = Utc::now().naive_utc();
-        let cutoff = format_dt(now - chrono::Duration::seconds(visibility_timeout_secs as i64));
+        let cutoff = format_dt(now - chrono::Duration::seconds(i64::try_from(visibility_timeout_secs).unwrap_or(i64::MAX)));
         let now_str = format_dt(now);
 
         let result = sqlx::query(

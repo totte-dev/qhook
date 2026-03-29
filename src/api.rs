@@ -1106,7 +1106,8 @@ pub async fn start_workflow(
     // Set workflow timeout if configured
     if let Some(timeout_secs) = workflow.timeout {
         let timeout_at = (chrono::Utc::now().naive_utc()
-            + chrono::Duration::seconds(timeout_secs as i64))
+            // timeout_secs is a config value, safe to cast (u64 workflow timeout won't exceed i64::MAX)
+        + chrono::Duration::seconds(i64::try_from(timeout_secs).unwrap_or(i64::MAX)))
         .format("%Y-%m-%dT%H:%M:%S%.3f")
         .to_string();
         state.db.set_workflow_timeout(&run_id, &timeout_at).await?;
@@ -1307,8 +1308,9 @@ async fn handle_list_events(
         }
     };
 
-    let has_more = events.len() > limit as usize;
-    let events: Vec<_> = events.into_iter().take(limit as usize).collect();
+    let limit_usize = limit.max(0) as usize;
+    let has_more = events.len() > limit_usize;
+    let events: Vec<_> = events.into_iter().take(limit_usize).collect();
 
     let body = serde_json::json!({
         "events": events.iter().map(|e| serde_json::json!({
@@ -1387,8 +1389,9 @@ async fn handle_list_jobs(
         }
     };
 
-    let has_more = jobs.len() > limit as usize;
-    let jobs: Vec<_> = jobs.into_iter().take(limit as usize).collect();
+    let limit_usize = limit.max(0) as usize;
+    let has_more = jobs.len() > limit_usize;
+    let jobs: Vec<_> = jobs.into_iter().take(limit_usize).collect();
 
     let body = serde_json::json!({
         "jobs": jobs.iter().map(|j| serde_json::json!({

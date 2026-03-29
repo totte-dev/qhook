@@ -188,7 +188,7 @@ impl Database {
         }
 
         tracing::info!(
-            version = migrations.last().map(|m| m.0).unwrap_or(0),
+            version = migrations.last().map_or(0, |m| m.0),
             "D1 database migrated"
         );
         Ok(())
@@ -455,7 +455,7 @@ impl Database {
             .execute(
                 "INSERT INTO jobs (id, event_id, handler, url, status, max_attempts, scheduled_at, created_at) \
                  VALUES (?1, ?2, ?3, ?4, 'available', ?5, ?6, ?6)",
-                params![id, event_id, handler, url, max_attempts as i32, now],
+                params![id, event_id, handler, url, i32::try_from(max_attempts).unwrap_or(i32::MAX), now],
             )
             .await?;
         Ok(())
@@ -862,7 +862,7 @@ impl Database {
                 "INSERT INTO jobs (id, event_id, handler, url, status, max_attempts, scheduled_at, created_at, \
                  workflow_run_id, step_name, step_index, step_input) \
                  VALUES (?1, ?2, ?3, ?4, 'available', ?5, ?6, ?6, ?7, ?8, ?9, ?10)",
-                params![id, event_id, handler, url, max_attempts as i32, now, workflow_run_id, step_name, step_index, step_input],
+                params![id, event_id, handler, url, i32::try_from(max_attempts).unwrap_or(i32::MAX), now, workflow_run_id, step_name, step_index, step_input],
             )
             .await?;
         Ok(())
@@ -1029,7 +1029,7 @@ impl Database {
                 "INSERT INTO jobs (id, event_id, handler, url, status, max_attempts, scheduled_at, created_at, \
                  workflow_run_id, step_name, step_index, step_input, branch_name) \
                  VALUES (?1, ?2, ?3, ?4, 'available', ?5, ?6, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![id, event_id, handler, url, max_attempts as i32, now, workflow_run_id, step_name, step_index, step_input, branch_name],
+                params![id, event_id, handler, url, i32::try_from(max_attempts).unwrap_or(i32::MAX), now, workflow_run_id, step_name, step_index, step_input, branch_name],
             )
             .await?;
         Ok(())
@@ -1078,7 +1078,7 @@ impl Database {
                 "INSERT INTO jobs (id, event_id, handler, url, status, max_attempts, scheduled_at, created_at, \
                  workflow_run_id, step_name, step_index, step_input) \
                  VALUES (?1, ?2, ?3, ?4, 'available', ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![id, event_id, handler, url, max_attempts as i32, scheduled_at, now, workflow_run_id, step_name, step_index, step_input],
+                params![id, event_id, handler, url, i32::try_from(max_attempts).unwrap_or(i32::MAX), scheduled_at, now, workflow_run_id, step_name, step_index, step_input],
             )
             .await?;
         Ok(())
@@ -1104,7 +1104,7 @@ impl Database {
                 "INSERT INTO jobs (id, event_id, handler, url, status, max_attempts, scheduled_at, created_at, \
                  workflow_run_id, step_name, step_index, step_input, callback_token) \
                  VALUES (?1, ?2, ?3, 'callback', 'waiting', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![id, event_id, handler, max_attempts as i32, far_future, now, workflow_run_id, step_name, step_index, step_input, callback_token],
+                params![id, event_id, handler, i32::try_from(max_attempts).unwrap_or(i32::MAX), far_future, now, workflow_run_id, step_name, step_index, step_input, callback_token],
             )
             .await?;
         Ok(())
@@ -1360,7 +1360,7 @@ impl Database {
         visibility_timeout_secs: u64,
     ) -> Result<u64> {
         let now = Utc::now().naive_utc();
-        let cutoff = format_dt(now - chrono::Duration::seconds(visibility_timeout_secs as i64));
+        let cutoff = format_dt(now - chrono::Duration::seconds(i64::try_from(visibility_timeout_secs).unwrap_or(i64::MAX)));
         let now_str = format_dt(now);
         let result = self
             .d1()
