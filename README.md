@@ -62,8 +62,15 @@ That's it. Stripe webhooks are verified, queued, and delivered with retry. If yo
 database:              database:              database:
   driver: sqlite         driver: d1             driver: postgres
                          database_id: ...       url: ${DATABASE_URL}
-# ~1K events/sec        ~500 events/sec        ~10K+ events/sec
 ```
+
+Estimated throughput (based on DB write characteristics — run your own benchmarks with `scripts/bench-cloudflare.sh` or `tests/bench.sh` for actual numbers):
+
+| Driver | Est. throughput | Best for |
+|---|---|---|
+| SQLite | ~1K events/sec | Local dev, single instance |
+| D1 | ~500 events/sec | Cloudflare deploy, low-medium traffic |
+| Postgres | ~10K+ events/sec | Production, multi-instance |
 
 **13 webhook providers verified.** Stripe, GitHub, Shopify, Twilio, Paddle, PagerDuty, Grafana, Terraform Cloud, GitLab, Linear, Standard Webhooks, HMAC, AWS SNS. IP allowlisting per source.
 
