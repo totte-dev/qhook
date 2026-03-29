@@ -1,10 +1,11 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
+  # push:
+  #   branches: [main]  # Temporarily disabled — pre-push hook runs tests locally
   pull_request:
     branches: [main]
+  workflow_dispatch:  # Manual trigger when ready
 
 env:
   CARGO_TERM_COLOR: always
