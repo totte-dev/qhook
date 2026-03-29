@@ -35,3 +35,6 @@ sdks/typescript/dist/
 docs/private/
 .claude/
 CLAUDE.md
+
+# Local deployment workspaces
+deploy/
