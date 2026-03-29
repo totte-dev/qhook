@@ -251,6 +251,10 @@ fn bench_event_insert(c: &mut Criterion) {
             driver: "sqlite".into(),
             url: Some("sqlite::memory:".into()),
             max_connections: 1,
+            account_id: None,
+            database_id: None,
+            api_token: None,
+            d1_endpoint: None,
         };
         let db = qhook::db::Database::connect(&config).await.unwrap();
         db.migrate().await.unwrap();

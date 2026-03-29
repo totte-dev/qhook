@@ -237,6 +237,7 @@ impl Database {
     /// D1: Insert event + jobs. D1 is single-writer so individual INSERTs are
     /// sequentially consistent. No explicit transaction available via REST API,
     /// but D1's single-writer model prevents partial writes from concurrent requests.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn d1_insert_event_and_jobs(
         &self,
         event_id: &str,
@@ -566,6 +567,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn d1_insert_attempt(
         &self,
         id: &str,
@@ -892,6 +894,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn d1_insert_workflow_job(
         &self,
         id: &str,
@@ -1052,6 +1055,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn d1_insert_branch_job(
         &self,
         id: &str,
@@ -1101,6 +1105,7 @@ impl Database {
             .collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn d1_insert_workflow_job_delayed(
         &self,
         id: &str,
@@ -1126,6 +1131,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn d1_insert_callback_job(
         &self,
         id: &str,

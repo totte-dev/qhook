@@ -447,6 +447,7 @@ impl Database {
     /// If any insert fails, the entire operation is rolled back — no orphan events.
     /// This guarantees at-least-once delivery: either the event + all jobs are persisted,
     /// or nothing is persisted and the webhook sender retries.
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert_event_and_jobs(
         &self,
         event_id: &str,
@@ -635,9 +636,11 @@ impl Database {
     /// TODO(perf): This is called per-job in a loop (N+1 problem). Ideally we'd batch these
     /// into a single `UPDATE ... WHERE id IN (...)` query, but sqlx's AnyPool doesn't support
     /// dynamic bind parameter lists for IN clauses. Options to fix:
+    ///
     /// - Build raw SQL with comma-separated IDs (risk: SQL injection if IDs aren't validated)
     /// - Use a CTE or temp table approach
     /// - Use sqlx's `QueryBuilder` with `push_values` (requires separate sqlite/mysql pool types)
+    ///
     /// In practice, the loop is bounded by `concurrent_delivery` (default 10), so impact is low.
     pub async fn mark_job_running(&self, job_id: &str) -> Result<bool> {
         if self.is_d1() {
