@@ -16,6 +16,10 @@ ignore = [
     "RUSTSEC-2023-0071",
     # chrono: localtime_r unsoundness — we only use UTC, never local time
     "RUSTSEC-2026-0009",
+    # aws-lc-sys: CN validation bypass + CRL bypass — fix requires aws-lc-sys >=0.39 which needs newer Rust.
+    # Low impact: qhook uses aws-lc only via rustls for HTTPS client (reqwest). Not a server TLS termination.
+    "RUSTSEC-2026-0044",
+    "RUSTSEC-2026-0048",
 ]
 
 # --- Licenses ---
