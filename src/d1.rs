@@ -101,7 +101,10 @@ impl D1Config {
                 database_id,
                 api_token,
             },
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("Failed to build D1 HTTP client"),
         }
     }
 
@@ -112,7 +115,10 @@ impl D1Config {
                 endpoint,
                 auth_token,
             },
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("Failed to build D1 HTTP client"),
         }
     }
 

@@ -121,6 +121,8 @@ pub struct Worker {
     metrics: Arc<Metrics>,
     alerter: SharedAlerter,
     worker_config: WorkerConfig,
+    /// Shared flag with AppState — set to false on sustained DB errors, true on recovery.
+    db_healthy: Arc<std::sync::atomic::AtomicBool>,
     http: reqwest::Client,
     poll_interval: Duration,
     shutdown: tokio::sync::watch::Receiver<bool>,
@@ -167,6 +169,7 @@ impl Worker {
         default_retry_max: u32,
         handler_names: Vec<String>,
         queues: HashMap<String, config::QueueConfig>,
+        db_healthy: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -212,6 +215,7 @@ impl Worker {
             workflows: Arc::new(workflows),
             default_retry_max,
             queues: Arc::new(queues),
+            db_healthy,
         }
     }
 
@@ -253,17 +257,26 @@ impl Worker {
                     ).max(1);
                     let jobs = match self.db.fetch_available_jobs(batch).await {
                         Ok(j) => {
-                            consecutive_db_errors = 0;
+                            if consecutive_db_errors > 0 {
+                                consecutive_db_errors = 0;
+                                self.db_healthy.store(true, std::sync::atomic::Ordering::Relaxed);
+                                tracing::info!("Database recovered, resuming webhook acceptance");
+                            }
                             j
                         }
                         Err(e) => {
                             consecutive_db_errors += 1;
                             self.metrics.inc_db_errors();
+                            // After 3 consecutive failures, signal HTTP handlers to reject with 503
+                            if consecutive_db_errors >= 3 {
+                                self.db_healthy.store(false, std::sync::atomic::Ordering::Relaxed);
+                            }
                             let backoff = Duration::from_secs(
                                 (1u64 << consecutive_db_errors.min(5)).min(30)
                             );
                             tracing::error!(
                                 error = %e,
+                                consecutive_errors = consecutive_db_errors,
                                 backoff_secs = backoff.as_secs(),
                                 "Failed to fetch jobs, backing off"
                             );

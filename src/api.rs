@@ -27,6 +27,9 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub metrics: Arc<Metrics>,
     pub alerter: SharedAlerter,
+    /// Set to false by the worker when consecutive DB errors exceed threshold.
+    /// Webhook/event handlers return 503 when false. Auto-recovers when DB succeeds.
+    pub db_healthy: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
@@ -46,6 +49,7 @@ impl AppState {
             http,
             metrics,
             alerter,
+            db_healthy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 }
@@ -208,6 +212,7 @@ pub async fn serve(state: AppState, config_path: String) -> Result<()> {
         shared.config.delivery.default_retry.max,
         shared.config.handlers.keys().cloned().collect(),
         shared.config.queues.clone(),
+        shared.db_healthy.clone(),
     );
     let worker_handle = tokio::spawn(async move {
         worker.run().await;
@@ -492,6 +497,10 @@ async fn handle_webhook(
     State(state): State<SharedState>,
     req: axum::extract::Request,
 ) -> axum::response::Response {
+    // Backpressure: reject early if DB is unhealthy
+    if let Some(resp) = check_db_health(&state) {
+        return resp;
+    }
     let connect_info = req
         .extensions()
         .get::<ConnectInfo<std::net::SocketAddr>>()
@@ -634,6 +643,10 @@ async fn handle_event(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
+    // Backpressure: reject early if DB is unhealthy
+    if let Some(resp) = check_db_health(&state) {
+        return resp;
+    }
     // Validate that source exists and is type "event" or "outbound"
     match state.config.sources.get(&source) {
         Some(s) if s.source_type == "event" || s.source_type == "outbound" => {}
@@ -1248,6 +1261,23 @@ async fn handle_callback(
 }
 
 /// Check Bearer auth for management API endpoints.
+/// Returns 503 + Retry-After if the database is unhealthy (backpressure).
+fn check_db_health(state: &AppState) -> Option<axum::response::Response> {
+    if !state.db_healthy.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut resp = (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Database temporarily unavailable".to_string(),
+        )
+            .into_response();
+        resp.headers_mut().insert(
+            "Retry-After",
+            axum::http::HeaderValue::from_static("30"),
+        );
+        return Some(resp);
+    }
+    None
+}
+
 fn check_api_auth(state: &AppState, headers: &HeaderMap) -> Option<axum::response::Response> {
     if let Some(expected_token) = &state.config.api.auth_token {
         let provided = headers
