@@ -19,6 +19,17 @@ pub enum AlertEvent {
     VerificationFailure { source: String },
     /// Custom alert message (e.g., config validation failure).
     Custom(String),
+    /// Circuit breaker opened for a handler.
+    CircuitOpened { handler: String },
+    /// Workflow run failed.
+    WorkflowFailed {
+        workflow: String,
+        run_id: String,
+    },
+    /// Database health check failed.
+    DbUnhealthy,
+    /// Events expired by TTL.
+    EventTtlExpired { count: u64 },
 }
 
 impl AlertEvent {
@@ -27,6 +38,10 @@ impl AlertEvent {
             AlertEvent::Dlq { .. } => "dlq",
             AlertEvent::VerificationFailure { .. } => "verification_failure",
             AlertEvent::Custom(_) => "custom",
+            AlertEvent::CircuitOpened { .. } => "circuit_opened",
+            AlertEvent::WorkflowFailed { .. } => "workflow_failed",
+            AlertEvent::DbUnhealthy => "db_unhealthy",
+            AlertEvent::EventTtlExpired { .. } => "event_ttl_expired",
         }
     }
 }
@@ -134,6 +149,38 @@ fn format_generic(event: &AlertEvent) -> String {
             })
             .to_string()
         }
+        AlertEvent::CircuitOpened { handler } => {
+            serde_json::json!({
+                "alert": "circuit_opened",
+                "handler": handler,
+                "message": format!("Circuit breaker opened for handler: {handler}")
+            })
+            .to_string()
+        }
+        AlertEvent::WorkflowFailed { workflow, run_id } => {
+            serde_json::json!({
+                "alert": "workflow_failed",
+                "workflow": workflow,
+                "run_id": run_id,
+                "message": format!("Workflow '{workflow}' failed (run: {run_id})")
+            })
+            .to_string()
+        }
+        AlertEvent::DbUnhealthy => {
+            serde_json::json!({
+                "alert": "db_unhealthy",
+                "message": "Database health check failed"
+            })
+            .to_string()
+        }
+        AlertEvent::EventTtlExpired { count } => {
+            serde_json::json!({
+                "alert": "event_ttl_expired",
+                "count": count,
+                "message": format!("{count} events expired by TTL")
+            })
+            .to_string()
+        }
     }
 }
 
@@ -151,6 +198,18 @@ fn format_slack(event: &AlertEvent) -> String {
         }
         AlertEvent::Custom(msg) => {
             format!(":gear: *qhook*\n{msg}")
+        }
+        AlertEvent::CircuitOpened { handler } => {
+            format!(":zap: *Circuit breaker opened*\n• Handler: `{handler}`")
+        }
+        AlertEvent::WorkflowFailed { workflow, run_id } => {
+            format!(":x: *Workflow failed*\n• Workflow: `{workflow}`\n• Run: `{run_id}`")
+        }
+        AlertEvent::DbUnhealthy => {
+            ":fire: *Database unhealthy*\nDatabase health check failed — webhooks may be rejected with 503".to_string()
+        }
+        AlertEvent::EventTtlExpired { count } => {
+            format!(":hourglass: *Events expired*\n• Count: {count}")
         }
     };
 
@@ -177,6 +236,26 @@ fn format_discord(event: &AlertEvent) -> String {
             "qhook".to_string(),
             msg.clone(),
             0x3498DB, // blue
+        ),
+        AlertEvent::CircuitOpened { handler } => (
+            "Circuit breaker opened".to_string(),
+            format!("**Handler:** `{handler}`"),
+            0xFF4500, // orange-red
+        ),
+        AlertEvent::WorkflowFailed { workflow, run_id } => (
+            "Workflow failed".to_string(),
+            format!("**Workflow:** `{workflow}`\n**Run:** `{run_id}`"),
+            0xFF0000, // red
+        ),
+        AlertEvent::DbUnhealthy => (
+            "Database unhealthy".to_string(),
+            "Database health check failed — webhooks may be rejected with 503".to_string(),
+            0xFF0000, // red
+        ),
+        AlertEvent::EventTtlExpired { count } => (
+            "Events expired by TTL".to_string(),
+            format!("**Count:** {count}"),
+            0xFFA500, // orange
         ),
     };
 

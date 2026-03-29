@@ -14,6 +14,7 @@ database:
 server:
   port: __PORT__
   allow_private_urls: true
+  skip_endpoint_verification: true
 api:
   auth_token: "test-token"
 sources:
@@ -33,6 +34,7 @@ database:
 server:
   port: __PORT__
   allow_private_urls: true
+  skip_endpoint_verification: true
 api:
   auth_token: "test-token"
 sources:
@@ -61,14 +63,13 @@ handlers:
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 400);
+    assert_eq!(resp.status(), 422);
     let body: Value = resp.json().await.unwrap();
-    assert!(
-        body["error"]
-            .as_str()
-            .unwrap()
-            .contains("not an outbound source")
-    );
+    assert_eq!(body["code"], "validation_error");
+    assert!(body["details"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not an outbound source"));
 
     // Non-existent source
     let resp = client

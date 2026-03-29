@@ -277,6 +277,12 @@ impl Worker {
                             // After 3 consecutive failures, signal HTTP handlers to reject with 503
                             if consecutive_db_errors >= 3 {
                                 self.db_healthy.store(false, std::sync::atomic::Ordering::Relaxed);
+                                // Alert only on the transition (exactly 3)
+                                if consecutive_db_errors == 3 {
+                                    if let Some(ref a) = self.alerter {
+                                        a.send(AlertEvent::DbUnhealthy);
+                                    }
+                                }
                             }
                             let backoff = Duration::from_secs(
                                 (1u64 << consecutive_db_errors.min(5)).min(30)
@@ -501,6 +507,12 @@ async fn deliver_job(
                         let _ = db.mark_job_dead(&job.id, "workflow timeout").await;
                         let _ = db.fail_workflow_run(run_id).await;
                         metrics.inc_workflow_failed(workflow_name);
+                        if let Some(a) = alerter {
+                            a.send(AlertEvent::WorkflowFailed {
+                                workflow: workflow_name.to_string(),
+                                run_id: run_id.clone(),
+                            });
+                        }
                         return;
                     }
                 }
@@ -532,6 +544,7 @@ async fn deliver_job(
                             if let Err(e) = handle_choice_step(
                                 db,
                                 metrics,
+                                alerter,
                                 workflows,
                                 default_retry_max,
                                 job,
@@ -550,7 +563,7 @@ async fn deliver_job(
                                 return;
                             }
                             if let Err(e) =
-                                handle_parallel_step(db, metrics, default_retry_max, job, step)
+                                handle_parallel_step(db, metrics, alerter, default_retry_max, job, step)
                                     .await
                             {
                                 tracing::error!(job_id = job.id, error = %e, "Failed to handle parallel step");
@@ -564,7 +577,7 @@ async fn deliver_job(
                                 return;
                             }
                             if let Err(e) =
-                                handle_map_step(db, metrics, default_retry_max, job, step).await
+                                handle_map_step(db, metrics, alerter, default_retry_max, job, step).await
                             {
                                 tracing::error!(job_id = job.id, error = %e, "Failed to handle map step");
                             }
@@ -721,6 +734,7 @@ async fn deliver_job(
                     if let Err(e) = handle_workflow_step_success(
                         db,
                         metrics,
+                        alerter,
                         workflows,
                         default_retry_max,
                         job,
@@ -766,6 +780,11 @@ async fn deliver_job(
                         if cb.record_failure() {
                             tracing::warn!(handler = job.handler, "Circuit breaker opened");
                             metrics.inc_circuit_opened(&job.handler);
+                            if let Some(a) = alerter {
+                                a.send(AlertEvent::CircuitOpened {
+                                    handler: job.handler.clone(),
+                                });
+                            }
                         }
                     }
                     match handle_failure(db, job, &error, delivery_result.retry_after_secs).await {
@@ -829,6 +848,11 @@ async fn deliver_job(
                     if cb.record_failure() {
                         tracing::warn!(handler = job.handler, "Circuit breaker opened");
                         metrics.inc_circuit_opened(&job.handler);
+                        if let Some(a) = alerter {
+                            a.send(AlertEvent::CircuitOpened {
+                                handler: job.handler.clone(),
+                            });
+                        }
                     }
                 }
                 match handle_failure(db, job, &error, None).await {
@@ -922,6 +946,7 @@ async fn deliver_workflow_step(
 async fn handle_workflow_step_success(
     db: &Database,
     metrics: &Metrics,
+    alerter: &SharedAlerter,
     workflows: &HashMap<String, config::WorkflowConfig>,
     default_retry_max: u32,
     job: &crate::db::JobRow,
@@ -1001,6 +1026,12 @@ async fn handle_workflow_step_success(
         if now > timeout_at {
             db.fail_workflow_run(run_id).await?;
             metrics.inc_workflow_failed(workflow_name);
+            if let Some(a) = alerter {
+                a.send(AlertEvent::WorkflowFailed {
+                    workflow: workflow_name.to_string(),
+                    run_id: run_id.to_string(),
+                });
+            }
             tracing::warn!(workflow = workflow_name, run_id, "Workflow timed out");
             return Ok(());
         }
@@ -1157,7 +1188,9 @@ async fn handle_workflow_step_failure(
 
     if should_retry && current_attempt < job.max_attempts {
         // Schedule retry
-        let backoff_secs = 30i64 * (1i64 << current_attempt.min(10));
+        let base_backoff = 30i64 * (1i64 << current_attempt.min(10));
+        let jitter = rand::Rng::random_range(&mut rand::rng(), 0.8..1.2);
+        let backoff_secs = ((base_backoff as f64) * jitter) as i64;
         let next_at = Utc::now().naive_utc() + chrono::Duration::seconds(backoff_secs);
         if let Err(e) = db.mark_job_retryable(&job.id, next_at, error).await {
             tracing::error!(job_id = job.id, error = %e, "Failed to schedule retry");
@@ -1215,6 +1248,7 @@ async fn handle_workflow_step_failure(
             if let Err(e) = handle_workflow_step_success(
                 db,
                 metrics,
+                alerter,
                 workflows,
                 default_retry_max,
                 job,
@@ -1243,6 +1277,12 @@ async fn handle_workflow_step_failure(
                 if let Some(run_id) = &wf_data.workflow_run_id {
                     let _ = db.fail_workflow_run(run_id).await;
                     metrics.inc_workflow_failed(workflow_name);
+                    if let Some(a) = alerter {
+                        a.send(AlertEvent::WorkflowFailed {
+                            workflow: workflow_name.to_string(),
+                            run_id: run_id.clone(),
+                        });
+                    }
                     tracing::warn!(
                         workflow = workflow_name,
                         run_id,
@@ -1340,6 +1380,7 @@ async fn route_to_catch_step(
 async fn handle_choice_step(
     db: &Database,
     metrics: &Metrics,
+    alerter: &SharedAlerter,
     workflows: &HashMap<String, config::WorkflowConfig>,
     default_retry_max: u32,
     job: &crate::db::JobRow,
@@ -1379,6 +1420,13 @@ async fn handle_choice_step(
         None => {
             // No match and no default — fail the workflow
             db.fail_workflow_run(run_id).await?;
+            metrics.inc_workflow_failed(workflow_name);
+            if let Some(a) = alerter {
+                a.send(AlertEvent::WorkflowFailed {
+                    workflow: workflow_name.to_string(),
+                    run_id: run_id.to_string(),
+                });
+            }
             tracing::warn!(
                 workflow = workflow_name,
                 run_id,
@@ -1442,6 +1490,7 @@ async fn handle_choice_step(
 async fn handle_parallel_step(
     db: &Database,
     metrics: &Metrics,
+    _alerter: &SharedAlerter,
     default_retry_max: u32,
     job: &crate::db::JobRow,
     step: &config::StepConfig,
@@ -1514,6 +1563,7 @@ async fn handle_parallel_step(
 async fn handle_map_step(
     db: &Database,
     metrics: &Metrics,
+    alerter: &SharedAlerter,
     default_retry_max: u32,
     job: &crate::db::JobRow,
     step: &config::StepConfig,
@@ -1559,6 +1609,7 @@ async fn handle_map_step(
         return handle_workflow_step_success(
             db,
             metrics,
+            alerter,
             &HashMap::new(), // no workflows needed for empty result
             default_retry_max,
             job,
@@ -2557,8 +2608,11 @@ async fn handle_failure(
         Ok(true)
     } else {
         // Use Retry-After header if provided, otherwise exponential backoff: 30s * 2^attempt
-        let backoff_secs =
-            retry_after_secs.unwrap_or_else(|| 30i64 * (1i64 << current_attempt.min(10)));
+        let backoff_secs = retry_after_secs.unwrap_or_else(|| {
+            let base_backoff = 30i64 * (1i64 << current_attempt.min(10));
+            let jitter = rand::Rng::random_range(&mut rand::rng(), 0.8..1.2);
+            ((base_backoff as f64) * jitter) as i64
+        });
         let next_at = Utc::now().naive_utc() + chrono::Duration::seconds(backoff_secs);
         db.mark_job_retryable(&job.id, next_at, error).await?;
         tracing::info!(

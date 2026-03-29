@@ -309,6 +309,11 @@ pub struct ServerConfig {
     /// Enable when running behind a reverse proxy (nginx, cloud load balancer).
     #[serde(default)]
     pub trust_proxy: bool,
+    /// Skip endpoint ownership verification (challenge-response) when creating outbound endpoints.
+    /// When true, endpoints are created as 'active' immediately. Useful for development.
+    /// Default: false.
+    #[serde(default)]
+    pub skip_endpoint_verification: bool,
 }
 
 impl Default for ServerConfig {
@@ -320,6 +325,7 @@ impl Default for ServerConfig {
             ip_rate_limit: 0,
             allow_private_urls: false,
             trust_proxy: false,
+            skip_endpoint_verification: false,
         }
     }
 }

@@ -587,6 +587,7 @@ database:
 server:
   port: __PORT__
   allow_private_urls: true
+  skip_endpoint_verification: true
 api:
   auth_token: "scenario-token"
 sources:
@@ -984,7 +985,9 @@ handlers:
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 401, "Invalid signature should be rejected");
+    assert_eq!(resp.status(), 400, "Invalid signature should be rejected");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "signature_invalid");
 
     // Send with no signature at all
     let resp = c
@@ -997,7 +1000,7 @@ handlers:
         .unwrap();
     assert_eq!(
         resp.status(),
-        401,
+        400,
         "Missing signature should also be rejected"
     );
 

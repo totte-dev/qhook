@@ -1437,13 +1437,14 @@ impl Database {
         url: &str,
         description: Option<&str>,
         signing_secret: &str,
+        status: &str,
     ) -> Result<()> {
         let now = format_now();
         self.d1()
             .execute(
                 "INSERT INTO outbound_endpoints (id, source, url, description, signing_secret, status, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6)",
-                params![id, source, url, description, signing_secret, now],
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                params![id, source, url, description, signing_secret, status, now],
             )
             .await?;
         Ok(())

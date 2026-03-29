@@ -512,7 +512,7 @@ async fn test_d1_outbound_endpoint_crud() {
         .await;
 
     let db = make_d1_db(&server.uri()).await;
-    db.insert_endpoint("ep-1", "stripe", "https://example.com/hook", Some("My endpoint"), "secret123")
+    db.insert_endpoint("ep-1", "stripe", "https://example.com/hook", Some("My endpoint"), "secret123", "active")
         .await
         .unwrap();
 }

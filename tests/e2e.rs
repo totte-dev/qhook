@@ -220,30 +220,30 @@ handlers:
         200
     );
 
-    // Invalid signature → 401
-    assert_eq!(
-        c.post(server.url("/webhooks/github"))
-            .header("Content-Type", "application/json")
-            .header("X-Hub-Signature-256", "sha256=invalid")
-            .body(payload)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        401
-    );
+    // Invalid signature → 400 (structured error with code "signature_invalid")
+    let resp = c
+        .post(server.url("/webhooks/github"))
+        .header("Content-Type", "application/json")
+        .header("X-Hub-Signature-256", "sha256=invalid")
+        .body(payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "signature_invalid");
 
-    // Missing signature → 401
-    assert_eq!(
-        c.post(server.url("/webhooks/github"))
-            .header("Content-Type", "application/json")
-            .body(payload)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        401
-    );
+    // Missing signature → 400 (structured error with code "signature_invalid")
+    let resp = c
+        .post(server.url("/webhooks/github"))
+        .header("Content-Type", "application/json")
+        .body(payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "signature_invalid");
 
     // Only valid one delivered
     wait_for_mock(&mock, 1, 5).await;

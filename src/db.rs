@@ -1842,8 +1842,10 @@ impl Database {
             };
 
             if attempt < max_attempts {
-                // Retry with exponential backoff: 30s * 2^attempt, capped at 1 hour
-                let backoff_secs = (30i64 * (1i64 << attempt.min(20))).min(3600);
+                // Retry with exponential backoff: 30s * 2^attempt, capped at 1 hour, ±20% jitter
+                let base_backoff = (30i64 * (1i64 << attempt.min(20))).min(3600);
+                let jitter = rand::Rng::random_range(&mut rand::rng(), 0.8..1.2);
+                let backoff_secs = ((base_backoff as f64) * jitter) as i64;
                 let next_at = format_dt(now + chrono::Duration::seconds(backoff_secs));
                 sqlx::query(
                     "UPDATE jobs SET status = 'retryable', scheduled_at = $1, last_error = 'nack' \
@@ -2227,20 +2229,22 @@ impl Database {
         url: &str,
         description: Option<&str>,
         signing_secret: &str,
+        status: &str,
     ) -> Result<()> {
         if self.is_d1() {
-            return self.d1_insert_endpoint(id, source, url, description, signing_secret).await;
+            return self.d1_insert_endpoint(id, source, url, description, signing_secret, status).await;
         }
         let now = format_now();
         sqlx::query(
             "INSERT INTO outbound_endpoints (id, source, url, description, signing_secret, status, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, 'active', $6, $6)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $7)",
         )
         .bind(id)
         .bind(source)
         .bind(url)
         .bind(description)
         .bind(signing_secret)
+        .bind(status)
         .bind(&now)
         .execute(self.sqlx_pool())
         .await?;
@@ -2535,6 +2539,33 @@ impl Database {
         .bind(handler)
         .execute(self.sqlx_pool())
         .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Bulk retry jobs by status, optionally filtered by handler.
+    /// Resets attempt counter, clears error, and makes jobs available immediately.
+    pub async fn bulk_retry_jobs(&self, status: &str, handler: Option<&str>) -> Result<u64> {
+        let now = format_now();
+        let result = if let Some(h) = handler {
+            sqlx::query(
+                "UPDATE jobs SET status = 'available', scheduled_at = $1, last_error = NULL, attempt = 0 \
+                 WHERE status = $2 AND handler = $3",
+            )
+            .bind(&now)
+            .bind(status)
+            .bind(h)
+            .execute(self.sqlx_pool())
+            .await?
+        } else {
+            sqlx::query(
+                "UPDATE jobs SET status = 'available', scheduled_at = $1, last_error = NULL, attempt = 0 \
+                 WHERE status = $2",
+            )
+            .bind(&now)
+            .bind(status)
+            .execute(self.sqlx_pool())
+            .await?
+        };
         Ok(result.rows_affected())
     }
 

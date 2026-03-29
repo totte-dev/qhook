@@ -22,6 +22,29 @@ use crate::db::Database;
 use crate::metrics::Metrics;
 use crate::queue::Worker;
 
+// --- Structured error response helpers ---
+
+fn error_response(status: StatusCode, code: &str, message: &str) -> axum::response::Response {
+    let body = serde_json::json!({
+        "code": code,
+        "message": message,
+    });
+    (status, axum::Json(body)).into_response()
+}
+
+fn validation_error(details: Vec<(&str, &str)>) -> axum::response::Response {
+    let detail_json: Vec<_> = details
+        .iter()
+        .map(|(f, m)| serde_json::json!({"field": f, "message": m}))
+        .collect();
+    let body = serde_json::json!({
+        "code": "validation_error",
+        "message": "Request validation failed",
+        "details": detail_json,
+    });
+    (StatusCode::UNPROCESSABLE_ENTITY, axum::Json(body)).into_response()
+}
+
 pub struct AppState {
     pub config: Config,
     pub db: Arc<Database>,
@@ -347,6 +370,7 @@ pub async fn serve(state: AppState, config_path: String) -> Result<()> {
         .route("/api/jobs", get(handle_list_jobs))
         .route("/api/jobs/{job_id}", get(handle_get_job))
         .route("/api/jobs/{job_id}/attempts", get(handle_list_job_attempts))
+        .route("/api/jobs/retry", post(handle_bulk_retry_jobs))
         // Outbound webhook management
         .route(
             "/api/outbound/endpoints",
@@ -369,6 +393,10 @@ pub async fn serve(state: AppState, config_path: String) -> Result<()> {
         .route(
             "/api/outbound/endpoints/{endpoint_id}/subscriptions/{subscription_id}",
             delete(handle_delete_subscription),
+        )
+        .route(
+            "/api/outbound/endpoints/{endpoint_id}/verify",
+            post(handle_verify_endpoint),
         )
         // Pull-mode queue endpoints
         .route("/api/queues", get(handle_list_queues))
@@ -518,7 +546,7 @@ async fn handle_webhook(
     let headers = parts.headers;
     let source_name = match parts.uri.path().strip_prefix("/webhooks/") {
         Some(name) => name.to_string(),
-        None => return (StatusCode::NOT_FOUND, "Unknown source".to_string()).into_response(),
+        None => return error_response(StatusCode::NOT_FOUND, "not_found", "Unknown source"),
     };
     let body = match axum::body::to_bytes(
         axum::body::Body::new(body_stream),
@@ -528,18 +556,18 @@ async fn handle_webhook(
     {
         Ok(b) => b,
         Err(_) => {
-            return (
+            return error_response(
                 StatusCode::PAYLOAD_TOO_LARGE,
-                "Payload too large".to_string(),
-            )
-                .into_response();
+                "payload_too_large",
+                "Payload too large",
+            );
         }
     };
 
     // Find source config
     let source = match state.config.sources.get(&source_name) {
         Some(s) if s.source_type == "webhook" => s,
-        _ => return (StatusCode::NOT_FOUND, "Unknown source".to_string()).into_response(),
+        _ => return error_response(StatusCode::NOT_FOUND, "not_found", "Unknown source"),
     };
 
     // IP allowlist check
@@ -565,14 +593,14 @@ async fn handle_webhook(
             Some(ip) if source.is_ip_allowed(ip) => {}
             Some(ip) => {
                 tracing::warn!(source = source_name, ip = %ip, "IP not in allowlist");
-                return (StatusCode::FORBIDDEN, "IP not allowed".to_string()).into_response();
+                return error_response(StatusCode::FORBIDDEN, "forbidden", "IP not allowed");
             }
             None => {
                 tracing::warn!(
                     source = source_name,
                     "Cannot determine client IP for allowlist check"
                 );
-                return (StatusCode::FORBIDDEN, "IP not allowed".to_string()).into_response();
+                return error_response(StatusCode::FORBIDDEN, "forbidden", "IP not allowed");
             }
         }
     }
@@ -590,15 +618,19 @@ async fn handle_webhook(
                         source: source_name.clone(),
                     });
                 }
-                return (StatusCode::UNAUTHORIZED, "Invalid signature".to_string()).into_response();
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "signature_invalid",
+                    "Invalid signature",
+                );
             }
             Err(e) => {
                 tracing::error!(source = source_name, error = %e, "Verification error");
-                return (
+                return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "Verification error".to_string(),
-                )
-                    .into_response();
+                    "internal_error",
+                    "Verification error",
+                );
             }
         }
     }
@@ -606,18 +638,14 @@ async fn handle_webhook(
     // Parse payload
     let payload_str = match String::from_utf8(body.to_vec()) {
         Ok(s) => s,
-        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()).into_response(),
+        Err(_) => return validation_error(vec![("body", "Invalid UTF-8 payload")]),
     };
 
     // Validate against schema if configured
     if let Some(ref schema) = source.schema {
         if let Err(e) = validate_event_schema(&payload_str, schema) {
             tracing::warn!(source = source_name, error = %e, "Schema validation failed");
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("Schema validation failed: {e}"),
-            )
-                .into_response();
+            return validation_error(vec![("payload", &format!("Schema validation failed: {e}"))]);
         }
     }
 
@@ -637,11 +665,11 @@ async fn handle_webhook(
         Err(e) => {
             state.metrics.inc_db_errors();
             tracing::error!(error = %e, "Failed to process event");
-            (
+            error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal error".to_string(),
+                "internal_error",
+                "Internal error",
             )
-                .into_response()
         }
     }
 }
@@ -660,7 +688,7 @@ async fn handle_event(
     match state.config.sources.get(&source) {
         Some(s) if s.source_type == "event" || s.source_type == "outbound" => {}
         _ => {
-            return (StatusCode::NOT_FOUND, "Unknown event source".to_string()).into_response();
+            return error_response(StatusCode::NOT_FOUND, "not_found", "Unknown event source");
         }
     }
 
@@ -680,7 +708,11 @@ async fn handle_event(
                         endpoint = "events",
                         "Authentication failed: invalid bearer token"
                     );
-                    return (StatusCode::UNAUTHORIZED, "Invalid token".to_string()).into_response();
+                    return error_response(
+                        StatusCode::UNAUTHORIZED,
+                        "unauthorized",
+                        "Invalid token",
+                    );
                 }
             }
             _ => {
@@ -688,14 +720,18 @@ async fn handle_event(
                     endpoint = "events",
                     "Authentication failed: missing bearer token"
                 );
-                return (StatusCode::UNAUTHORIZED, "Invalid token".to_string()).into_response();
+                return error_response(
+                    StatusCode::UNAUTHORIZED,
+                    "unauthorized",
+                    "Invalid token",
+                );
             }
         }
     }
 
     let payload_str = match String::from_utf8(body.to_vec()) {
         Ok(s) => s,
-        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()).into_response(),
+        Err(_) => return validation_error(vec![("body", "Invalid UTF-8 payload")]),
     };
 
     // Validate against schema if configured on the specific source
@@ -703,11 +739,10 @@ async fn handle_event(
         if let Some(ref schema) = src_config.schema {
             if let Err(e) = validate_event_schema(&payload_str, schema) {
                 tracing::warn!(error = %e, "Schema validation failed");
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!("Schema validation failed: {e}"),
-                )
-                    .into_response();
+                return validation_error(vec![(
+                    "payload",
+                    &format!("Schema validation failed: {e}"),
+                )]);
             }
         }
     }
@@ -731,11 +766,11 @@ async fn handle_event(
         Err(e) => {
             state.metrics.inc_db_errors();
             tracing::error!(error = %e, "Failed to process event");
-            (
+            error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal error".to_string(),
+                "internal_error",
+                "Internal error",
             )
-                .into_response()
         }
     }
 }
@@ -1279,11 +1314,11 @@ async fn handle_callback(
 /// we don't block forever — callers will still get normal 500s on actual DB failure.
 fn check_db_health(state: &AppState) -> Option<axum::response::Response> {
     if !state.db_healthy.load(std::sync::atomic::Ordering::Relaxed) {
-        let mut resp = (
+        let mut resp = error_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            "Database temporarily unavailable".to_string(),
-        )
-            .into_response();
+            "service_unavailable",
+            "Database temporarily unavailable",
+        );
         resp.headers_mut().insert(
             "Retry-After",
             axum::http::HeaderValue::from_static("30"),
@@ -1304,15 +1339,19 @@ fn check_api_auth(state: &AppState, headers: &HeaderMap) -> Option<axum::respons
             Some(token) => {
                 use subtle::ConstantTimeEq;
                 if !bool::from(token.as_bytes().ct_eq(expected_token.as_bytes())) {
-                    return Some(
-                        (StatusCode::UNAUTHORIZED, "Invalid token".to_string()).into_response(),
-                    );
+                    return Some(error_response(
+                        StatusCode::UNAUTHORIZED,
+                        "unauthorized",
+                        "Invalid token",
+                    ));
                 }
             }
             _ => {
-                return Some(
-                    (StatusCode::UNAUTHORIZED, "Invalid token".to_string()).into_response(),
-                );
+                return Some(error_response(
+                    StatusCode::UNAUTHORIZED,
+                    "unauthorized",
+                    "Missing or invalid Authorization header",
+                ));
             }
         }
     }
@@ -1453,6 +1492,44 @@ async fn handle_list_jobs(
         "has_more": has_more,
     });
     (StatusCode::OK, axum::Json(body)).into_response()
+}
+
+async fn handle_bulk_retry_jobs(
+    State(state): State<SharedState>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Some(resp) = check_api_auth(&state, &headers) {
+        return resp;
+    }
+
+    let Some(status) = params.get("status") else {
+        let body = serde_json::json!({"error": "missing required query parameter: status"});
+        return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+    };
+
+    if status != "dead" && status != "retryable" {
+        let body = serde_json::json!({"error": "status must be 'dead' or 'retryable'"});
+        return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+    }
+
+    let handler = params.get("handler").map(|s| s.as_str());
+
+    match state.db.bulk_retry_jobs(status, handler).await {
+        Ok(count) => {
+            let body = serde_json::json!({
+                "retried": count,
+                "status": status,
+                "handler": handler,
+            });
+            (StatusCode::OK, axum::Json(body)).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to bulk retry jobs");
+            let body = serde_json::json!({"error": "internal error"});
+            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
+        }
+    }
 }
 
 async fn handle_list_job_attempts(
@@ -2204,6 +2281,39 @@ fn serialize_headers(headers: &HeaderMap) -> String {
     serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
 }
 
+// --- Outbound endpoint verification (challenge-response) ---
+
+/// Verify endpoint ownership by sending a challenge token via GET request.
+/// Returns Ok(true) if the endpoint echoes back the challenge, Ok(false) / Err otherwise.
+async fn verify_endpoint_ownership(
+    http: &reqwest::Client,
+    endpoint_url: &str,
+) -> Result<bool, String> {
+    let challenge = ulid::Ulid::new().to_string();
+    let verify_url = if endpoint_url.contains('?') {
+        format!("{}&svix_verification={}", endpoint_url, challenge)
+    } else {
+        format!("{}?svix_verification={}", endpoint_url, challenge)
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|_| http.clone());
+
+    match client.get(&verify_url).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.text().await {
+            Ok(body) => Ok(body.contains(&challenge)),
+            Err(e) => Err(format!("Failed to read verification response: {}", e)),
+        },
+        Ok(resp) => Err(format!(
+            "Verification request returned status {}",
+            resp.status()
+        )),
+        Err(e) => Err(format!("Verification request failed: {}", e)),
+    }
+}
+
 // --- Outbound webhook management API ---
 
 async fn handle_create_endpoint(
@@ -2220,52 +2330,151 @@ async fn handle_create_endpoint(
     let description = body["description"].as_str();
 
     if source.is_empty() || url.is_empty() {
-        let body = serde_json::json!({"error": "source and url are required"});
-        return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+        let mut details = vec![];
+        if source.is_empty() {
+            details.push(("source", "source is required"));
+        }
+        if url.is_empty() {
+            details.push(("url", "url is required"));
+        }
+        return validation_error(details);
     }
 
     // Verify source exists and is outbound type
     match state.config.sources.get(source) {
         Some(s) if s.source_type == "outbound" => {}
         Some(_) => {
-            let body = serde_json::json!({"error": format!("source '{}' is not an outbound source", source)});
-            return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+            return validation_error(vec![("source", &format!("source '{}' is not an outbound source", source))]);
         }
         None => {
-            let body = serde_json::json!({"error": format!("source '{}' not found", source)});
-            return (StatusCode::NOT_FOUND, axum::Json(body)).into_response();
+            return error_response(StatusCode::NOT_FOUND, "not_found", &format!("source '{}' not found", source));
         }
     }
 
     // Validate URL (reuse SSRF protection)
     if !url.starts_with("http://") && !url.starts_with("https://") {
-        let body = serde_json::json!({"error": "url must start with http:// or https://"});
-        return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+        return validation_error(vec![("url", "url must start with http:// or https://")]);
     }
 
     let id = ulid::Ulid::new().to_string();
     let signing_secret = crate::verify::generate_signing_secret();
 
+    // Determine initial status: 'pending' unless verification is skipped
+    let skip_verification = state.config.server.skip_endpoint_verification;
+    let initial_status = if skip_verification { "active" } else { "pending" };
+
     match state
         .db
-        .insert_endpoint(&id, source, url, description, &signing_secret)
+        .insert_endpoint(&id, source, url, description, &signing_secret, initial_status)
         .await
     {
-        Ok(()) => {
-            let body = serde_json::json!({
-                "id": id,
-                "source": source,
-                "url": url,
-                "description": description,
-                "signing_secret": signing_secret,
-                "status": "active",
-            });
-            (StatusCode::CREATED, axum::Json(body)).into_response()
-        }
+        Ok(()) => {}
         Err(e) => {
             tracing::error!(error = %e, "Failed to create endpoint");
-            let body = serde_json::json!({"error": "internal error"});
-            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "Failed to create endpoint");
+        }
+    }
+
+    // Perform endpoint verification (challenge-response) unless skipped
+    let (final_status, verified) = if skip_verification {
+        ("active".to_string(), true)
+    } else {
+        match verify_endpoint_ownership(&state.http, url).await {
+            Ok(true) => {
+                // Update status to active
+                let _ = state.db.update_endpoint(&id, None, None, Some("active")).await;
+                ("active".to_string(), true)
+            }
+            Ok(false) => ("pending".to_string(), false),
+            Err(e) => {
+                tracing::warn!(endpoint_id = id, error = %e, "Endpoint verification failed");
+                ("pending".to_string(), false)
+            }
+        }
+    };
+
+    let body = serde_json::json!({
+        "id": id,
+        "source": source,
+        "url": url,
+        "description": description,
+        "signing_secret": signing_secret,
+        "status": final_status,
+        "verified": verified,
+    });
+    (StatusCode::CREATED, axum::Json(body)).into_response()
+}
+
+async fn handle_verify_endpoint(
+    State(state): State<SharedState>,
+    Path(endpoint_id): Path<String>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Some(resp) = check_api_auth(&state, &headers) {
+        return resp;
+    }
+
+    // Look up the endpoint
+    let ep = match state.db.get_endpoint(&endpoint_id).await {
+        Ok(Some(ep)) => ep,
+        Ok(None) => {
+            return error_response(StatusCode::NOT_FOUND, "not_found", "Endpoint not found");
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to get endpoint");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to get endpoint",
+            );
+        }
+    };
+
+    // Run challenge-response verification
+    match verify_endpoint_ownership(&state.http, &ep.url).await {
+        Ok(true) => {
+            // Update status to active
+            match state
+                .db
+                .update_endpoint(&endpoint_id, None, None, Some("active"))
+                .await
+            {
+                Ok(_) => {
+                    let body = serde_json::json!({
+                        "id": ep.id,
+                        "status": "active",
+                        "verified": true,
+                    });
+                    axum::Json(body).into_response()
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to update endpoint status");
+                    error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal_error",
+                        "Failed to update endpoint",
+                    )
+                }
+            }
+        }
+        Ok(false) => {
+            let body = serde_json::json!({
+                "id": ep.id,
+                "status": ep.status,
+                "verified": false,
+                "message": "Endpoint did not return the challenge token",
+            });
+            (StatusCode::OK, axum::Json(body)).into_response()
+        }
+        Err(e) => {
+            tracing::warn!(endpoint_id = endpoint_id, error = %e, "Endpoint verification failed");
+            let body = serde_json::json!({
+                "id": ep.id,
+                "status": ep.status,
+                "verified": false,
+                "message": format!("Verification failed: {}", e),
+            });
+            (StatusCode::OK, axum::Json(body)).into_response()
         }
     }
 }
@@ -2336,14 +2545,14 @@ async fn handle_get_endpoint(
             });
             axum::Json(body).into_response()
         }
-        Ok(None) => {
-            let body = serde_json::json!({"error": "endpoint not found"});
-            (StatusCode::NOT_FOUND, axum::Json(body)).into_response()
-        }
+        Ok(None) => error_response(StatusCode::NOT_FOUND, "not_found", "Endpoint not found"),
         Err(e) => {
             tracing::error!(error = %e, "Failed to get endpoint");
-            let body = serde_json::json!({"error": "internal error"});
-            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to get endpoint",
+            )
         }
     }
 }
@@ -2364,17 +2573,21 @@ async fn handle_update_endpoint(
 
     // Validate status if provided
     if let Some(s) = status {
-        if s != "active" && s != "disabled" {
-            let body = serde_json::json!({"error": "status must be 'active' or 'disabled'"});
-            return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+        if s != "active" && s != "disabled" && s != "pending" {
+            return validation_error(vec![(
+                "status",
+                "status must be 'active', 'pending', or 'disabled'",
+            )]);
         }
     }
 
     // Validate URL if provided
     if let Some(u) = url {
         if !u.starts_with("http://") && !u.starts_with("https://") {
-            let body = serde_json::json!({"error": "url must start with http:// or https://"});
-            return (StatusCode::BAD_REQUEST, axum::Json(body)).into_response();
+            return validation_error(vec![(
+                "url",
+                "url must start with http:// or https://",
+            )]);
         }
     }
 
