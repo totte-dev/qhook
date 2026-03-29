@@ -4,6 +4,50 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.6.0] - 2026-03-29
+
+### Added
+- **Pull-mode queue delivery**: Consumer-side polling via `GET /api/queues/{name}/messages` with long-polling, `POST /ack`, `POST /nack`. Configurable visibility timeout, per-queue API key auth. Events matching a queue create jobs consumed by polling instead of push.
+- **Cloudflare D1 database adapter**: HTTP-based adapter for Cloudflare D1. Supports REST API mode and Outbound Workers proxy mode. Enables `wrangler deploy` for serverless webhook processing.
+- **At-least-once delivery guarantee**: Event and all jobs are now inserted in a single database transaction. If qhook crashes mid-insert, the DB rolls back and the webhook sender retries.
+- **Database backpressure**: When 3+ consecutive DB errors occur, webhook/event/SNS handlers return `503 Service Unavailable` with `Retry-After: 30`. Auto-recovers when DB succeeds. Health endpoint also recovers the flag if the worker crashes.
+- **Queue management CLI**: `qhook queues list`, `inspect`, `drain`, `dlq`, `retry`, `peek` commands for pull-mode queue operations.
+- **`qhook status` command**: One-command overview — events by source, jobs by status, handler stats, queue depths, workflow counts.
+- **CLI remote mode**: `--remote <URL> --token <TOKEN>` flags (or `QHOOK_REMOTE_URL`/`QHOOK_API_TOKEN` env vars) to manage deployed instances via HTTP API instead of local DB.
+- **`X-Qhook-Delivery-ID` header**: Deterministic `SHA256(event_id:handler)` on every delivery for handler-side deduplication.
+- **Event TTL**: `delivery.event_ttl` config (e.g., `168h`) auto-expires available/retryable jobs older than the threshold.
+- **Retry jitter**: ±20% random jitter on all exponential backoff to prevent thundering herd across instances.
+- **Bulk retry API**: `POST /api/jobs/retry?status=dead&handler=xxx` for batch retry operations.
+- **Operational webhooks**: New alert events — `circuit_opened`, `workflow_failed`, `db_unhealthy`, `event_ttl_expired`.
+- **Structured validation errors**: API errors now return `{"code", "message", "details"}` format with field-level paths.
+- **Outbound endpoint verification**: Challenge-response ownership check on endpoint creation (`skip_endpoint_verification` config for dev).
+- **Tracing spans**: `event_id`/`source`/`event_type` on `process_event`, `job_id`/`handler` on delivery for structured log correlation.
+- **Production warnings in `qhook validate`**: Warns about missing `api.auth_token`, `allow_private_urls`, and queue `api_key`.
+- **Scaling guide**: `docs/guides/scaling.md` — D1 vs Postgres decision framework with cost breakdowns.
+- **Local-to-production guide**: `docs/guides/local-to-production.md` — environment overlays, DB migration, security checklist.
+- **Pull-mode queue guide**: `docs/guides/pull-mode-queues.md` — API reference, config, consumer snippets in Python/TypeScript/Go/Ruby.
+- **Cloudflare deploy guide**: `docs/deploy/cloudflare.md` — Containers + D1 setup.
+- **Stripe pull example**: `examples/stripe-pull/` — Python and TypeScript consumer examples.
+- **Benchmark scripts**: `scripts/bench-cloudflare.sh`, k6 scripts for ingestion, delivery, pull-mode, and D1 scenarios.
+
+### Changed
+- **README rewritten**: Progressive disclosure — core message ("The missing layer between webhooks and your app") with one use case. Workflows, pull-mode, outbound moved to docs.
+- **`/health` endpoint**: Now includes `dead_jobs` count and returns `"degraded"` status when DLQ has items.
+- **Stale recovery excludes queue jobs**: Push stale recovery no longer touches pull-mode queue messages (separate visibility timeout recovery).
+- **`fetch_available_jobs` excludes queue jobs**: Push worker ignores `queue/*` handler prefix.
+
+### Fixed
+- **MySQL/SQLite parallel branch completion race**: Wrapped UPDATE + SELECT in transaction to prevent duplicate workflow step execution.
+- **Nack TOCTOU race**: Added `AND status = 'running'` guard to nack UPDATE queries.
+- **`delete_jobs_by_handler` transaction safety**: Wrapped in explicit transaction to prevent orphaned records.
+- **`retry_job` resets attempt counter**: Prevents immediate re-dead after retry.
+- **SNS cert cache TTL cleanup**: `retain()` expired entries on insert.
+- **Alert bounded channel**: Changed from unbounded to capacity 1000 with graceful overflow handling.
+- **D1 client timeout**: Set explicit 10s timeout to prevent indefinite hangs.
+
+### Removed
+- **`thiserror` dependency**: Unused, removed.
+
 ## [0.5.0] - 2026-03-12
 
 ### Added
