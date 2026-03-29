@@ -58,7 +58,7 @@ pkcs1 = "0.7"
 x509-parser = "0.18"
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # Utilities
 ulid = "1"

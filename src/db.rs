@@ -2597,6 +2597,68 @@ impl Database {
                 .await?;
         Ok(row.map(|r| r.0))
     }
+
+    // --- Status command queries ---
+
+    /// Count events grouped by source name.
+    pub async fn count_events_by_source(&self) -> Result<Vec<(String, i64)>> {
+        if self.is_d1() {
+            return self.d1_count_events_by_source().await;
+        }
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT source, COUNT(*) as cnt FROM events GROUP BY source ORDER BY cnt DESC",
+        )
+        .fetch_all(self.sqlx_pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// Count jobs grouped by status.
+    pub async fn count_jobs_by_status(&self) -> Result<Vec<(String, i64)>> {
+        if self.is_d1() {
+            return self.d1_count_jobs_by_status().await;
+        }
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT status, COUNT(*) as cnt FROM jobs GROUP BY status ORDER BY cnt DESC",
+        )
+        .fetch_all(self.sqlx_pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// Get handler stats: (handler, completed, running, dead) for all handlers.
+    pub async fn count_handler_stats(&self) -> Result<Vec<(String, i64, i64, i64)>> {
+        if self.is_d1() {
+            return self.d1_count_handler_stats().await;
+        }
+        let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+            "SELECT handler, \
+             SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as ok, \
+             SUM(CASE WHEN status IN ('available', 'retryable', 'running') THEN 1 ELSE 0 END) as fail, \
+             SUM(CASE WHEN status = 'dead' THEN 1 ELSE 0 END) as dead \
+             FROM jobs GROUP BY handler ORDER BY ok DESC",
+        )
+        .fetch_all(self.sqlx_pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// Count workflow runs grouped by workflow name and status.
+    pub async fn count_workflow_stats(&self) -> Result<Vec<(String, i64, i64, i64)>> {
+        if self.is_d1() {
+            return self.d1_count_workflow_stats().await;
+        }
+        let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+            "SELECT workflow, \
+             SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed, \
+             SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) as running, \
+             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed \
+             FROM workflow_runs GROUP BY workflow ORDER BY completed DESC",
+        )
+        .fetch_all(self.sqlx_pool())
+        .await?;
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]

@@ -1720,6 +1720,82 @@ impl Database {
             .await?;
         Ok(row.and_then(|r| d1::row_get_opt_string(&r, "signing_secret")))
     }
+
+    // --- Status command queries ---
+
+    pub(crate) async fn d1_count_events_by_source(&self) -> Result<Vec<(String, i64)>> {
+        let rows = self
+            .d1()
+            .query(
+                "SELECT source, COUNT(*) as cnt FROM events GROUP BY source ORDER BY cnt DESC",
+                vec![],
+            )
+            .await?;
+        rows.iter()
+            .map(|r| Ok((d1::row_get_string(r, "source")?, d1::row_get_i64(r, "cnt")?)))
+            .collect()
+    }
+
+    pub(crate) async fn d1_count_jobs_by_status(&self) -> Result<Vec<(String, i64)>> {
+        let rows = self
+            .d1()
+            .query(
+                "SELECT status, COUNT(*) as cnt FROM jobs GROUP BY status ORDER BY cnt DESC",
+                vec![],
+            )
+            .await?;
+        rows.iter()
+            .map(|r| Ok((d1::row_get_string(r, "status")?, d1::row_get_i64(r, "cnt")?)))
+            .collect()
+    }
+
+    pub(crate) async fn d1_count_handler_stats(&self) -> Result<Vec<(String, i64, i64, i64)>> {
+        let rows = self
+            .d1()
+            .query(
+                "SELECT handler, \
+                 SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as ok, \
+                 SUM(CASE WHEN status IN ('available', 'retryable', 'running') THEN 1 ELSE 0 END) as fail, \
+                 SUM(CASE WHEN status = 'dead' THEN 1 ELSE 0 END) as dead \
+                 FROM jobs GROUP BY handler ORDER BY ok DESC",
+                vec![],
+            )
+            .await?;
+        rows.iter()
+            .map(|r| {
+                Ok((
+                    d1::row_get_string(r, "handler")?,
+                    d1::row_get_i64(r, "ok")?,
+                    d1::row_get_i64(r, "fail")?,
+                    d1::row_get_i64(r, "dead")?,
+                ))
+            })
+            .collect()
+    }
+
+    pub(crate) async fn d1_count_workflow_stats(&self) -> Result<Vec<(String, i64, i64, i64)>> {
+        let rows = self
+            .d1()
+            .query(
+                "SELECT workflow, \
+                 SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed, \
+                 SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) as running, \
+                 SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed \
+                 FROM workflow_runs GROUP BY workflow ORDER BY completed DESC",
+                vec![],
+            )
+            .await?;
+        rows.iter()
+            .map(|r| {
+                Ok((
+                    d1::row_get_string(r, "workflow")?,
+                    d1::row_get_i64(r, "completed")?,
+                    d1::row_get_i64(r, "running")?,
+                    d1::row_get_i64(r, "failed")?,
+                ))
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
