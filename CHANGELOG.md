@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.6.1] - 2026-03-29
+
+### Fixed
+- Clippy `too_many_arguments` warnings with `-Dwarnings` (CI was failing)
+- Doc list indentation in `db.rs`
+- Benchmark `DatabaseConfig` missing D1 fields
+- `rustls-webpki` RUSTSEC-2026-0049 (updated to 0.103.10)
+- `aws-lc-sys` RUSTSEC-2026-0044/0048 ignored (requires newer Rust than MSRV)
+- `cargo fmt` formatting inconsistencies
+
 ## [0.6.0] - 2026-03-29
 
 ### Added
