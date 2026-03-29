@@ -106,6 +106,7 @@ qhook start
 | [Security](guides/security.md) | Security features and best practices |
 | [Local Development](guides/local-development.md) | Dev mode, echo endpoint, test events, tunnels |
 | [Pull-Mode Queues](guides/pull-mode-queues.md) | Consumer-driven polling with visibility timeout and DLQ |
+| [Scaling Guide](guides/scaling.md) | D1 vs Postgres — when to switch, cost calculator, performance limits |
 | [Local to Production](guides/local-to-production.md) | Environment overlays, DB migration, security checklist |
 | [Database Schema](guides/database-schema.md) | Tables, columns, indexes, and conventions |
 | [Error Reference](guides/error-reference.md) | HTTP status codes and error messages |
