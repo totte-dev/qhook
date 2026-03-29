@@ -148,6 +148,10 @@ qhook auto-creates tables on first start. Historical events in D1 are not migrat
 
 ### Multi-instance deployment
 
+> **WARNING**: SQLite does not support multi-instance deployment. Running multiple
+> qhook processes against the same SQLite database will cause duplicate deliveries
+> and data corruption. Use PostgreSQL for multi-instance setups.
+
 At high volume, run multiple qhook instances behind a load balancer:
 
 ```

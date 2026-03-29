@@ -8,6 +8,8 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::interval;
 
+use tracing::Instrument;
+
 use crate::alert::{AlertEvent, SharedAlerter};
 use crate::config::{self, WorkerConfig};
 use crate::db::Database;
@@ -151,6 +153,8 @@ pub struct Worker {
     default_retry_max: u32,
     /// Queue configs for visibility timeout recovery.
     queues: Arc<HashMap<String, config::QueueConfig>>,
+    /// Event TTL in seconds (0 = disabled).
+    event_ttl_secs: u64,
 }
 
 impl Worker {
@@ -170,6 +174,7 @@ impl Worker {
         handler_names: Vec<String>,
         queues: HashMap<String, config::QueueConfig>,
         db_healthy: Arc<std::sync::atomic::AtomicBool>,
+        event_ttl_secs: u64,
     ) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -216,6 +221,7 @@ impl Worker {
             default_retry_max,
             queues: Arc::new(queues),
             db_healthy,
+            event_ttl_secs,
         }
     }
 
@@ -228,6 +234,7 @@ impl Worker {
             &self.metrics,
             self.worker_config.stale_threshold_secs,
             self.worker_config.retention_hours,
+            self.event_ttl_secs,
         )
         .await;
 
@@ -317,6 +324,7 @@ impl Worker {
                         let default_retry_max = self.default_retry_max;
                         let rate_limiter = self.rate_limiters.get(&job.handler).cloned();
                         let cb = self.circuit_breakers.get(&job.handler).cloned();
+                        let deliver_span = tracing::info_span!("deliver", job_id = %job.id, event_id = %job.event_id, handler = %job.handler);
 
                         in_flight.spawn(async move {
                             // Circuit breaker check: skip delivery if circuit is open
@@ -342,7 +350,7 @@ impl Worker {
 
                             deliver_job(&db, &http, &metrics, &alerter, &transforms, &handler_headers, &handler_methods, &workflows, default_retry_max, &job, cb.as_deref()).await;
                             drop(permit);
-                        });
+                        }.instrument(deliver_span));
                     }
 
                     // If we found jobs, poll again quickly instead of waiting the full interval
@@ -356,7 +364,7 @@ impl Worker {
                     }
                 }
                 _ = maint_ticker.tick() => {
-                    run_maintenance(&self.db, &self.metrics, self.worker_config.stale_threshold_secs, self.worker_config.retention_hours).await;
+                    run_maintenance(&self.db, &self.metrics, self.worker_config.stale_threshold_secs, self.worker_config.retention_hours, self.event_ttl_secs).await;
                 }
                 _ = queue_recovery_ticker.tick() => {
                     if !self.queues.is_empty() {
@@ -394,7 +402,13 @@ impl Worker {
     }
 }
 
-async fn run_maintenance(db: &Database, metrics: &Metrics, stale_secs: i64, retention_hours: i64) {
+async fn run_maintenance(
+    db: &Database,
+    metrics: &Metrics,
+    stale_secs: i64,
+    retention_hours: i64,
+    event_ttl_secs: u64,
+) {
     match db.recover_stale_jobs(stale_secs).await {
         Ok(0) => {}
         Ok(n) => tracing::info!(count = n, "Recovered stale running jobs"),
@@ -409,6 +423,16 @@ async fn run_maintenance(db: &Database, metrics: &Metrics, stale_secs: i64, rete
         Err(e) => {
             metrics.inc_db_errors();
             tracing::error!(error = %e, "Failed to cleanup old records");
+        }
+    }
+    if event_ttl_secs > 0 {
+        match db.expire_old_jobs(event_ttl_secs as i64).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(count = n, "Expired jobs past event TTL"),
+            Err(e) => {
+                metrics.inc_db_errors();
+                tracing::error!(error = %e, "Failed to expire old jobs");
+            }
         }
     }
 }
@@ -855,6 +879,15 @@ async fn deliver_workflow_step(
         .header("X-Qhook-Event-ID", &job.event_id)
         .header("X-Qhook-Handler", &job.handler)
         .header("X-Qhook-Attempt", (job.attempt + 1).to_string());
+
+    // Add deterministic delivery ID for handler-side deduplication
+    {
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(format!("{}:{}", job.event_id, job.handler));
+        let delivery_id = hex::encode(&hasher.finalize()[..16]);
+        request = request.header("X-Qhook-Delivery-ID", &delivery_id);
+    }
 
     // Apply custom headers from step config
     if let Some(ch) = custom_headers {
@@ -2456,6 +2489,15 @@ async fn deliver_http(
         .header("X-Qhook-Event-ID", &job.event_id)
         .header("X-Qhook-Handler", &job.handler)
         .header("X-Qhook-Attempt", (job.attempt + 1).to_string());
+
+    // Add deterministic delivery ID for handler-side deduplication
+    {
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(format!("{}:{}", job.event_id, job.handler));
+        let delivery_id = hex::encode(&hasher.finalize()[..16]);
+        request = request.header("X-Qhook-Delivery-ID", &delivery_id);
+    }
 
     // Forward CloudEvents headers from the original event
     if let Some(hj) = headers_json

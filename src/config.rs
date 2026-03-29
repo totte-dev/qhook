@@ -351,6 +351,9 @@ pub struct DeliveryConfig {
     pub timeout: String,
     #[serde(default)]
     pub default_retry: RetryConfig,
+    /// Maximum time a job can remain available/retryable before being auto-expired to dead.
+    /// Format: duration string (e.g. "168h", "7200s"). 0 or None = disabled (default).
+    pub event_ttl: Option<String>,
 }
 
 impl Default for DeliveryConfig {
@@ -359,6 +362,7 @@ impl Default for DeliveryConfig {
             signing_secret: None,
             timeout: default_timeout(),
             default_retry: RetryConfig::default(),
+            event_ttl: None,
         }
     }
 }

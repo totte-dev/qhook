@@ -14,6 +14,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use serde_json::Value;
+use tracing::Instrument;
 
 use crate::alert::{AlertEvent, Alerter, SharedAlerter};
 use crate::config::Config;
@@ -198,6 +199,13 @@ pub async fn serve(state: AppState, config_path: String) -> Result<()> {
         .map(|(name, h)| (name.clone(), h.method.clone()))
         .collect();
 
+    let event_ttl_secs = shared
+        .config
+        .delivery
+        .event_ttl
+        .as_deref()
+        .map(crate::config::parse_duration)
+        .unwrap_or(0);
     let worker = Worker::new(
         shared.db.clone(),
         shared.metrics.clone(),
@@ -213,6 +221,7 @@ pub async fn serve(state: AppState, config_path: String) -> Result<()> {
         shared.config.handlers.keys().cloned().collect(),
         shared.config.queues.clone(),
         shared.db_healthy.clone(),
+        event_ttl_secs,
     );
     let worker_handle = tokio::spawn(async move {
         worker.run().await;
@@ -892,7 +901,20 @@ async fn process_event(
     headers: &HeaderMap,
 ) -> Result<EventResult> {
     let event_id = ulid::Ulid::new().to_string();
+    let span = tracing::info_span!("event", %event_id, %source, %event_type);
+    process_event_inner(state, source, event_type, payload, headers, event_id)
+        .instrument(span)
+        .await
+}
 
+async fn process_event_inner(
+    state: &AppState,
+    source: &str,
+    event_type: &str,
+    payload: &str,
+    headers: &HeaderMap,
+    event_id: String,
+) -> Result<EventResult> {
     // Find matching handlers
     let matching_handlers: Vec<_> = state
         .config
@@ -1637,11 +1659,19 @@ async fn handle_health(State(state): State<SharedState>) -> impl IntoResponse {
                 state.db_healthy.store(true, std::sync::atomic::Ordering::Relaxed);
                 tracing::info!("Health check recovered db_healthy flag (worker may have crashed)");
             }
-            let status = if db_healthy_flag { "ok" } else { "recovered" };
+            let dead_jobs = state.db.dead_job_count().await.unwrap_or(0);
+            let status = if !db_healthy_flag {
+                "recovered"
+            } else if dead_jobs > 0 {
+                "degraded"
+            } else {
+                "ok"
+            };
             let body = serde_json::json!({
                 "status": status,
                 "db_healthy": true,
                 "queue_depth": depth,
+                "dead_jobs": dead_jobs,
             });
             (StatusCode::OK, axum::Json(body)).into_response()
         }

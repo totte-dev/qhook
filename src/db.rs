@@ -1074,6 +1074,35 @@ impl Database {
         Ok((jobs.rows_affected(), attempts.rows_affected()))
     }
 
+    /// Expire available/retryable jobs older than `ttl_secs` by marking them dead.
+    pub async fn expire_old_jobs(&self, ttl_secs: i64) -> Result<u64> {
+        if self.is_d1() {
+            return self.d1_expire_old_jobs(ttl_secs).await;
+        }
+        let cutoff = format_dt(Utc::now().naive_utc() - chrono::Duration::seconds(ttl_secs));
+        let now = format_now();
+
+        let start = Instant::now();
+        let result = sqlx::query(
+            "UPDATE jobs SET status = 'dead', completed_at = $1, last_error = 'event TTL expired' \
+             WHERE status IN ('available', 'retryable') AND created_at <= $2",
+        )
+        .bind(&now)
+        .bind(&cutoff)
+        .execute(self.sqlx_pool())
+        .await?;
+        let elapsed = start.elapsed().as_millis();
+        if elapsed > SLOW_QUERY_MS {
+            tracing::warn!(
+                query = "expire_old_jobs",
+                duration_ms = elapsed,
+                "Slow query"
+            );
+        }
+
+        Ok(result.rows_affected())
+    }
+
     pub async fn queue_depth(&self) -> Result<i64> {
         if self.is_d1() {
             return self.d1_queue_depth().await;

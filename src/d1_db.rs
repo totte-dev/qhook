@@ -702,6 +702,21 @@ impl Database {
         Ok((jobs.rows_affected, attempts.rows_affected))
     }
 
+    /// D1 version: expire available/retryable jobs older than `ttl_secs`.
+    pub(crate) async fn d1_expire_old_jobs(&self, ttl_secs: i64) -> Result<u64> {
+        let cutoff = format_dt(Utc::now().naive_utc() - chrono::Duration::seconds(ttl_secs));
+        let now = format_now();
+        let result = self
+            .d1()
+            .execute(
+                "UPDATE jobs SET status = 'dead', completed_at = ?1, last_error = 'event TTL expired' \
+                 WHERE status IN ('available', 'retryable') AND created_at <= ?2",
+                params![now, cutoff],
+            )
+            .await?;
+        Ok(result.rows_affected)
+    }
+
     pub(crate) async fn d1_queue_depth(&self) -> Result<i64> {
         let row = self
             .d1()

@@ -180,6 +180,10 @@ workflows:
 | `api_token` | string | - | Cloudflare API token. Required for D1 API mode |
 | `d1_endpoint` | string | - | D1 proxy endpoint URL. When set, uses proxy mode instead of Cloudflare REST API (for Cloudflare Containers) |
 
+> **WARNING**: SQLite does not support multi-instance deployment. Running multiple
+> qhook processes against the same SQLite database will cause duplicate deliveries
+> and data corruption. Use PostgreSQL for multi-instance setups.
+
 ### server
 
 | Field | Type | Default | Description |
