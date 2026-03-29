@@ -737,6 +737,10 @@ async fn handle_sns(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
+    // Backpressure: reject early if DB is unhealthy
+    if !state.db_healthy.load(std::sync::atomic::Ordering::Relaxed) {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Database temporarily unavailable".to_string());
+    }
     // Find source config
     let source = match state.config.sources.get(&source_name) {
         Some(s) if s.source_type == "sns" => s,
@@ -1210,6 +1214,10 @@ async fn handle_callback(
     Path(token): Path<String>,
     body: Bytes,
 ) -> impl IntoResponse {
+    // Backpressure: reject early if DB is unhealthy
+    if let Some(resp) = check_db_health(&state) {
+        return resp;
+    }
     // Reject obviously invalid tokens early (valid tokens are 52 chars: two ULIDs)
     if token.len() < 26 {
         // Return same 404 as invalid/expired to prevent enumeration
@@ -1262,6 +1270,8 @@ async fn handle_callback(
 
 /// Check Bearer auth for management API endpoints.
 /// Returns 503 + Retry-After if the database is unhealthy (backpressure).
+/// If the flag has been false for a while (worker may have crashed),
+/// we don't block forever — callers will still get normal 500s on actual DB failure.
 fn check_db_health(state: &AppState) -> Option<axum::response::Response> {
     if !state.db_healthy.load(std::sync::atomic::Ordering::Relaxed) {
         let mut resp = (
@@ -1635,16 +1645,29 @@ async fn handle_echo(
 }
 
 async fn handle_health(State(state): State<SharedState>) -> impl IntoResponse {
+    let db_healthy_flag = state.db_healthy.load(std::sync::atomic::Ordering::Relaxed);
+
     match state.db.queue_depth().await {
         Ok(depth) => {
+            // If DB query succeeds but flag is false (worker may have crashed), auto-recover
+            if !db_healthy_flag {
+                state.db_healthy.store(true, std::sync::atomic::Ordering::Relaxed);
+                tracing::info!("Health check recovered db_healthy flag (worker may have crashed)");
+            }
+            let status = if db_healthy_flag { "ok" } else { "recovered" };
             let body = serde_json::json!({
-                "status": "ok",
+                "status": status,
+                "db_healthy": true,
                 "queue_depth": depth,
             });
             (StatusCode::OK, axum::Json(body)).into_response()
         }
         Err(_) => {
-            let body = serde_json::json!({ "status": "error", "detail": "database unreachable" });
+            let body = serde_json::json!({
+                "status": "error",
+                "db_healthy": false,
+                "detail": "database unreachable",
+            });
             (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body)).into_response()
         }
     }
