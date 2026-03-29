@@ -4,6 +4,7 @@ use sqlx::{AnyPool, any::AnyPoolOptions};
 use std::time::Instant;
 
 use crate::config::DatabaseConfig;
+use crate::d1::D1Config;
 
 /// Format current UTC time as TEXT for database storage.
 pub(crate) fn format_now() -> String {
@@ -39,14 +40,47 @@ fn redact_url(url: &str) -> String {
 /// Log queries that take longer than this.
 const SLOW_QUERY_MS: u128 = 100;
 
+/// The database backend — either a sqlx connection pool or a D1 HTTP client.
+enum Backend {
+    Sqlx(AnyPool),
+    D1(D1Config),
+}
+
 #[allow(dead_code)]
 pub struct Database {
-    pub pool: AnyPool,
+    pub pool: Option<AnyPool>,
     pub driver: String,
+    backend: Backend,
 }
 
 impl Database {
+    /// Get a reference to the sqlx pool. Panics if the backend is D1.
+    /// Use `pool_ref()` for checked access.
+    pub fn sqlx_pool(&self) -> &AnyPool {
+        match &self.backend {
+            Backend::Sqlx(pool) => pool,
+            Backend::D1(_) => panic!("Cannot access sqlx pool on D1 backend"),
+        }
+    }
+
+    /// Returns true if this database uses the D1 backend.
+    pub fn is_d1(&self) -> bool {
+        matches!(self.backend, Backend::D1(_))
+    }
+
+    /// Get a reference to the D1 client, if using D1 backend.
+    pub(crate) fn d1(&self) -> &D1Config {
+        match &self.backend {
+            Backend::D1(d1) => d1,
+            Backend::Sqlx(_) => panic!("Cannot access D1 client on sqlx backend"),
+        }
+    }
+
     pub async fn connect(config: &DatabaseConfig) -> Result<Self> {
+        if config.driver == "d1" {
+            return Self::connect_d1(config);
+        }
+
         let url = match config.driver.as_str() {
             "sqlite" => config
                 .url
@@ -74,29 +108,67 @@ impl Database {
         tracing::info!(driver = config.driver, "Database connected");
 
         Ok(Self {
-            pool,
+            pool: Some(pool.clone()),
             driver: config.driver.clone(),
+            backend: Backend::Sqlx(pool),
+        })
+    }
+
+    /// Connect to Cloudflare D1 via HTTP API or proxy endpoint.
+    fn connect_d1(config: &DatabaseConfig) -> Result<Self> {
+        let d1 = if let Some(endpoint) = &config.d1_endpoint {
+            // Proxy mode (Cloudflare Containers / Outbound Workers)
+            D1Config::new_proxy(endpoint.clone(), config.api_token.clone())
+        } else {
+            // Cloudflare REST API mode
+            let account_id = config
+                .account_id
+                .clone()
+                .context("database.account_id is required for D1 API mode")?;
+            let database_id = config
+                .database_id
+                .clone()
+                .context("database.database_id is required for D1 API mode")?;
+            let api_token = config
+                .api_token
+                .clone()
+                .context("database.api_token is required for D1 API mode")?;
+            D1Config::new_api(account_id, database_id, api_token)
+        };
+
+        tracing::info!(driver = "d1", "D1 database configured");
+
+        Ok(Self {
+            pool: None,
+            driver: "d1".into(),
+            backend: Backend::D1(d1),
         })
     }
 
     pub async fn migrate(&self) -> Result<()> {
+        if self.is_d1() {
+            return self.migrate_d1().await;
+        }
+
+        let pool = self.sqlx_pool();
+
         // Create migration tracking table
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS _migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
         )
-        .execute(&self.pool)
+        .execute(pool)
         .await?;
 
         let current_version: i32 =
             sqlx::query_as::<_, (i32,)>("SELECT COALESCE(MAX(version), 0) FROM _migrations")
-                .fetch_one(&self.pool)
+                .fetch_one(self.sqlx_pool())
                 .await
                 .map(|r| r.0)
                 .unwrap_or(0);
 
         // Detect if tables exist but migration tracking is new (upgrade from pre-migration)
         let has_events_table = sqlx::query("SELECT 1 FROM events LIMIT 0")
-            .execute(&self.pool)
+            .execute(self.sqlx_pool())
             .await
             .is_ok();
 
@@ -107,7 +179,7 @@ impl Database {
                 sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES ($1, $2)")
                     .bind(v)
                     .bind(format_now())
-                    .execute(&self.pool)
+                    .execute(self.sqlx_pool())
                     .await
                     .ok();
             }
@@ -283,15 +355,15 @@ impl Database {
                 // ALTER TABLE ADD COLUMN may fail if column already exists — that's OK
                 // MySQL CREATE INDEX (without IF NOT EXISTS) may also fail if index exists
                 if sql.contains("ALTER TABLE") || (is_mysql && sql.contains("CREATE INDEX")) {
-                    sqlx::query(sql).execute(&self.pool).await.ok();
+                    sqlx::query(sql).execute(self.sqlx_pool()).await.ok();
                 } else {
-                    sqlx::query(sql).execute(&self.pool).await?;
+                    sqlx::query(sql).execute(self.sqlx_pool()).await?;
                 }
             }
             sqlx::query("INSERT INTO _migrations (version, applied_at) VALUES ($1, $2)")
                 .bind(*version)
                 .bind(format_now())
-                .execute(&self.pool)
+                .execute(self.sqlx_pool())
                 .await?;
         }
 
@@ -311,6 +383,9 @@ impl Database {
         headers: Option<&str>,
         unique_key: Option<&str>,
     ) -> Result<bool> {
+        if self.is_d1() {
+            return self.d1_insert_event(id, source, event_type, payload, headers, unique_key).await;
+        }
         let now = format_now();
 
         // Try insert; if unique_key conflicts, return false (duplicate)
@@ -327,7 +402,7 @@ impl Database {
                 .bind(headers)
                 .bind(unique_key)
                 .bind(&now)
-                .execute(&self.pool)
+                .execute(self.sqlx_pool())
                 .await?
             } else {
                 sqlx::query(
@@ -342,7 +417,7 @@ impl Database {
                 .bind(headers)
                 .bind(unique_key)
                 .bind(&now)
-                .execute(&self.pool)
+                .execute(self.sqlx_pool())
                 .await?
             };
 
@@ -359,7 +434,7 @@ impl Database {
             .bind(headers)
             .bind(unique_key)
             .bind(&now)
-            .execute(&self.pool)
+            .execute(self.sqlx_pool())
             .await?;
 
             Ok(true)
@@ -374,6 +449,9 @@ impl Database {
         url: &str,
         max_attempts: u32,
     ) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_insert_job(id, event_id, handler, url, max_attempts).await;
+        }
         let now = format_now();
 
         sqlx::query(
@@ -386,7 +464,7 @@ impl Database {
         .bind(url)
         .bind(max_attempts as i32)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
 
         Ok(())
@@ -397,6 +475,9 @@ impl Database {
     /// For MySQL: uses FOR UPDATE SKIP LOCKED but without RETURNING (separate SELECT).
     /// For SQLite: plain SELECT (use mark_job_running separately).
     pub async fn fetch_available_jobs(&self, limit: i32) -> Result<Vec<JobRow>> {
+        if self.is_d1() {
+            return self.d1_fetch_available_jobs(limit).await;
+        }
         let now = format_now();
 
         let start = Instant::now();
@@ -415,7 +496,7 @@ impl Database {
             )
             .bind(&now)
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(self.sqlx_pool())
             .await?
         } else {
             sqlx::query_as::<_, JobRow>(
@@ -428,7 +509,7 @@ impl Database {
             )
             .bind(&now)
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(self.sqlx_pool())
             .await?
         };
         let elapsed = start.elapsed().as_millis();
@@ -454,6 +535,9 @@ impl Database {
     /// - Use sqlx's `QueryBuilder` with `push_values` (requires separate sqlite/mysql pool types)
     /// In practice, the loop is bounded by `concurrent_delivery` (default 10), so impact is low.
     pub async fn mark_job_running(&self, job_id: &str) -> Result<bool> {
+        if self.is_d1() {
+            return self.d1_mark_job_running(job_id).await;
+        }
         let now = format_now();
 
         let result = sqlx::query(
@@ -462,19 +546,22 @@ impl Database {
         )
         .bind(&now)
         .bind(job_id)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
 
         Ok(result.rows_affected() > 0)
     }
 
     pub async fn mark_job_completed(&self, job_id: &str) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_mark_job_completed(job_id).await;
+        }
         let now = format_now();
 
         sqlx::query("UPDATE jobs SET status = 'completed', completed_at = $1 WHERE id = $2")
             .bind(&now)
             .bind(job_id)
-            .execute(&self.pool)
+            .execute(self.sqlx_pool())
             .await?;
 
         Ok(())
@@ -486,6 +573,9 @@ impl Database {
         next_attempt_at: NaiveDateTime,
         error: &str,
     ) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_mark_job_retryable(job_id, next_attempt_at, error).await;
+        }
         let scheduled = format_dt(next_attempt_at);
 
         sqlx::query(
@@ -494,13 +584,16 @@ impl Database {
         .bind(&scheduled)
         .bind(error)
         .bind(job_id)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
 
         Ok(())
     }
 
     pub async fn mark_job_dead(&self, job_id: &str, error: &str) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_mark_job_dead(job_id, error).await;
+        }
         let now = format_now();
 
         sqlx::query(
@@ -509,7 +602,7 @@ impl Database {
         .bind(&now)
         .bind(error)
         .bind(job_id)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
 
         Ok(())
@@ -526,6 +619,9 @@ impl Database {
         error: Option<&str>,
         duration_ms: i64,
     ) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_insert_attempt(id, job_id, attempt, status_code, response_body, error, duration_ms).await;
+        }
         let now = format_now();
 
         sqlx::query(
@@ -540,25 +636,31 @@ impl Database {
         .bind(error)
         .bind(duration_ms)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
 
         Ok(())
     }
 
     pub async fn get_event_payload(&self, event_id: &str) -> Result<String> {
+        if self.is_d1() {
+            return self.d1_get_event_payload(event_id).await;
+        }
         let row: (String,) = sqlx::query_as("SELECT payload FROM events WHERE id = $1")
             .bind(event_id)
-            .fetch_one(&self.pool)
+            .fetch_one(self.sqlx_pool())
             .await?;
 
         Ok(row.0)
     }
 
     pub async fn get_event_headers(&self, event_id: &str) -> Result<Option<String>> {
+        if self.is_d1() {
+            return self.d1_get_event_headers(event_id).await;
+        }
         let row: (Option<String>,) = sqlx::query_as("SELECT headers FROM events WHERE id = $1")
             .bind(event_id)
-            .fetch_one(&self.pool)
+            .fetch_one(self.sqlx_pool())
             .await?;
 
         Ok(row.0)
@@ -566,16 +668,22 @@ impl Database {
 
     /// Fetch payload and headers in a single query.
     pub async fn get_event_data(&self, event_id: &str) -> Result<(String, Option<String>)> {
+        if self.is_d1() {
+            return self.d1_get_event_data(event_id).await;
+        }
         let row: (String, Option<String>) =
             sqlx::query_as("SELECT payload, headers FROM events WHERE id = $1")
                 .bind(event_id)
-                .fetch_one(&self.pool)
+                .fetch_one(self.sqlx_pool())
                 .await?;
 
         Ok(row)
     }
 
     pub async fn list_jobs(&self, status: Option<&str>, limit: i32) -> Result<Vec<JobRow>> {
+        if self.is_d1() {
+            return self.d1_list_jobs(status, limit).await;
+        }
         let rows = if let Some(status) = status {
             sqlx::query_as::<_, JobRow>(
                 "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
@@ -583,7 +691,7 @@ impl Database {
             )
             .bind(status)
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(self.sqlx_pool())
             .await?
         } else {
             sqlx::query_as::<_, JobRow>(
@@ -591,19 +699,22 @@ impl Database {
                  FROM jobs ORDER BY scheduled_at DESC LIMIT $1",
             )
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(self.sqlx_pool())
             .await?
         };
         Ok(rows)
     }
 
     pub async fn list_events(&self, limit: i32) -> Result<Vec<EventRow>> {
+        if self.is_d1() {
+            return self.d1_list_events(limit).await;
+        }
         let rows = sqlx::query_as::<_, EventRow>(
             "SELECT id, source, event_type, unique_key, created_at \
              FROM events ORDER BY created_at DESC LIMIT $1",
         )
         .bind(limit)
-        .fetch_all(&self.pool)
+        .fetch_all(self.sqlx_pool())
         .await?;
         Ok(rows)
     }
@@ -617,6 +728,9 @@ impl Database {
         until: Option<&str>,
         limit: i32,
     ) -> Result<Vec<EventRowFull>> {
+        if self.is_d1() {
+            return self.d1_list_events_filtered(source, event_type, since, until, limit).await;
+        }
         // Build query dynamically based on filters
         let mut conditions = Vec::new();
         let mut param_idx = 1;
@@ -664,7 +778,7 @@ impl Database {
         }
         query = query.bind(limit);
 
-        let rows = query.fetch_all(&self.pool).await?;
+        let rows = query.fetch_all(self.sqlx_pool()).await?;
         Ok(rows)
     }
 
@@ -676,6 +790,9 @@ impl Database {
         source: Option<&str>,
         limit: i32,
     ) -> Result<Vec<EventRow>> {
+        if self.is_d1() {
+            return self.d1_list_events_after(after_id, source, limit).await;
+        }
         let rows = match (after_id, source) {
             (Some(id), Some(src)) => {
                 sqlx::query_as::<_, EventRow>(
@@ -685,7 +802,7 @@ impl Database {
                 .bind(id)
                 .bind(src)
                 .bind(limit)
-                .fetch_all(&self.pool)
+                .fetch_all(self.sqlx_pool())
                 .await?
             }
             (Some(id), None) => {
@@ -695,7 +812,7 @@ impl Database {
                 )
                 .bind(id)
                 .bind(limit)
-                .fetch_all(&self.pool)
+                .fetch_all(self.sqlx_pool())
                 .await?
             }
             (None, Some(src)) => {
@@ -705,7 +822,7 @@ impl Database {
                 )
                 .bind(src)
                 .bind(limit)
-                .fetch_all(&self.pool)
+                .fetch_all(self.sqlx_pool())
                 .await?
             }
             (None, None) => {
@@ -714,7 +831,7 @@ impl Database {
                      FROM events ORDER BY id DESC LIMIT $1",
                 )
                 .bind(limit)
-                .fetch_all(&self.pool)
+                .fetch_all(self.sqlx_pool())
                 .await?
             }
         };
@@ -729,6 +846,9 @@ impl Database {
         status: Option<&str>,
         limit: i32,
     ) -> Result<Vec<JobRow>> {
+        if self.is_d1() {
+            return self.d1_list_jobs_after(after_id, status, limit).await;
+        }
         let rows = match (after_id, status) {
             (Some(id), Some(st)) => {
                 sqlx::query_as::<_, JobRow>(
@@ -738,7 +858,7 @@ impl Database {
                 .bind(id)
                 .bind(st)
                 .bind(limit)
-                .fetch_all(&self.pool)
+                .fetch_all(self.sqlx_pool())
                 .await?
             }
             (Some(id), None) => {
@@ -748,7 +868,7 @@ impl Database {
                 )
                 .bind(id)
                 .bind(limit)
-                .fetch_all(&self.pool)
+                .fetch_all(self.sqlx_pool())
                 .await?
             }
             (None, Some(st)) => {
@@ -758,7 +878,7 @@ impl Database {
                 )
                 .bind(st)
                 .bind(limit)
-                .fetch_all(&self.pool)
+                .fetch_all(self.sqlx_pool())
                 .await?
             }
             (None, None) => {
@@ -767,7 +887,7 @@ impl Database {
                      FROM jobs WHERE status IN ('completed', 'dead', 'retryable') ORDER BY id DESC LIMIT $1",
                 )
                 .bind(limit)
-                .fetch_all(&self.pool)
+                .fetch_all(self.sqlx_pool())
                 .await?
             }
         };
@@ -775,18 +895,24 @@ impl Database {
     }
 
     pub async fn retry_dead_jobs(&self) -> Result<u64> {
+        if self.is_d1() {
+            return self.d1_retry_dead_jobs().await;
+        }
         let now = format_now();
         let result = sqlx::query(
             "UPDATE jobs SET status = 'available', scheduled_at = $1, last_error = NULL WHERE status = 'dead'",
         )
         .bind(&now)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
         Ok(result.rows_affected())
     }
 
     /// Reset jobs stuck in 'running' for longer than `stale_secs` back to 'retryable'.
     pub async fn recover_stale_jobs(&self, stale_secs: i64) -> Result<u64> {
+        if self.is_d1() {
+            return self.d1_recover_stale_jobs(stale_secs).await;
+        }
         let now = Utc::now().naive_utc();
         let cutoff = format_dt(now - chrono::Duration::seconds(stale_secs));
         let now_str = format_dt(now);
@@ -799,7 +925,7 @@ impl Database {
         )
         .bind(&now_str)
         .bind(&cutoff)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
         let elapsed = start.elapsed().as_millis();
         if elapsed > SLOW_QUERY_MS {
@@ -815,6 +941,9 @@ impl Database {
 
     /// Delete completed/dead jobs (and their attempts) older than `retention_hours`.
     pub async fn cleanup_old_records(&self, retention_hours: i64) -> Result<(u64, u64)> {
+        if self.is_d1() {
+            return self.d1_cleanup_old_records(retention_hours).await;
+        }
         let cutoff = format_dt(Utc::now().naive_utc() - chrono::Duration::hours(retention_hours));
 
         let start = Instant::now();
@@ -823,14 +952,14 @@ impl Database {
              (SELECT id FROM jobs WHERE status IN ('completed', 'dead') AND completed_at < $1)",
         )
         .bind(&cutoff)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
 
         let jobs = sqlx::query(
             "DELETE FROM jobs WHERE status IN ('completed', 'dead') AND completed_at < $1",
         )
         .bind(&cutoff)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
         let elapsed = start.elapsed().as_millis();
         if elapsed > SLOW_QUERY_MS {
@@ -845,16 +974,22 @@ impl Database {
     }
 
     pub async fn queue_depth(&self) -> Result<i64> {
+        if self.is_d1() {
+            return self.d1_queue_depth().await;
+        }
         let row: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM jobs WHERE status IN ('available', 'retryable')")
-                .fetch_one(&self.pool)
+                .fetch_one(self.sqlx_pool())
                 .await?;
         Ok(row.0)
     }
 
     pub async fn dead_job_count(&self) -> Result<i64> {
+        if self.is_d1() {
+            return self.d1_dead_job_count().await;
+        }
         let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM jobs WHERE status = 'dead'")
-            .fetch_one(&self.pool)
+            .fetch_one(self.sqlx_pool())
             .await?;
         Ok(row.0)
     }
@@ -868,6 +1003,9 @@ impl Database {
         event_id: &str,
         first_step: &str,
     ) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_insert_workflow_run(id, workflow, event_id, first_step).await;
+        }
         let now = format_now();
 
         sqlx::query(
@@ -879,22 +1017,28 @@ impl Database {
         .bind(event_id)
         .bind(first_step)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
 
         Ok(())
     }
 
     pub async fn update_workflow_run_step(&self, run_id: &str, step_name: &str) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_update_workflow_run_step(run_id, step_name).await;
+        }
         sqlx::query("UPDATE workflow_runs SET current_step = $1 WHERE id = $2")
             .bind(step_name)
             .bind(run_id)
-            .execute(&self.pool)
+            .execute(self.sqlx_pool())
             .await?;
         Ok(())
     }
 
     pub async fn complete_workflow_run(&self, run_id: &str) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_complete_workflow_run(run_id).await;
+        }
         let now = format_now();
 
         sqlx::query(
@@ -902,18 +1046,21 @@ impl Database {
         )
         .bind(&now)
         .bind(run_id)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
         Ok(())
     }
 
     pub async fn fail_workflow_run(&self, run_id: &str) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_fail_workflow_run(run_id).await;
+        }
         let now = format_now();
 
         sqlx::query("UPDATE workflow_runs SET status = 'failed', completed_at = $1 WHERE id = $2")
             .bind(&now)
             .bind(run_id)
-            .execute(&self.pool)
+            .execute(self.sqlx_pool())
             .await?;
         Ok(())
     }
@@ -931,6 +1078,9 @@ impl Database {
         step_index: i32,
         step_input: Option<&str>,
     ) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_insert_workflow_job(id, event_id, handler, url, max_attempts, workflow_run_id, step_name, step_index, step_input).await;
+        }
         let now = format_now();
 
         sqlx::query(
@@ -948,39 +1098,48 @@ impl Database {
         .bind(step_name)
         .bind(step_index)
         .bind(step_input)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
 
         Ok(())
     }
 
     pub async fn save_step_output(&self, job_id: &str, output: &str) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_save_step_output(job_id, output).await;
+        }
         sqlx::query("UPDATE jobs SET step_output = $1 WHERE id = $2")
             .bind(output)
             .bind(job_id)
-            .execute(&self.pool)
+            .execute(self.sqlx_pool())
             .await?;
         Ok(())
     }
 
     pub async fn get_workflow_job_data(&self, job_id: &str) -> Result<Option<WorkflowJobRow>> {
+        if self.is_d1() {
+            return self.d1_get_workflow_job_data(job_id).await;
+        }
         let row = sqlx::query_as::<_, WorkflowJobRow>(
             "SELECT workflow_run_id, step_name, step_index, step_input, step_output, branch_name \
              FROM jobs WHERE id = $1",
         )
         .bind(job_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(self.sqlx_pool())
         .await?;
         Ok(row)
     }
 
     pub async fn get_workflow_run(&self, run_id: &str) -> Result<Option<WorkflowRunRow>> {
+        if self.is_d1() {
+            return self.d1_get_workflow_run(run_id).await;
+        }
         let row = sqlx::query_as::<_, WorkflowRunRow>(
             "SELECT id, workflow, event_id, status, current_step, created_at, completed_at \
              FROM workflow_runs WHERE id = $1",
         )
         .bind(run_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(self.sqlx_pool())
         .await?;
         Ok(row)
     }
@@ -990,6 +1149,9 @@ impl Database {
         status: Option<&str>,
         limit: i32,
     ) -> Result<Vec<WorkflowRunRow>> {
+        if self.is_d1() {
+            return self.d1_list_workflow_runs(status, limit).await;
+        }
         let rows = if let Some(status) = status {
             sqlx::query_as::<_, WorkflowRunRow>(
                 "SELECT id, workflow, event_id, status, current_step, created_at, completed_at \
@@ -997,7 +1159,7 @@ impl Database {
             )
             .bind(status)
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(self.sqlx_pool())
             .await?
         } else {
             sqlx::query_as::<_, WorkflowRunRow>(
@@ -1005,18 +1167,21 @@ impl Database {
                  FROM workflow_runs ORDER BY created_at DESC LIMIT $1",
             )
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(self.sqlx_pool())
             .await?
         };
         Ok(rows)
     }
 
     pub async fn redrive_workflow_run(&self, run_id: &str) -> Result<bool> {
+        if self.is_d1() {
+            return self.d1_redrive_workflow_run(run_id).await;
+        }
         let result = sqlx::query(
             "UPDATE workflow_runs SET status = 'running' WHERE id = $1 AND status = 'failed'",
         )
         .bind(run_id)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -1028,6 +1193,9 @@ impl Database {
         parallel_step: &str,
         count: i32,
     ) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_set_parallel_state(run_id, parallel_step, count).await;
+        }
         sqlx::query(
             "UPDATE workflow_runs SET parallel_step = $1, parallel_count = $2, parallel_completed = 0 \
              WHERE id = $3",
@@ -1035,7 +1203,7 @@ impl Database {
         .bind(parallel_step)
         .bind(count)
         .bind(run_id)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
         Ok(())
     }
@@ -1044,6 +1212,9 @@ impl Database {
     /// Uses a single atomic query to prevent race conditions when multiple branches
     /// complete concurrently.
     pub async fn increment_parallel_completed(&self, run_id: &str) -> Result<(i32, i32)> {
+        if self.is_d1() {
+            return self.d1_increment_parallel_completed(run_id).await;
+        }
         if self.driver == "postgres" {
             // Postgres: atomic UPDATE ... RETURNING
             let row: (i32, i32) = sqlx::query_as(
@@ -1052,7 +1223,7 @@ impl Database {
                  RETURNING parallel_completed, parallel_count",
             )
             .bind(run_id)
-            .fetch_one(&self.pool)
+            .fetch_one(self.sqlx_pool())
             .await?;
             Ok(row)
         } else {
@@ -1063,14 +1234,14 @@ impl Database {
                 "UPDATE workflow_runs SET parallel_completed = parallel_completed + 1 WHERE id = $1",
             )
             .bind(run_id)
-            .execute(&self.pool)
+            .execute(self.sqlx_pool())
             .await?;
 
             let row: (i32, i32) = sqlx::query_as(
                 "SELECT parallel_completed, parallel_count FROM workflow_runs WHERE id = $1",
             )
             .bind(run_id)
-            .fetch_one(&self.pool)
+            .fetch_one(self.sqlx_pool())
             .await?;
             Ok(row)
         }
@@ -1078,12 +1249,15 @@ impl Database {
 
     /// Clear parallel state after all branches complete.
     pub async fn clear_parallel_state(&self, run_id: &str) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_clear_parallel_state(run_id).await;
+        }
         sqlx::query(
             "UPDATE workflow_runs SET parallel_step = NULL, parallel_count = 0, parallel_completed = 0 \
              WHERE id = $1",
         )
         .bind(run_id)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
         Ok(())
     }
@@ -1103,6 +1277,9 @@ impl Database {
         step_input: Option<&str>,
         branch_name: &str,
     ) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_insert_branch_job(id, event_id, handler, url, max_attempts, workflow_run_id, step_name, step_index, step_input, branch_name).await;
+        }
         let now = format_now();
 
         sqlx::query(
@@ -1121,7 +1298,7 @@ impl Database {
         .bind(step_index)
         .bind(step_input)
         .bind(branch_name)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
 
         Ok(())
@@ -1133,6 +1310,9 @@ impl Database {
         run_id: &str,
         step_name: &str,
     ) -> Result<Vec<(String, Option<String>)>> {
+        if self.is_d1() {
+            return self.d1_get_branch_outputs(run_id, step_name).await;
+        }
         let rows: Vec<(String, Option<String>)> = sqlx::query_as(
             "SELECT branch_name, step_output FROM jobs \
              WHERE workflow_run_id = $1 AND step_name = $2 AND branch_name IS NOT NULL AND status = 'completed' \
@@ -1140,7 +1320,7 @@ impl Database {
         )
         .bind(run_id)
         .bind(step_name)
-        .fetch_all(&self.pool)
+        .fetch_all(self.sqlx_pool())
         .await?;
         Ok(rows)
     }
@@ -1160,6 +1340,9 @@ impl Database {
         step_input: Option<&str>,
         scheduled_at: &str,
     ) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_insert_workflow_job_delayed(id, event_id, handler, url, max_attempts, workflow_run_id, step_name, step_index, step_input, scheduled_at).await;
+        }
         let now = format_now();
 
         sqlx::query(
@@ -1178,7 +1361,7 @@ impl Database {
         .bind(step_name)
         .bind(step_index)
         .bind(step_input)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
 
         Ok(())
@@ -1199,6 +1382,9 @@ impl Database {
         callback_token: &str,
         _timeout_at: Option<&str>,
     ) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_insert_callback_job(id, event_id, handler, max_attempts, workflow_run_id, step_name, step_index, step_input, callback_token, _timeout_at).await;
+        }
         let now = format_now();
 
         // Use a far-future scheduled_at so it's never picked up by the worker.
@@ -1221,7 +1407,7 @@ impl Database {
         .bind(step_index)
         .bind(step_input)
         .bind(callback_token)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
 
         Ok(())
@@ -1230,6 +1416,9 @@ impl Database {
     /// Find a waiting callback job by token and resume it with payload.
     /// Atomic: UPDATE with WHERE status='waiting' prevents double-resume race conditions.
     pub async fn resume_callback_job(&self, token: &str, payload: &str) -> Result<Option<String>> {
+        if self.is_d1() {
+            return self.d1_resume_callback_job(token, payload).await;
+        }
         let now = format_now();
 
         // Atomic update: only succeeds if job exists AND is still waiting.
@@ -1241,7 +1430,7 @@ impl Database {
         .bind(&now)
         .bind(payload)
         .bind(token)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
 
         if result.rows_affected() == 0 {
@@ -1251,7 +1440,7 @@ impl Database {
         // Get the job_id (safe: callback_token has UNIQUE index)
         let row: (String,) = sqlx::query_as("SELECT id FROM jobs WHERE callback_token = $1")
             .bind(token)
-            .fetch_one(&self.pool)
+            .fetch_one(self.sqlx_pool())
             .await?;
 
         Ok(Some(row.0))
@@ -1259,38 +1448,50 @@ impl Database {
 
     /// Get callback job data for advancing the workflow after callback.
     pub async fn get_callback_job(&self, token: &str) -> Result<Option<JobRow>> {
+        if self.is_d1() {
+            return self.d1_get_callback_job(token).await;
+        }
         let row = sqlx::query_as::<_, JobRow>(
             "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
              FROM jobs WHERE callback_token = $1",
         )
         .bind(token)
-        .fetch_optional(&self.pool)
+        .fetch_optional(self.sqlx_pool())
         .await?;
         Ok(row)
     }
 
     /// Set timeout_at on a workflow run.
     pub async fn set_workflow_timeout(&self, run_id: &str, timeout_at: &str) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_set_workflow_timeout(run_id, timeout_at).await;
+        }
         sqlx::query("UPDATE workflow_runs SET timeout_at = $1 WHERE id = $2")
             .bind(timeout_at)
             .bind(run_id)
-            .execute(&self.pool)
+            .execute(self.sqlx_pool())
             .await?;
         Ok(())
     }
 
     /// Get workflow run timeout_at.
     pub async fn get_workflow_timeout(&self, run_id: &str) -> Result<Option<String>> {
+        if self.is_d1() {
+            return self.d1_get_workflow_timeout(run_id).await;
+        }
         let row: Option<(Option<String>,)> =
             sqlx::query_as("SELECT timeout_at FROM workflow_runs WHERE id = $1")
                 .bind(run_id)
-                .fetch_optional(&self.pool)
+                .fetch_optional(self.sqlx_pool())
                 .await?;
         Ok(row.and_then(|(t,)| t))
     }
 
     /// Expire waiting callback jobs whose workflow has timed out.
     pub async fn expire_timed_out_callbacks(&self) -> Result<u64> {
+        if self.is_d1() {
+            return self.d1_expire_timed_out_callbacks().await;
+        }
         let now = format_now();
 
         let result = sqlx::query(
@@ -1301,7 +1502,7 @@ impl Database {
              )",
         )
         .bind(&now)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
 
         Ok(result.rows_affected())
@@ -1317,6 +1518,9 @@ impl Database {
         parent_run_id: &str,
         parent_step_index: i32,
     ) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_insert_sub_workflow_run(id, workflow, event_id, first_step, parent_run_id, parent_step_index).await;
+        }
         let now = format_now();
 
         sqlx::query(
@@ -1330,7 +1534,7 @@ impl Database {
         .bind(&now)
         .bind(parent_run_id)
         .bind(parent_step_index)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
 
         Ok(())
@@ -1338,17 +1542,23 @@ impl Database {
 
     /// Get parent workflow info for a sub-workflow run.
     pub async fn get_parent_workflow_run(&self, run_id: &str) -> Result<Option<(String, i32)>> {
+        if self.is_d1() {
+            return self.d1_get_parent_workflow_run(run_id).await;
+        }
         let row: Option<(Option<String>, Option<i32>)> = sqlx::query_as(
             "SELECT parent_run_id, parent_step_index FROM workflow_runs WHERE id = $1",
         )
         .bind(run_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(self.sqlx_pool())
         .await?;
 
         Ok(row.and_then(|(id, idx)| id.zip(idx)))
     }
 
     pub async fn retry_job(&self, job_id: &str) -> Result<bool> {
+        if self.is_d1() {
+            return self.d1_retry_job(job_id).await;
+        }
         let now = format_now();
         let result = sqlx::query(
             "UPDATE jobs SET status = 'available', scheduled_at = $1, last_error = NULL, attempt = 0 \
@@ -1356,7 +1566,7 @@ impl Database {
         )
         .bind(&now)
         .bind(job_id)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -1370,6 +1580,9 @@ impl Database {
         handler: &str,
         limit: i32,
     ) -> Result<Vec<QueueMessageRow>> {
+        if self.is_d1() {
+            return self.d1_fetch_queue_messages(handler, limit).await;
+        }
         let now = format_now();
 
         let rows = if self.driver == "postgres" {
@@ -1391,7 +1604,7 @@ impl Database {
             .bind(&now)
             .bind(handler)
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(self.sqlx_pool())
             .await?
         } else {
             // SQLite/MySQL: two-step — SELECT then mark running individually.
@@ -1405,7 +1618,7 @@ impl Database {
             .bind(handler)
             .bind(&now)
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(self.sqlx_pool())
             .await?;
 
             let mut msgs = Vec::with_capacity(job_rows.len());
@@ -1418,7 +1631,7 @@ impl Database {
                     "SELECT event_type, payload, headers FROM events WHERE id = $1",
                 )
                 .bind(&job.event_id)
-                .fetch_one(&self.pool)
+                .fetch_one(self.sqlx_pool())
                 .await?;
 
                 msgs.push(QueueMessageRow {
@@ -1440,6 +1653,9 @@ impl Database {
     /// Acknowledge queue messages (mark as completed).
     /// Returns the number of jobs actually acked.
     pub async fn ack_queue_messages(&self, handler: &str, ids: &[String]) -> Result<u64> {
+        if self.is_d1() {
+            return self.d1_ack_queue_messages(handler, ids).await;
+        }
         if ids.is_empty() {
             return Ok(0);
         }
@@ -1453,7 +1669,7 @@ impl Database {
             .bind(&now)
             .bind(id)
             .bind(handler)
-            .execute(&self.pool)
+            .execute(self.sqlx_pool())
             .await?;
             if result.rows_affected() > 0 {
                 // Record a successful attempt
@@ -1471,6 +1687,9 @@ impl Database {
     /// Jobs below max_attempts are retried with backoff; others go to DLQ.
     /// Returns (retried, dead) counts.
     pub async fn nack_queue_messages(&self, handler: &str, ids: &[String]) -> Result<(u64, u64)> {
+        if self.is_d1() {
+            return self.d1_nack_queue_messages(handler, ids).await;
+        }
         if ids.is_empty() {
             return Ok((0, 0));
         }
@@ -1485,7 +1704,7 @@ impl Database {
             )
             .bind(id)
             .bind(handler)
-            .fetch_optional(&self.pool)
+            .fetch_optional(self.sqlx_pool())
             .await?;
 
             let Some((attempt, max_attempts)) = row else {
@@ -1502,7 +1721,7 @@ impl Database {
                 )
                 .bind(&next_at)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(self.sqlx_pool())
                 .await?;
                 retried += 1;
             } else {
@@ -1513,7 +1732,7 @@ impl Database {
                 )
                 .bind(&now_str)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(self.sqlx_pool())
                 .await?;
                 dead += 1;
             }
@@ -1528,6 +1747,9 @@ impl Database {
         handler: &str,
         visibility_timeout_secs: u64,
     ) -> Result<u64> {
+        if self.is_d1() {
+            return self.d1_recover_expired_queue_messages(handler, visibility_timeout_secs).await;
+        }
         let now = Utc::now().naive_utc();
         let cutoff = format_dt(now - chrono::Duration::seconds(visibility_timeout_secs as i64));
         let now_str = format_dt(now);
@@ -1539,7 +1761,7 @@ impl Database {
         .bind(&now_str)
         .bind(handler)
         .bind(&cutoff)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
 
         Ok(result.rows_affected())
@@ -1547,13 +1769,16 @@ impl Database {
 
     /// Count available + retryable messages in a queue (queue depth).
     pub async fn count_queue_depth(&self, handler: &str) -> Result<i64> {
+        if self.is_d1() {
+            return self.d1_count_queue_depth(handler).await;
+        }
         let now = format_now();
         let row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM jobs WHERE handler = $1 AND status IN ('available', 'retryable') AND scheduled_at <= $2",
         )
         .bind(handler)
         .bind(&now)
-        .fetch_one(&self.pool)
+        .fetch_one(self.sqlx_pool())
         .await?;
         Ok(row.0)
     }
@@ -1666,60 +1891,75 @@ pub struct SubscribedEndpoint {
 impl Database {
     /// Get a single job by ID.
     pub async fn get_job_by_id(&self, job_id: &str) -> Result<Option<JobRow>> {
+        if self.is_d1() {
+            return self.d1_get_job_by_id(job_id).await;
+        }
         let row = sqlx::query_as::<_, JobRow>(
             "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
              FROM jobs WHERE id = $1",
         )
         .bind(job_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(self.sqlx_pool())
         .await?;
         Ok(row)
     }
 
     /// Get a single event by ID with full data.
     pub async fn get_event_by_id(&self, event_id: &str) -> Result<Option<EventRowFull>> {
+        if self.is_d1() {
+            return self.d1_get_event_by_id(event_id).await;
+        }
         let row = sqlx::query_as::<_, EventRowFull>(
             "SELECT id, source, event_type, payload, headers, unique_key, created_at \
              FROM events WHERE id = $1",
         )
         .bind(event_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(self.sqlx_pool())
         .await?;
         Ok(row)
     }
 
     /// List jobs for a specific event.
     pub async fn list_jobs_by_event(&self, event_id: &str) -> Result<Vec<JobRow>> {
+        if self.is_d1() {
+            return self.d1_list_jobs_by_event(event_id).await;
+        }
         let rows = sqlx::query_as::<_, JobRow>(
             "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
              FROM jobs WHERE event_id = $1 ORDER BY created_at",
         )
         .bind(event_id)
-        .fetch_all(&self.pool)
+        .fetch_all(self.sqlx_pool())
         .await?;
         Ok(rows)
     }
 
     /// List attempts for a specific job.
     pub async fn list_job_attempts(&self, job_id: &str) -> Result<Vec<JobAttemptRow>> {
+        if self.is_d1() {
+            return self.d1_list_job_attempts(job_id).await;
+        }
         let rows = sqlx::query_as::<_, JobAttemptRow>(
             "SELECT attempt, status_code, error, duration_ms, created_at \
              FROM job_attempts WHERE job_id = $1 ORDER BY attempt",
         )
         .bind(job_id)
-        .fetch_all(&self.pool)
+        .fetch_all(self.sqlx_pool())
         .await?;
         Ok(rows)
     }
 
     /// List workflow runs for a specific event.
     pub async fn list_workflow_runs_by_event(&self, event_id: &str) -> Result<Vec<WorkflowRunRow>> {
+        if self.is_d1() {
+            return self.d1_list_workflow_runs_by_event(event_id).await;
+        }
         let rows = sqlx::query_as::<_, WorkflowRunRow>(
             "SELECT id, workflow, event_id, status, current_step, created_at, completed_at \
              FROM workflow_runs WHERE event_id = $1 ORDER BY created_at",
         )
         .bind(event_id)
-        .fetch_all(&self.pool)
+        .fetch_all(self.sqlx_pool())
         .await?;
         Ok(rows)
     }
@@ -1734,6 +1974,9 @@ impl Database {
         limit: i32,
         after: Option<&str>,
     ) -> Result<Vec<EventRow>> {
+        if self.is_d1() {
+            return self.d1_list_events_for_api(source, event_type, since, until, limit, after).await;
+        }
         let mut conditions = Vec::new();
         let mut param_idx = 1;
 
@@ -1787,7 +2030,7 @@ impl Database {
         }
         query = query.bind(limit);
 
-        let rows = query.fetch_all(&self.pool).await?;
+        let rows = query.fetch_all(self.sqlx_pool()).await?;
         Ok(rows)
     }
 
@@ -1799,6 +2042,9 @@ impl Database {
         limit: i32,
         after: Option<&str>,
     ) -> Result<Vec<JobRow>> {
+        if self.is_d1() {
+            return self.d1_list_jobs_filtered(status, handler, limit, after).await;
+        }
         let mut conditions = Vec::new();
         let mut param_idx = 1;
 
@@ -1838,7 +2084,7 @@ impl Database {
         }
         query = query.bind(limit);
 
-        let rows = query.fetch_all(&self.pool).await?;
+        let rows = query.fetch_all(self.sqlx_pool()).await?;
         Ok(rows)
     }
 
@@ -1852,6 +2098,9 @@ impl Database {
         description: Option<&str>,
         signing_secret: &str,
     ) -> Result<()> {
+        if self.is_d1() {
+            return self.d1_insert_endpoint(id, source, url, description, signing_secret).await;
+        }
         let now = format_now();
         sqlx::query(
             "INSERT INTO outbound_endpoints (id, source, url, description, signing_secret, status, created_at, updated_at) \
@@ -1863,37 +2112,43 @@ impl Database {
         .bind(description)
         .bind(signing_secret)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
         Ok(())
     }
 
     pub async fn get_endpoint(&self, id: &str) -> Result<Option<EndpointRow>> {
+        if self.is_d1() {
+            return self.d1_get_endpoint(id).await;
+        }
         let row = sqlx::query_as::<_, EndpointRow>(
             "SELECT id, source, url, description, signing_secret, status, created_at, updated_at \
              FROM outbound_endpoints WHERE id = $1",
         )
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(self.sqlx_pool())
         .await?;
         Ok(row)
     }
 
     pub async fn list_endpoints(&self, source: Option<&str>) -> Result<Vec<EndpointRow>> {
+        if self.is_d1() {
+            return self.d1_list_endpoints(source).await;
+        }
         let rows = if let Some(src) = source {
             sqlx::query_as::<_, EndpointRow>(
                 "SELECT id, source, url, description, signing_secret, status, created_at, updated_at \
                  FROM outbound_endpoints WHERE source = $1 ORDER BY created_at",
             )
             .bind(src)
-            .fetch_all(&self.pool)
+            .fetch_all(self.sqlx_pool())
             .await?
         } else {
             sqlx::query_as::<_, EndpointRow>(
                 "SELECT id, source, url, description, signing_secret, status, created_at, updated_at \
                  FROM outbound_endpoints ORDER BY created_at",
             )
-            .fetch_all(&self.pool)
+            .fetch_all(self.sqlx_pool())
             .await?
         };
         Ok(rows)
@@ -1906,6 +2161,9 @@ impl Database {
         description: Option<&str>,
         status: Option<&str>,
     ) -> Result<bool> {
+        if self.is_d1() {
+            return self.d1_update_endpoint(id, url, description, status).await;
+        }
         let now = format_now();
         // Build dynamic update — always update updated_at
         let current = self.get_endpoint(id).await?;
@@ -1924,25 +2182,31 @@ impl Database {
         .bind(new_status)
         .bind(&now)
         .bind(id)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
         Ok(result.rows_affected() > 0)
     }
 
     pub async fn delete_endpoint(&self, id: &str) -> Result<bool> {
+        if self.is_d1() {
+            return self.d1_delete_endpoint(id).await;
+        }
         // Delete subscriptions first
         sqlx::query("DELETE FROM outbound_subscriptions WHERE endpoint_id = $1")
             .bind(id)
-            .execute(&self.pool)
+            .execute(self.sqlx_pool())
             .await?;
         let result = sqlx::query("DELETE FROM outbound_endpoints WHERE id = $1")
             .bind(id)
-            .execute(&self.pool)
+            .execute(self.sqlx_pool())
             .await?;
         Ok(result.rows_affected() > 0)
     }
 
     pub async fn rotate_endpoint_secret(&self, id: &str, new_secret: &str) -> Result<bool> {
+        if self.is_d1() {
+            return self.d1_rotate_endpoint_secret(id, new_secret).await;
+        }
         let now = format_now();
         let result = sqlx::query(
             "UPDATE outbound_endpoints SET signing_secret = $1, updated_at = $2 WHERE id = $3",
@@ -1950,7 +2214,7 @@ impl Database {
         .bind(new_secret)
         .bind(&now)
         .bind(id)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -1962,6 +2226,9 @@ impl Database {
         endpoint_id: &str,
         event_types: &[String],
     ) -> Result<Vec<SubscriptionRow>> {
+        if self.is_d1() {
+            return self.d1_insert_subscriptions(endpoint_id, event_types).await;
+        }
         let now = format_now();
         let mut created = Vec::new();
         for event_type in event_types {
@@ -1975,7 +2242,7 @@ impl Database {
                 .bind(endpoint_id)
                 .bind(event_type)
                 .bind(&now)
-                .execute(&self.pool)
+                .execute(self.sqlx_pool())
                 .await?
             } else {
                 sqlx::query(
@@ -1987,7 +2254,7 @@ impl Database {
                 .bind(endpoint_id)
                 .bind(event_type)
                 .bind(&now)
-                .execute(&self.pool)
+                .execute(self.sqlx_pool())
                 .await?
             };
             if result.rows_affected() > 0 {
@@ -2003,20 +2270,26 @@ impl Database {
     }
 
     pub async fn list_subscriptions(&self, endpoint_id: &str) -> Result<Vec<SubscriptionRow>> {
+        if self.is_d1() {
+            return self.d1_list_subscriptions(endpoint_id).await;
+        }
         let rows = sqlx::query_as::<_, SubscriptionRow>(
             "SELECT id, endpoint_id, event_type, created_at \
              FROM outbound_subscriptions WHERE endpoint_id = $1 ORDER BY created_at",
         )
         .bind(endpoint_id)
-        .fetch_all(&self.pool)
+        .fetch_all(self.sqlx_pool())
         .await?;
         Ok(rows)
     }
 
     pub async fn delete_subscription(&self, id: &str) -> Result<bool> {
+        if self.is_d1() {
+            return self.d1_delete_subscription(id).await;
+        }
         let result = sqlx::query("DELETE FROM outbound_subscriptions WHERE id = $1")
             .bind(id)
-            .execute(&self.pool)
+            .execute(self.sqlx_pool())
             .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -2027,6 +2300,9 @@ impl Database {
         source: &str,
         event_type: &str,
     ) -> Result<Vec<SubscribedEndpoint>> {
+        if self.is_d1() {
+            return self.d1_find_subscribed_endpoints(source, event_type).await;
+        }
         let rows = sqlx::query_as::<_, SubscribedEndpoint>(
             "SELECT DISTINCT e.id, e.url, e.signing_secret \
              FROM outbound_endpoints e \
@@ -2037,7 +2313,7 @@ impl Database {
         )
         .bind(source)
         .bind(event_type)
-        .fetch_all(&self.pool)
+        .fetch_all(self.sqlx_pool())
         .await?;
         Ok(rows)
     }
@@ -2049,11 +2325,14 @@ impl Database {
         &self,
         handler: &str,
     ) -> Result<Vec<(String, i64)>> {
+        if self.is_d1() {
+            return self.d1_count_jobs_by_handler_status(handler).await;
+        }
         let rows: Vec<(String, i64)> = sqlx::query_as(
             "SELECT status, COUNT(*) as cnt FROM jobs WHERE handler = $1 GROUP BY status",
         )
         .bind(handler)
-        .fetch_all(&self.pool)
+        .fetch_all(self.sqlx_pool())
         .await?;
         Ok(rows)
     }
@@ -2065,6 +2344,9 @@ impl Database {
         status: Option<&str>,
         limit: i32,
     ) -> Result<Vec<JobRow>> {
+        if self.is_d1() {
+            return self.d1_list_jobs_by_handler(handler, status, limit).await;
+        }
         let rows = if let Some(status) = status {
             sqlx::query_as::<_, JobRow>(
                 "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
@@ -2073,7 +2355,7 @@ impl Database {
             .bind(handler)
             .bind(status)
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(self.sqlx_pool())
             .await?
         } else {
             sqlx::query_as::<_, JobRow>(
@@ -2082,7 +2364,7 @@ impl Database {
             )
             .bind(handler)
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(self.sqlx_pool())
             .await?
         };
         Ok(rows)
@@ -2090,7 +2372,10 @@ impl Database {
 
     /// Delete all jobs for a specific handler.
     pub async fn delete_jobs_by_handler(&self, handler: &str) -> Result<u64> {
-        let mut tx = self.pool.begin().await?;
+        if self.is_d1() {
+            return self.d1_delete_jobs_by_handler(handler).await;
+        }
+        let mut tx = self.sqlx_pool().begin().await?;
         sqlx::query(
             "DELETE FROM job_attempts WHERE job_id IN (SELECT id FROM jobs WHERE handler = $1)",
         )
@@ -2108,6 +2393,9 @@ impl Database {
 
     /// Retry all dead jobs for a specific handler. Resets attempt counter.
     pub async fn retry_dead_jobs_by_handler(&self, handler: &str) -> Result<u64> {
+        if self.is_d1() {
+            return self.d1_retry_dead_jobs_by_handler(handler).await;
+        }
         let now = format_now();
         let result = sqlx::query(
             "UPDATE jobs SET status = 'available', scheduled_at = $1, last_error = NULL, attempt = 0 \
@@ -2115,30 +2403,36 @@ impl Database {
         )
         .bind(&now)
         .bind(handler)
-        .execute(&self.pool)
+        .execute(self.sqlx_pool())
         .await?;
         Ok(result.rows_affected())
     }
 
     /// Peek at the first available job for a handler without consuming it.
     pub async fn peek_queue_job(&self, handler: &str) -> Result<Option<JobRow>> {
+        if self.is_d1() {
+            return self.d1_peek_queue_job(handler).await;
+        }
         let row = sqlx::query_as::<_, JobRow>(
             "SELECT id, event_id, handler, url, status, attempt, max_attempts, scheduled_at, last_error, created_at \
              FROM jobs WHERE handler = $1 AND status IN ('available', 'retryable') \
              ORDER BY scheduled_at ASC LIMIT 1",
         )
         .bind(handler)
-        .fetch_optional(&self.pool)
+        .fetch_optional(self.sqlx_pool())
         .await?;
         Ok(row)
     }
 
     /// Get signing secret for an outbound endpoint.
     pub async fn get_endpoint_secret(&self, endpoint_id: &str) -> Result<Option<String>> {
+        if self.is_d1() {
+            return self.d1_get_endpoint_secret(endpoint_id).await;
+        }
         let row: Option<(String,)> =
             sqlx::query_as("SELECT signing_secret FROM outbound_endpoints WHERE id = $1")
                 .bind(endpoint_id)
-                .fetch_optional(&self.pool)
+                .fetch_optional(self.sqlx_pool())
                 .await?;
         Ok(row.map(|r| r.0))
     }

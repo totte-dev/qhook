@@ -6,7 +6,7 @@ expression: default_yaml
 # qhook.yaml
 
 database:
-  driver: sqlite  # sqlite (default) / postgres / mysql
+  driver: sqlite  # sqlite (default) / postgres / mysql / d1
   # url: ${DATABASE_URL}
 
 server:

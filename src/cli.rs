@@ -1425,7 +1425,7 @@ impl Args {
                         )
                         .bind(&job_id)
                         .bind(&handler)
-                        .fetch_optional(&db.pool)
+                        .fetch_optional(db.sqlx_pool())
                         .await?;
                         if row.is_none() {
                             anyhow::bail!(

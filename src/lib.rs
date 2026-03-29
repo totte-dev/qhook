@@ -3,6 +3,8 @@ pub mod api;
 pub mod cli;
 pub mod config;
 pub mod cron;
+pub mod d1;
+pub mod d1_db;
 pub mod db;
 pub mod metrics;
 pub mod queue;

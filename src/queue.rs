@@ -247,7 +247,7 @@ impl Worker {
                     }
                 }
                 _ = poll_ticker.tick() => {
-                    let is_postgres = self.db.driver == "postgres";
+                    let is_postgres = self.db.driver == "postgres" && !self.db.is_d1();
                     let batch = self.worker_config.batch_size.min(
                         semaphore.available_permits() as i32
                     ).max(1);
@@ -2379,7 +2379,7 @@ async fn deliver_outbound(
     let event_type: Option<String> =
         sqlx::query_as::<_, (String,)>("SELECT event_type FROM events WHERE id = $1")
             .bind(&job.event_id)
-            .fetch_optional(&db.pool)
+            .fetch_optional(db.sqlx_pool())
             .await?
             .map(|r| r.0);
 

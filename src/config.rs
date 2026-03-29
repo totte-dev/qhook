@@ -255,6 +255,15 @@ pub struct DatabaseConfig {
     pub url: Option<String>,
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+    /// D1 Cloudflare account ID (required when driver = "d1" with API mode).
+    pub account_id: Option<String>,
+    /// D1 database ID (required when driver = "d1" with API mode).
+    pub database_id: Option<String>,
+    /// D1 API token (required when driver = "d1" with API mode).
+    pub api_token: Option<String>,
+    /// D1 proxy endpoint URL (for Cloudflare Containers / Outbound Workers).
+    /// When set, D1 uses proxy mode instead of the Cloudflare REST API.
+    pub d1_endpoint: Option<String>,
 }
 
 impl Default for DatabaseConfig {
@@ -263,6 +272,10 @@ impl Default for DatabaseConfig {
             driver: "sqlite".into(),
             url: None,
             max_connections: default_max_connections(),
+            account_id: None,
+            database_id: None,
+            api_token: None,
+            d1_endpoint: None,
         }
     }
 }
@@ -998,7 +1011,7 @@ impl Config {
 
         // Validate database driver
         match self.database.driver.as_str() {
-            "sqlite" | "postgres" | "mysql" => {}
+            "sqlite" | "postgres" | "mysql" | "d1" => {}
             other => anyhow::bail!("unsupported database driver '{}'", other),
         }
 
@@ -1010,7 +1023,7 @@ impl Config {
 # qhook.yaml
 
 database:
-  driver: sqlite  # sqlite (default) / postgres / mysql
+  driver: sqlite  # sqlite (default) / postgres / mysql / d1
   # url: ${DATABASE_URL}
 
 server:

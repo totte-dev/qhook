@@ -11,7 +11,7 @@
       "properties": {
         "driver": {
           "type": "string",
-          "enum": ["sqlite", "postgres"],
+          "enum": ["sqlite", "postgres", "mysql", "d1"],
           "default": "sqlite",
           "description": "Database driver."
         },
@@ -24,6 +24,22 @@
           "default": 10,
           "minimum": 1,
           "description": "Maximum connection pool size."
+        },
+        "account_id": {
+          "type": "string",
+          "description": "Cloudflare account ID (required for D1 API mode)."
+        },
+        "database_id": {
+          "type": "string",
+          "description": "D1 database ID (required for D1 API mode)."
+        },
+        "api_token": {
+          "type": "string",
+          "description": "Cloudflare API token (required for D1 API mode)."
+        },
+        "d1_endpoint": {
+          "type": "string",
+          "description": "D1 proxy endpoint URL for Cloudflare Containers (alternative to API mode)."
         }
       },
       "additionalProperties": false

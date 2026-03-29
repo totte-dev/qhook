@@ -51,9 +51,14 @@ handlers:
 
 ```yaml
 database:
-  driver: sqlite                    # sqlite (default), postgres, or mysql
+  driver: sqlite                    # sqlite (default), postgres, mysql, or d1
   # url: ${DATABASE_URL}            # required for postgres/mysql
   max_connections: 10               # DB pool size (default: 10)
+  # --- Cloudflare D1 settings (when driver: d1) ---
+  # account_id: ${CF_ACCOUNT_ID}    # Cloudflare account ID (API mode)
+  # database_id: ${CF_D1_DB_ID}     # D1 database ID (API mode)
+  # api_token: ${CF_API_TOKEN}      # Cloudflare API token (API mode)
+  # d1_endpoint: http://d1.local    # Proxy endpoint (Containers mode, alternative to API mode)
 
 server:
   port: 8888                        # listen port (default: 8888)
@@ -167,9 +172,13 @@ workflows:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `driver` | string | `sqlite` | Database driver: `sqlite`, `postgres`, or `mysql` |
+| `driver` | string | `sqlite` | Database driver: `sqlite`, `postgres`, `mysql`, or `d1` |
 | `url` | string | - | Connection string. Required for postgres/mysql. For sqlite, defaults to `./qhook.db` |
 | `max_connections` | integer | `10` | Connection pool size |
+| `account_id` | string | - | Cloudflare account ID. Required for D1 API mode |
+| `database_id` | string | - | D1 database ID. Required for D1 API mode |
+| `api_token` | string | - | Cloudflare API token. Required for D1 API mode |
+| `d1_endpoint` | string | - | D1 proxy endpoint URL. When set, uses proxy mode instead of Cloudflare REST API (for Cloudflare Containers) |
 
 ### server
 
