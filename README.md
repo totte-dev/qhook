@@ -114,6 +114,12 @@ docker pull ghcr.io/totte-dev/qhook    # Docker image (~16 MB)
 
 **[totte-dev.github.io/qhook](https://totte-dev.github.io/qhook/)** — Getting started, configuration, deployment guides, and more.
 
+## Development
+
+This project is developed by a solo engineer with AI pair programming (Claude Code). All code is reviewed, tested (400+ tests), and the architecture decisions are human-driven. AI accelerates implementation; design and quality ownership remain with the maintainer.
+
+Skeptical? The entire codebase is open — read it yourself or let an AI review it for you.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
