@@ -473,17 +473,13 @@ Self-hosting qhook replaces paid webhook and workflow services. Here's what the 
 | **Webhook verification** | 13 providers | N/A (sending side) | Limited | Limited |
 | **Workflow engine** | Built-in (YAML) | No | No | No |
 | **Retry + DLQ** | Built-in | Built-in | Built-in | Built-in |
-| **Pricing (Cloud)** | Free / $19 / $49 | Free / $10 / $490 | Free / $15~ | Free (self-host) / $99~ |
-| **Predictable cost** | Fixed tiers | Overage after limit | Per-event overage | Fixed tiers |
-| **Runtime** | Cloudflare Workers | AWS/GCP | AWS | AWS/GCP |
-| **Egress cost** | $0 (Cloudflare) | Standard | Standard | Standard |
+| **Self-host cost** | Free (single binary) | Free (Docker Compose) | Free (Docker) | Free (Docker Compose) |
 
 ### Key takeaways
 
-- **Price gap**: qhook's $19 Starter and $49 Pro fill the gap between Svix $10 (limited) and $490 (enterprise), and sit below Convoy's $99 cloud minimum.
 - **Pull mode is unique**: Every competitor is push-only. qhook is the only gateway with built-in pull delivery — consumers poll when ready, no public endpoint needed, no timeout pressure. Push and Pull work side-by-side in the same config.
 - **Workflow engine included**: qhook is the only option with a built-in multi-step workflow engine (branching, parallelism, rollback) — no need for a separate orchestrator.
-- **Zero egress**: Cloudflare Workers have no egress charges, unlike AWS/GCP-hosted competitors.
+- **Simplest self-hosting**: qhook is a single binary with no external dependencies (no Redis, no message broker). Competitors require Docker Compose with multiple services.
 
 ---
 
