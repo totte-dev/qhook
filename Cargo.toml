@@ -74,7 +74,6 @@ ipnet = "2"
 jsonschema = "0.45"
 governor = "0.10"
 anyhow = "1"
-thiserror = "2"
 croner = "3.0.1"
 
 [dev-dependencies]
