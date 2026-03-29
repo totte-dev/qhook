@@ -1,6 +1,6 @@
 # qhook
 
-**Lightweight event gateway with Push and Pull delivery, built-in retry, and workflow engine.** Verify, enqueue, ACK — then deliver via HTTP push or let your app pull when ready. Single binary, zero infrastructure.
+**Lightweight webhook gateway in a single binary.** Replace your webhook infrastructure — signature verification, queue, retry, DLQ — with one 16 MB binary. Zero external dependencies, at-least-once delivery.
 
 <!-- badges -->
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
@@ -10,6 +10,13 @@
 **[Documentation](https://totte-dev.github.io/qhook/)** | **[Examples](./examples/)** | **[Why qhook?](https://totte-dev.github.io/qhook/why-qhook)**
 
 ---
+
+## Built For
+
+- **You got your 3rd Stripe webhook timeout this week.** qhook ACKs in < 500ms, queues the event, and delivers with retry. Your webhook source never times out again.
+- **Your checkout handler crashed and the event is gone.** qhook persists every event before responding. At-least-once delivery with DLQ means nothing is silently lost.
+- **You need webhook → build → deploy → rollback, not just webhook → handler.** qhook has a built-in workflow engine. Same YAML, same binary.
+- **You don't want to run Redis + RabbitMQ + a custom worker just to receive webhooks.** qhook is a single 16 MB binary. `cargo install qhook && qhook start`.
 
 ## What qhook Does
 
@@ -175,18 +182,26 @@ cargo build --release
 
 ```bash
 qhook start                        # Start server
+qhook status                       # Overview: events, jobs, queues, handlers at a glance
 qhook init                         # Generate default config
-qhook validate                     # Validate config
+qhook validate                     # Validate config (warns about missing auth)
+qhook tail                         # Stream events and jobs in real time
+qhook inspect <EVENT_ID>           # Full lifecycle of an event
+
 qhook jobs list --status dead      # List dead-letter jobs
 qhook jobs retry                   # Retry all dead jobs
-qhook start --env production       # Config overlay (merges qhook.production.yaml)
-qhook tail                         # Stream events and jobs in real time
-qhook export events > events.jsonl   # Export events as JSONL
-qhook replay-local events.jsonl      # Replay exported events to a running server
-qhook events list                    # List received events
+qhook events list                  # List received events
 qhook events replay --source stripe  # Replay events for matching handlers
-qhook workflow-runs list           # List workflow runs
-qhook workflow-runs redrive <ID>   # Redrive a failed workflow
+qhook queues list                  # Queue depths and status
+qhook queues dlq billing           # Dead-letter messages in a queue
+qhook queues retry billing         # Retry all dead messages
+
+qhook start --env production       # Config overlay (merges qhook.production.yaml)
+qhook export events > events.jsonl # Export as JSONL
+qhook replay-local events.jsonl    # Replay exported events
+
+# Remote mode: manage a deployed instance from your laptop
+qhook status --remote https://qhook.example.com --token $TOKEN
 ```
 
 > See the [CLI Reference](https://totte-dev.github.io/qhook/cli) for all commands.
@@ -213,7 +228,7 @@ curl http://localhost:8888/api/events/01J... -H "Authorization: Bearer $TOKEN"
 curl http://localhost:8888/api/jobs/01J...?include_attempts=true -H "Authorization: Bearer $TOKEN"
 ```
 
-Any frontend — Backstage, Retool, or custom dashboards — can consume this API.
+The management API powers the CLI and can be consumed by any frontend (Backstage, Retool, or custom dashboards).
 
 ## Documentation
 
@@ -246,6 +261,7 @@ Full documentation at **[totte-dev.github.io/qhook](https://totte-dev.github.io/
 | [workflow](./examples/workflow/) | Multi-step pipeline with catch routing |
 | [tenant-provision](./examples/tenant-provision/) | Tenant provisioning with rollback and auth headers |
 | [outbound-webhook](./examples/outbound-webhook/) | Send webhooks to customers with Standard Webhooks signatures |
+| [stripe-pull](./examples/stripe-pull/) | Stripe events consumed via pull-mode queue (Python + TypeScript) |
 | [alert-remediation](./examples/alert-remediation/) | PagerDuty alert → triage → remediate → escalate |
 
 ## MCP Server
