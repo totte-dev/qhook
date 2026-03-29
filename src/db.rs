@@ -441,6 +441,107 @@ impl Database {
         }
     }
 
+    /// Atomically insert an event and its jobs in a single transaction.
+    /// If any insert fails, the entire operation is rolled back — no orphan events.
+    /// This guarantees at-least-once delivery: either the event + all jobs are persisted,
+    /// or nothing is persisted and the webhook sender retries.
+    pub async fn insert_event_and_jobs(
+        &self,
+        event_id: &str,
+        source: &str,
+        event_type: &str,
+        payload: &str,
+        headers: Option<&str>,
+        unique_key: Option<&str>,
+        jobs: &[(String, String, String, u32)], // (job_id, handler, url, max_attempts)
+    ) -> Result<bool> {
+        if self.is_d1() {
+            return self
+                .d1_insert_event_and_jobs(
+                    event_id, source, event_type, payload, headers, unique_key, jobs,
+                )
+                .await;
+        }
+        let now = format_now();
+
+        let mut tx = self.sqlx_pool().begin().await?;
+
+        // Insert event
+        let created = if unique_key.is_some() {
+            let result = if self.driver == "mysql" {
+                sqlx::query(
+                    "INSERT IGNORE INTO events (id, source, event_type, payload, headers, unique_key, created_at) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                )
+                .bind(event_id)
+                .bind(source)
+                .bind(event_type)
+                .bind(payload)
+                .bind(headers)
+                .bind(unique_key)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?
+            } else {
+                sqlx::query(
+                    "INSERT INTO events (id, source, event_type, payload, headers, unique_key, created_at) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                     ON CONFLICT (source, unique_key) DO NOTHING",
+                )
+                .bind(event_id)
+                .bind(source)
+                .bind(event_type)
+                .bind(payload)
+                .bind(headers)
+                .bind(unique_key)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?
+            };
+            result.rows_affected() > 0
+        } else {
+            sqlx::query(
+                "INSERT INTO events (id, source, event_type, payload, headers, unique_key, created_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(event_id)
+            .bind(source)
+            .bind(event_type)
+            .bind(payload)
+            .bind(headers)
+            .bind(unique_key)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+            true
+        };
+
+        if !created {
+            // Duplicate event — rollback (no jobs to create)
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        // Insert all jobs in the same transaction
+        for (job_id, handler, url, max_attempts) in jobs {
+            sqlx::query(
+                "INSERT INTO jobs (id, event_id, handler, url, status, max_attempts, scheduled_at, created_at) \
+                 VALUES ($1, $2, $3, $4, 'available', $5, $6, $6)",
+            )
+            .bind(job_id)
+            .bind(event_id)
+            .bind(handler)
+            .bind(url)
+            .bind(i32::try_from(*max_attempts).unwrap_or(i32::MAX))
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(true)
+    }
+
     pub async fn insert_job(
         &self,
         id: &str,

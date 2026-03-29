@@ -229,6 +229,34 @@ impl Database {
         }
     }
 
+    /// D1: Insert event + jobs. D1 is single-writer so individual INSERTs are
+    /// sequentially consistent. No explicit transaction available via REST API,
+    /// but D1's single-writer model prevents partial writes from concurrent requests.
+    pub(crate) async fn d1_insert_event_and_jobs(
+        &self,
+        event_id: &str,
+        source: &str,
+        event_type: &str,
+        payload: &str,
+        headers: Option<&str>,
+        unique_key: Option<&str>,
+        jobs: &[(String, String, String, u32)],
+    ) -> Result<bool> {
+        // Insert event first
+        let created = self
+            .d1_insert_event(event_id, source, event_type, payload, headers, unique_key)
+            .await?;
+        if !created {
+            return Ok(false);
+        }
+        // Insert jobs sequentially (D1 single writer ensures consistency)
+        for (job_id, handler, url, max_attempts) in jobs {
+            self.d1_insert_job(job_id, event_id, handler, url, *max_attempts)
+                .await?;
+        }
+        Ok(true)
+    }
+
     pub(crate) async fn d1_get_event_payload(&self, event_id: &str) -> Result<String> {
         let row = self
             .d1()

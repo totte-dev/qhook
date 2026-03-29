@@ -960,16 +960,57 @@ async fn process_event(
     // Serialize relevant headers
     let headers_json = serialize_headers(headers);
 
-    // Insert event
+    // ── Collect all jobs to create (handler + queue) ──
+    // These are inserted atomically with the event in a single transaction.
+    let mut jobs_to_create: Vec<(String, String, String, u32)> = Vec::new();
+
+    // Handler jobs
+    for (handler_name, handler) in &matching_handlers {
+        if let Some(ref filter) = handler.filter {
+            if !evaluate_filter(payload, filter) {
+                tracing::debug!(handler = *handler_name, filter, "Event filtered out");
+                continue;
+            }
+        }
+        let job_id = ulid::Ulid::new().to_string();
+        let max_attempts = handler
+            .retry
+            .as_ref()
+            .map(|r| r.max)
+            .unwrap_or(state.config.delivery.default_retry.max);
+        jobs_to_create.push((job_id, handler_name.to_string(), handler.url.clone(), max_attempts));
+    }
+
+    // Queue jobs (pull-mode)
+    for (queue_name, queue) in &matching_queues {
+        if let Some(ref filter) = queue.filter {
+            if !evaluate_filter(payload, filter) {
+                tracing::debug!(queue = *queue_name, filter, "Event filtered out by queue");
+                continue;
+            }
+        }
+        let job_id = ulid::Ulid::new().to_string();
+        let handler_name = format!("queue/{}", queue_name);
+        let max_attempts = queue
+            .max_attempts
+            .unwrap_or(state.config.delivery.default_retry.max);
+        jobs_to_create.push((job_id, handler_name, "_pull".to_string(), max_attempts));
+    }
+
+    // ── Atomic insert: event + all jobs in one transaction ──
+    // If the process crashes mid-transaction, the DB rolls back everything.
+    // The webhook sender sees a connection drop, retries, and the event + jobs
+    // are created atomically on the retry. This guarantees at-least-once delivery.
     let created = state
         .db
-        .insert_event(
+        .insert_event_and_jobs(
             &event_id,
             source,
             event_type,
             payload,
             Some(&headers_json),
             unique_key.as_deref(),
+            &jobs_to_create,
         )
         .await?;
 
@@ -985,42 +1026,15 @@ async fn process_event(
         });
     }
 
-    let mut jobs_created: u32 = 0;
-
-    // Create jobs for each matching handler (apply filter if configured)
-    for (handler_name, handler) in &matching_handlers {
-        // Apply JSONPath filter — skip job creation if filter doesn't match
-        if let Some(ref filter) = handler.filter {
-            if !evaluate_filter(payload, filter) {
-                tracing::debug!(handler = *handler_name, filter, "Event filtered out");
-                continue;
-            }
-        }
-
-        let job_id = ulid::Ulid::new().to_string();
-        let max_attempts = handler
-            .retry
-            .as_ref()
-            .map(|r| r.max)
-            .unwrap_or(state.config.delivery.default_retry.max);
-
-        state
-            .db
-            .insert_job(&job_id, &event_id, handler_name, &handler.url, max_attempts)
-            .await?;
-
-        jobs_created += 1;
+    let mut jobs_created = jobs_to_create.len() as u32;
+    for (job_id, handler, _, _) in &jobs_to_create {
         state.metrics.inc_jobs_created();
-        tracing::info!(
-            event_id,
-            job_id,
-            handler = *handler_name,
-            event_type,
-            "Job created"
-        );
+        tracing::info!(event_id, job_id, handler, event_type, "Job created");
     }
 
-    // Create jobs for outbound endpoints (dynamically registered via API)
+    // ── Outbound jobs (DB-dependent, outside main transaction) ──
+    // Outbound endpoints come from DB queries, so they can't be pre-collected.
+    // These are best-effort: if they fail, the event is still persisted.
     if is_outbound {
         match state.db.find_subscribed_endpoints(source, event_type).await {
             Ok(endpoints) => {
@@ -1054,37 +1068,6 @@ async fn process_event(
                 tracing::error!(error = %e, source, "Failed to find subscribed endpoints");
             }
         }
-    }
-
-    // Create jobs for matching queues (pull-mode delivery)
-    for (queue_name, queue) in &matching_queues {
-        if let Some(ref filter) = queue.filter {
-            if !evaluate_filter(payload, filter) {
-                tracing::debug!(queue = *queue_name, filter, "Event filtered out by queue");
-                continue;
-            }
-        }
-
-        let job_id = ulid::Ulid::new().to_string();
-        let handler_name = format!("queue/{}", queue_name);
-        let max_attempts = queue
-            .max_attempts
-            .unwrap_or(state.config.delivery.default_retry.max);
-
-        state
-            .db
-            .insert_job(&job_id, &event_id, &handler_name, "_pull", max_attempts)
-            .await?;
-
-        jobs_created += 1;
-        state.metrics.inc_jobs_created();
-        tracing::info!(
-            event_id,
-            job_id,
-            queue = *queue_name,
-            event_type,
-            "Queue job created"
-        );
     }
 
     // Start matching workflows
