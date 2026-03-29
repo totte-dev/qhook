@@ -1357,22 +1357,25 @@ impl Database {
             .await?;
             Ok(row)
         } else {
-            // SQLite: single writer guarantees atomicity.
-            // MySQL: no RETURNING clause, so use UPDATE + SELECT.
-            // For MySQL, callers should use appropriate locking at the application level.
+            // SQLite/MySQL: wrap UPDATE + SELECT in a transaction to ensure they
+            // run on the same connection and see consistent state. Without this,
+            // two concurrent branch completions could both read the same count
+            // and both attempt to advance the workflow (duplicate step execution).
+            let mut tx = self.sqlx_pool().begin().await?;
             sqlx::query(
                 "UPDATE workflow_runs SET parallel_completed = parallel_completed + 1 WHERE id = $1",
             )
             .bind(run_id)
-            .execute(self.sqlx_pool())
+            .execute(&mut *tx)
             .await?;
 
             let row: (i32, i32) = sqlx::query_as(
                 "SELECT parallel_completed, parallel_count FROM workflow_runs WHERE id = $1",
             )
             .bind(run_id)
-            .fetch_one(self.sqlx_pool())
+            .fetch_one(&mut *tx)
             .await?;
+            tx.commit().await?;
             Ok(row)
         }
     }
