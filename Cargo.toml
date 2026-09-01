@@ -74,7 +74,7 @@ ipnet = "2"
 jsonschema = "0.45"
 governor = "0.10"
 anyhow = "1"
-croner = "3.0.1"
+croner = "4.0.0"
 rand = "0.9"
 
 [dev-dependencies]
