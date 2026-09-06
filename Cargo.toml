@@ -36,10 +36,10 @@ exclude = [
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "net", "time"] }
 reqwest = { version = "0.13", features = ["json"] }
-tower-http = { version = "0.6", features = ["trace", "limit", "compression-gzip"] }
+tower-http = { version = "0.7", features = ["trace", "limit", "compression-gzip"] }
 
 # DB
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "chrono"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "postgres", "chrono"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -47,13 +47,13 @@ serde_json = "1"
 serde_yaml_ng = "0.10"
 
 # Crypto
-hmac = "0.12"
-sha2 = { version = "0.10", features = ["oid"] }
+hmac = "0.13"
+sha2 = { version = "0.11", features = ["oid"] }
 hex = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 subtle = "2"
 rsa = "0.9"
-sha1 = { version = "0.10", features = ["oid"] }
+sha1 = { version = "0.11", features = ["oid"] }
 pkcs1 = "0.7"
 x509-parser = "0.18"
 
@@ -65,17 +65,17 @@ ulid = "1"
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
-opentelemetry = { version = "0.31", optional = true }
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.31", features = ["http-json"], optional = true }
-tracing-opentelemetry = { version = "0.32", optional = true }
+opentelemetry = { version = "0.32", optional = true }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.32", features = ["http-json"], optional = true }
+tracing-opentelemetry = { version = "0.33", optional = true }
 regex-lite = "0.1"
 ipnet = "2"
-jsonschema = "0.45"
+jsonschema = "0.54"
 governor = "0.10"
 anyhow = "1"
 croner = "3.0.1"
-rand = "0.9"
+rand = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process"] }
@@ -84,8 +84,8 @@ serde_json = "1"
 serde_yaml_ng = "0.10"
 axum = "0.8"
 wiremock = "0.6"
-hmac = "0.12"
-sha2 = "0.10"
+hmac = "0.13"
+sha2 = "0.11"
 hex = "0.4"
 ulid = "1"
 proptest = "1"
